@@ -1,0 +1,5 @@
+filename,final_depth,swap_count,runtime
+adder_n28__42CYC.json,341,178,0.7638330459594727
+knn_n31__18CYC.json,247,144,0.5209105014801025
+qugan_n71__72CYC.json,989,499,3.9519577026367188
+swap_test_n41__23CYC.json,323,166,0.974736213684082
