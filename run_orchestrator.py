@@ -1,5 +1,4 @@
-from orchestrator import Orchestrator
-import json
+from orchestrator import OrchestratorV2
 import os
 from rich.console import Console
 from rich.panel import Panel
@@ -11,75 +10,58 @@ custom_theme = Theme({
     "warning": "yellow",
     "error": "bold red",
     "success": "bold green",
-    "trial": "bold magenta"
+    "trial": "bold magenta",
 })
 console = Console(theme=custom_theme)
+CLI_COMMAND = ["claude", "--model", "claude-sonnet-4-6", "-p", "--output-format", "text"]
+#CLI_COMMAND = ["gemini", "-m", "gemini-2.5-flash"]
+#CLI_COMMAND = ["npx", "gemini", "-m", "gemini-3-flash-preview"]  # Updated to Gemini 3 Flash
+#CLI_COMMAND = ["npx", "gemini", "-m", "gemini-3-pro-preview"]  # Updated to Gemini 3 Pro Preview
 
-#CLI_COMMAND = ["claude", "-p", "--output-format", "text"]
-CLI_COMMAND = ["gemini", "-m", "gemini-3-flash-preview"]
-MAX_TRIALS = 10
-HISTORY_FILE = "experiment_history.json"
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/qasmbench-large"
+BENCHMARK_DIR = "benchmarks/qasmbench-large/"
+HISTORY_FILE = "experiment_history.json"
 
-orchestrator = Orchestrator(CLI_COMMAND, MAX_TRIALS, HISTORY_FILE, BACKEND, BENCHMARK_DIR)
+# Stage control
+RUN_STAGE1_LITERATURE_REVIEW = False 
+# Stage II parameters
+MAX_IDEA_GEN_ROUNDS = 3       
+TARGET_TOP_IDEAS = 5           
+MIN_SCORE_THRESHOLD = 6   
 
-console.print(Rule(style="bold white"))
-console.print("[bold white on blue]  HYPER-HEURISTIC SEARCH ENGINE  [/bold white on blue]", justify="center")
-console.print(Rule(style="bold white"))
+# Stage IV parameters
+TIMEOUT_SECONDS = 300     
 
-try:
-    with open("context_api.txt", "r") as f: context_api = f.read()
-except:
-    console.print("[error]Error: context_api.txt missing.[/error]")
+TOP_IDEAS_TO_IMPLEMENT = 3   
+# ----------------------------------------------------------------
+# Validation
+# ----------------------------------------------------------------
+if not os.path.exists("context_api.txt"):
+    console.print("[error]Error: context_api.txt is missing.[/error]")
+    exit(1)
 
-history = [] 
+if not os.path.exists(BENCHMARK_DIR):
+    console.print(f"[error]Error: Benchmark directory '{BENCHMARK_DIR}' does not exist.[/error]")
+    exit(1)
 
-for i in range(1, MAX_TRIALS + 1):
-    console.print(f"\n[trial]Trial {i} of {MAX_TRIALS}[/trial]")
-    
-    prompt = orchestrator.construct_prompt(context_api, history)
-    response = orchestrator.query_claude(prompt)
-    
-    if not response:
-        console.print("[error]No response from LLM. Skipping...[/error]")
-        continue
+# ----------------------------------------------------------------
+# Initialize
+# ----------------------------------------------------------------
+orchestrator = OrchestratorV2(
+    cli_command=CLI_COMMAND,
+    backend=BACKEND,
+    benchmark_dir=BENCHMARK_DIR,
+    history_file=HISTORY_FILE,
+    use_conversation_mode=True,
+    send_context_api=False,
+    show_token_counter=True,
+    max_idea_gen_rounds=MAX_IDEA_GEN_ROUNDS,
+    target_top_ideas=TARGET_TOP_IDEAS,
+    min_score_threshold=MIN_SCORE_THRESHOLD,
+    run_stage1_literature_review=RUN_STAGE1_LITERATURE_REVIEW,
+    top_ideas_to_implement=TOP_IDEAS_TO_IMPLEMENT,
+    timeout_seconds=TIMEOUT_SECONDS
+)
 
-    strategy, intuition, code = orchestrator.parse_response(response)
-    if not code:
-        console.print("[error]Parse failed: No code block found.[/error]")
-        continue
-        
-    # Pretty display of the proposed strategy
-    console.print(Panel(f"[bold green]Idea:[/bold green] {strategy}\n[italic]{intuition}[/italic]", 
-                        title="LLM Proposal", border_style="green"))
-    
-    stats = orchestrator.inject_and_run(code)
-    
-    if stats['error']:
-        console.print(f"   [bold red]✘ FAIL:[/bold red] {stats['error']}")
-        status = "Crashed"
-        swaps = float('inf')
-        depth = float('inf')
-    else:
-        # Success output
-        summary = (f"[success]✔ SUCCESS[/success]\n"
-                   f"Avg Swaps: [bold]{stats['mean_swaps']:.2f}[/bold]\n"
-                   f"Avg Depth: [bold]{stats['mean_depth']:.2f}[/bold]")
-        console.print(summary)
-        
-        status = "Success"
-        swaps = stats['mean_swaps']
-        depth = stats['mean_depth']
-        
-        filename = f"heuristics/idea_{i}_{strategy.replace(' ', '_')}.py"
-        os.makedirs("heuristics", exist_ok=True)
-        with open(filename, "w") as f:
-            f.write(f"# Strategy: {strategy}\n# Intuition: {intuition}\n# Stats: {stats}\n\n{code}")
 
-    history.append({"strategy": strategy, "swaps": swaps, "depth" : depth, "status": status})
-    
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(history, f, indent=2)
-
-console.print(Rule("Search Complete", style="bold white"))
+orchestrator.run_full_pipeline()

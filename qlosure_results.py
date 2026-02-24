@@ -9,9 +9,9 @@ import csv
 import os
 
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/qasmbench-large"
+BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-16qbt"
 OUTPUT_DIR = "/home/jmsb00nd/Documents/auto-heuristics/autoheuristics_results"
-OUTPUT_CSV = os.path.join(OUTPUT_DIR, "qasmbench-large_ibm_sherbrooke_trivial.csv")
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, "queko-bss-16qbt_ibm_sherbrooke_trivial.csv")
 
 edges = load_backend_edges(BACKEND)
 circuit_files = list(Path(BENCHMARK_DIR).glob("*.json"))
@@ -36,7 +36,7 @@ with open(OUTPUT_CSV, mode='w', newline='') as file:
             
             start_time = time.time()
                             
-            min_swaps, min_depth, _ = router.run(heuristic_method="Qlosure")
+            min_swaps, min_depth, _ = router.run(heuristic_method="Qlosure", initial_mapping_method="trivial")
                     
             end_time = time.time()
             runtime = end_time - start_time

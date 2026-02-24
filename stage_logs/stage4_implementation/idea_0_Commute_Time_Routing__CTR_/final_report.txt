@@ -1,0 +1,110 @@
+
+# Implementation Report
+# Generated: 20260224_114546
+
+## Idea: Commute Time Routing (CTR)
+## Description: Replace the hop-count distance matrix with the **commute time** between physical qubits, derived from the Moore–Penrose pseudoinverse of the coupling graph's Laplacian. Commute time encodes the full random-walk structure of the coupling graph: two nodes close in commute time have many short, diverse paths between them, meaning SWAPs can be routed with high flexibility. This is precomputed once and replaces `distance_matrix` entirely.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: SUCCESS
+- Mean Swaps: 822.1818181818181
+- Mean Depth: 1167.2727272727273
+- Error: None
+
+## Best Result
+- Iteration: 1
+- Mean Swaps: 822.1818181818181
+- Mean Depth: 1167.2727272727273
+
+## Best Code:
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    import numpy as np
+
+    # ------------------------------------------------------------------ #
+    # Precompute commute-time matrix from the Laplacian pseudoinverse.    #
+    # Done once and cached on self; subsequent calls reuse _ct_matrix.    #
+    # Commute time: CT(i,j) = vol * (L†_ii + L†_jj - 2·L†_ij)           #
+    # where L† is the Moore-Penrose pseudoinverse of the graph Laplacian  #
+    # and vol = |E| (number of undirected edges in the coupling graph).   #
+    # CT encodes path diversity: low CT ⟹ many short, diverse routes.    #
+    # ------------------------------------------------------------------ #
+    if not hasattr(self, '_ct_matrix'):
+        n = self.num_qubits
+
+        # Build adjacency matrix from hardware coupling graph
+        A = np.zeros((n, n), dtype=float)
+        for u, neighbors in self.backend.items():
+            for v in neighbors:
+                A[u, v] = 1.0
+
+        # Laplacian L = D − A
+        D = np.diag(A.sum(axis=1))
+        L = D - A
+
+        # Moore-Penrose pseudoinverse of the Laplacian
+        L_pinv = np.linalg.pinv(L)
+
+        # Graph volume = number of undirected edges
+        vol = A.sum() / 2.0
+        if vol == 0:
+            vol = 1.0  # guard against degenerate topologies
+
+        # Commute-time matrix via effective resistance
+        # CT[i,j] = vol * (L†_ii + L†_jj - 2·L†_ij)
+        diag = np.diag(L_pinv)                                   # shape (n,)
+        CT = vol * (diag[:, None] + diag[None, :] - 2.0 * L_pinv)
+
+        # Clip numerical noise (diagonal and tiny negatives → 0)
+        np.fill_diagonal(CT, 0.0)
+        CT = np.maximum(CT, 0.0)
+
+        self._ct_matrix = CT
+
+    CT = self._ct_matrix
+
+    # ------------------------------------------------------------------ #
+    # Cost accumulation using commute-time distances                      #
+    # ------------------------------------------------------------------ #
+    W = 1.0
+    front_layer_size  = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    # Front-layer term: weight by gate criticality
+    f_cost = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+        f_cost += (deps + 1) * CT[Q1, Q2]
+
+    # Extended-layer term: discount by lookahead depth and criticality
+    e_cost = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+        depth_factor = self.extended_layer_index.get(g, 0) + 1
+        deps = self.dag_dependencies_count[g]
+        e_cost += (deps + 1) * CT[Q1, Q2] / depth_factor
+
+    H = max_decay * (
+        f_cost / front_layer_size
+        + W * (e_cost / extended_layer_size if extended_layer_size else 0.0)
+    )
+
+    return H
+```
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 1
+- Failed: 0

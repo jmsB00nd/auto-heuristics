@@ -1,0 +1,64 @@
+{
+  "Commute Time Routing (CTR)": [
+    {
+      "iteration": 1,
+      "idea_name": "Commute Time Routing (CTR)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    import numpy as np\n\n    # ------------------------------------------------------------------ #\n    # Precompute commute-time matrix from the Laplacian pseudoinverse.    #\n    # Done once and cached on self; subsequent calls reuse _ct_matrix.    #\n    # Commute time: CT(i,j) = vol * (L\u2020_ii + L\u2020_jj - 2\u00b7L\u2020_ij)           #\n    # where L\u2020 is the Moore-Penrose pseudoinverse of the graph Laplacian  #\n    # and vol = |E| (number of undirected edges in the coupling graph).   #\n    # CT encodes path diversity: low CT \u27f9 many short, diverse routes.    #\n    # ------------------------------------------------------------------ #\n    if not hasattr(self, '_ct_matrix'):\n        n = self.num_qubits\n\n        # Build adjacency matrix from hardware coupling graph\n        A = np.zeros((n, n), dtype=float)\n        for u, neighbors in self.backend.items():\n            for v in neighbors:\n                A[u, v] = 1.0\n\n        # Laplacian L = D \u2212 A\n        D = np.diag(A.sum(axis=1))\n        L = D - A\n\n        # Moore-Penrose pseudoinverse of the Laplacian\n        L_pinv = np.linalg.pinv(L)\n\n        # Graph volume = number of undirected edges\n        vol = A.sum() / 2.0\n        if vol == 0:\n            vol = 1.0  # guard against degenerate topologies\n\n        # Commute-time matrix via effective resistance\n        # CT[i,j] = vol * (L\u2020_ii + L\u2020_jj - 2\u00b7L\u2020_ij)\n        diag = np.diag(L_pinv)                                   # shape (n,)\n        CT = vol * (diag[:, None] + diag[None, :] - 2.0 * L_pinv)\n\n        # Clip numerical noise (diagonal and tiny negatives \u2192 0)\n        np.fill_diagonal(CT, 0.0)\n        CT = np.maximum(CT, 0.0)\n\n        self._ct_matrix = CT\n\n    CT = self._ct_matrix\n\n    # ------------------------------------------------------------------ #\n    # Cost accumulation using commute-time distances                      #\n    # ------------------------------------------------------------------ #\n    W = 1.0\n    front_layer_size  = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # Front-layer term: weight by gate criticality\n    f_cost = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        deps = self.dag_dependencies_count[g]\n        f_cost += (deps + 1) * CT[Q1, Q2]\n\n    # Extended-layer term: discount by lookahead depth and criticality\n    e_cost = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        depth_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        e_cost += (deps + 1) * CT[Q1, Q2] / depth_factor\n\n    H = max_decay * (\n        f_cost / front_layer_size\n        + W * (e_cost / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": 822.1818181818181,
+        "mean_depth": 1167.2727272727273,
+        "mean_runtime": 1.8309897617860273,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 822.1818181818181,
+      "mean_depth": 1167.2727272727273,
+      "timestamp": "20260224_114546"
+    }
+  ],
+  "Optimal Transport Routing Cost (OTRC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Optimal Transport Routing Cost (OTRC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    dm = self.distance_matrix\n\n    # \u2500\u2500 1. Build demand measure \u03bc: where interaction is needed \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    demand_raw = {}\n\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        pair = (min(Q1, Q2), max(Q1, Q2))\n        # Front-layer: urgent, boosted weight\n        urgency = float(self.dag_dependencies_count[g] + 1) * 2.0\n        demand_raw[pair] = demand_raw.get(pair, 0.0) + urgency\n\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        pair = (min(Q1, Q2), max(Q1, Q2))\n        lookahead_depth = self.extended_layer_index.get(g, 0) + 1\n        urgency = float(self.dag_dependencies_count[g] + 1) / lookahead_depth\n        demand_raw[pair] = demand_raw.get(pair, 0.0) + urgency\n\n    if not demand_raw:\n        return 0.0\n\n    total_demand = sum(demand_raw.values())\n    demand_pts = list(demand_raw.keys())\n    demand_weights = [demand_raw[p] / total_demand for p in demand_pts]\n\n    # \u2500\u2500 2. Build supply measure \u03bd: coupling-graph edges weighted by load \u2500\u2500\u2500\u2500\u2500\u2500\n    edges = list({(min(a, b), max(a, b)) for a, b in self.backend_connections})\n    n_edges = len(edges)\n    if n_edges == 0:\n        return 0.0\n\n    # Prefer edges on shallower (less-loaded) qubits \u2014 inverse depth weighting\n    supply_raw = []\n    for a, b in edges:\n        da = self.qubit_depth.get(a, 0)\n        db = self.qubit_depth.get(b, 0)\n        supply_raw.append(1.0 / (1.0 + da + db))\n    total_supply = sum(supply_raw)\n    supply_weights = [w / total_supply for w in supply_raw]\n\n    # \u2500\u2500 3. Ground metric: minimum SWAP work to align pair onto edge \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # d((Q1,Q2), (e1,e2)) = min alignment cost over both orientations\n    def pair_dist(p, e):\n        p1, p2 = p\n        e1, e2 = e\n        return min(dm[p1][e1] + dm[p2][e2], dm[p1][e2] + dm[p2][e1])\n\n    # \u2500\u2500 4. Wasserstein-1 via greedy transport \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # Sort all (cost, demand_idx, supply_idx) triples ascending,\n    # then greedily assign flow \u2014 this is the standard \"northwest corner\"\n    # generalization that gives exact W1 when costs satisfy the Monge property.\n    cost_entries = []\n    for i, dp in enumerate(demand_pts):\n        for j, ep in enumerate(edges):\n            cost_entries.append((pair_dist(dp, ep), i, j))\n    cost_entries.sort()\n\n    rem_d = list(demand_weights)\n    rem_s = list(supply_weights)\n    w1_cost = 0.0\n\n    for c, i, j in cost_entries:\n        if rem_d[i] < 1e-12 or rem_s[j] < 1e-12:\n            continue\n        flow = min(rem_d[i], rem_s[j])\n        w1_cost += flow * c\n        rem_d[i] -= flow\n        rem_s[j] -= flow\n\n    # \u2500\u2500 5. Scale by thermal noise (decay) of the candidate SWAP qubits \u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    return max_decay * w1_cost",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on adder_n28__42CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on adder_n28__42CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260224_115258"
+    }
+  ],
+  "Boltzmann Free Energy Routing (BFER)": [
+    {
+      "iteration": 1,
+      "idea_name": "Boltzmann Free Energy Routing (BFER)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    import math\n\n    front_layer_size = max(len(self.front_layer), 1)\n    extended_layer_size = max(len(self.extended_layer), 1)\n\n    # \u2500\u2500 Temperature Annealing \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # T decays as the circuit progresses (depth increases):\n    # early \u2192 high T (entropy-dominated, exploratory)\n    # late  \u2192 low  T (energy-dominated, exploitative)\n    T_MAX = 3.0\n    current_depth = self.get_circuit_depth()\n    T = T_MAX / (1.0 + 0.1 * current_depth)\n\n    # \u2500\u2500 Energy E(\u03c6): Weighted gate distances \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # Front-layer contribution (highest urgency)\n    E_front = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        deps = self.dag_dependencies_count[g]\n        E_front += (deps + 1) * self.distance_matrix[Q1][Q2]\n\n    # Extended-layer contribution (lookahead, discounted by depth)\n    E_ext = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        E_ext += (deps + 1) * self.distance_matrix[Q1][Q2] / layer_factor\n\n    # Normalised total energy\n    E = E_front / front_layer_size + 0.5 * E_ext / extended_layer_size\n\n    # \u2500\u2500 Entropy S(\u03c6): Shannon entropy of gate-activity across qubits \u2500\u2500\u2500\u2500\u2500\n    # Activity weight of each physical qubit under the candidate mapping.\n    # High S \u2192 load spread across chip \u2192 favourable (reduces free energy).\n    qubit_activity = [0.0] * self.num_qubits\n\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        w = float(self.dag_dependencies_count[g] + 1)\n        qubit_activity[Q1] += w\n        qubit_activity[Q2] += w\n\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        w = (self.dag_dependencies_count[g] + 1) / layer_factor\n        qubit_activity[Q1] += w\n        qubit_activity[Q2] += w\n\n    total_activity = sum(qubit_activity)\n    S = 0.0\n    if total_activity > 0.0:\n        for act in qubit_activity:\n            if act > 0.0:\n                p = act / total_activity\n                S -= p * math.log(p)   # Shannon entropy (nats)\n\n    # \u2500\u2500 Helmholtz Free Energy F = E \u2212 T\u00b7S \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # max_decay penalises swaps on already-hot qubits (keeps E scale)\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    F = max_decay * E - T * S\n\n    return F",
+      "stats": {
+        "mean_swaps": 676.0,
+        "mean_depth": 979.2727272727273,
+        "mean_runtime": 9.189164660193704,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 676.0,
+      "mean_depth": 979.2727272727273,
+      "timestamp": "20260224_120510"
+    }
+  ]
+}

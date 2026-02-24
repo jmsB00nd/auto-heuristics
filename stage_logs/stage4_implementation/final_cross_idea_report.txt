@@ -1,0 +1,26 @@
+
+Cross-Idea Comparison Report
+Generated: 20260224_120510
+Ideas Tested: 3
+
+## Ranking (by Best Mean Swaps)
+
+### 1. ✔ Boltzmann Free Energy Routing (BFER)
+- Best Mean Swaps: 676.0
+- Best Mean Depth: 979.2727272727273
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 2. ✔ Commute Time Routing (CTR)
+- Best Mean Swaps: 822.1818181818181
+- Best Mean Depth: 1167.2727272727273
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 3. ✘ Optimal Transport Routing Cost (OTRC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+## Overall Winner: Boltzmann Free Energy Routing (BFER) (Mean Swaps: 676.00)

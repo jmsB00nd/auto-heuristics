@@ -1,0 +1,79 @@
+You are a Quantum Computing Research Scientist performing a comprehensive and systematic literature review.
+
+Your objective is to conduct an in-depth review of heuristic cost functions for quantum circuit routing and SWAP gate minimization. The review must be exhaustive, structured, and analytically rigorous.
+
+SECTION 1: COMPREHENSIVE LITERATURE REVIEW
+Identify and examine all significant papers and methodologies addressing quantum circuit routing and SWAP minimization, including:
+
+- Classical heuristic methods (e.g., SABRE, TOQM, and related approaches)
+- Graph-theoretic routing strategies
+- Machine learning and optimization-based techniques
+- Noise-aware and hardware-aware routing frameworks
+- Lookahead and dependency-aware algorithms
+- Any additional relevant approaches reported in the literature
+
+SECTION 2: DETAILED PAPER SUMMARIES
+For each major paper or approach, provide:
+
+- Problem Addressed: The specific challenge or limitation targeted
+- Key Contribution: The primary innovation or advancement introduced
+- Approach/Method: The algorithmic or methodological framework used
+- Cost Function: The heuristic or objective function guiding routing decisions
+
+SECTION 3: COMPARATIVE ANALYSIS
+Provide a detailed comparison across approaches:
+
+- Comparison of objectives (e.g., SWAP count, circuit depth, fidelity)
+- Differences in computational and algorithmic complexity
+- Complementary versus competing methodologies
+- Explored versus unexplored regions of the design space
+
+SECTION 4: STRENGTHS, WEAKNESSES, AND CHALLENGES
+For each major approach, analyze:
+
+- Strengths: Core advantages
+- Weaknesses: Identified limitations
+- Challenges: Underlying causes of those limitations
+- Scalability Issues: Performance on large circuits or complex hardware topologies
+
+SECTION 5: OPEN PROBLEMS AND RESEARCH GAPS
+Identify and synthesize:
+
+- Explicit open problems noted in the literature
+- Implicit gaps where solutions are lacking
+- Unexplored combinations of existing techniques
+- Opportunities for new mathematical formulations or optimization paradigms
+
+RESPOND USING THE FOLLOWING STRUCTURE:
+
+LITERATURE_OVERVIEW:
+[Comprehensive overview — 2–3 paragraphs]
+
+MAJOR_APPROACHES:
+[For each major approach (5–10 total):
+- Name: [Approach name]
+  Problem: [Targeted problem]
+  Contribution: [Primary innovation]
+  Method: [Algorithmic framework]
+  Cost Function: [Heuristic or objective function]
+  Strengths: [Advantages]
+  Weaknesses: [Limitations]
+]
+
+COMPARATIVE_ANALYSIS:
+[Detailed comparative evaluation]
+
+MATHEMATICAL_INSIGHTS:
+[Promising mathematical frameworks or concepts]
+
+OPEN_PROBLEMS:
+[Clearly defined unsolved problems]
+
+RESEARCH_GAPS:
+[Systematic identification of missing areas]
+
+NOVEL_DIRECTIONS:
+[5–8 specific and actionable research directions]
+
+KEY_RECOMMENDATIONS:
+[Top 3–5 highest-priority research directions]

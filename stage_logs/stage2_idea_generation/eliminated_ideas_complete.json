@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Quantum Walk Interference Cost (QWIC)",
+    "status": "eliminated",
+    "description": "Model SWAP propagation as a **continuous-time quantum walk** on the coupling graph. For each candidate SWAP, compute the quantum walk amplitude overlap between the position distributions of two interacting logical qubits at time t = \u03c0/4 (quarter-period). High overlap means they can \"meet\" with high quantum probability, implying fewer SWAPs needed.",
+    "novelty_score": 9.0,
+    "probability_score": 5.0,
+    "effort_score": 4.0,
+    "average_score": 6.0,
+    "elimination_reason": "Requires matrix exponentiation (O(n\u00b3)) per SWAP candidate per routing step. Unlike commute time (one-time precomputation), QWIC recomputes dynamically. Unclear theoretical advantage over CTR (classical commute time) for a classically-optimised problem. Computational overhead eliminates practical scalability.",
+    "round": 1
+  },
+  {
+    "name": "Tensor Contraction Order Cost (TCOC)",
+    "status": "eliminated",
+    "description": "Model the remaining circuit as a **tensor network** and use treewidth of the circuit's interaction hypergraph as a proxy for routing difficulty. A SWAP that reduces treewidth is preferred, as it decreases the complexity of all future entanglement operations.",
+    "novelty_score": 9.0,
+    "probability_score": 6.0,
+    "effort_score": 3.0,
+    "average_score": 6.0,
+    "elimination_reason": "Treewidth computation is NP-hard. Even min-fill approximations are O(n\u00b2\u00b7k) where k is treewidth. Integrating this into the inner routing loop (evaluated for every candidate SWAP at every routing step) is computationally infeasible for circuits beyond ~20 qubits. Not scalable.",
+    "round": 1
+  },
+  {
+    "name": "Persistent Topological Routing (PTR)",
+    "status": "eliminated",
+    "description": "Apply **Topological Data Analysis (TDA)**: build Vietoris-Rips filtrations on both the interaction graph (with urgency as metric) and the coupling graph (with hop-count as metric). Use the Wasserstein distance between their persistence diagrams (H\u2080 and H\u2081 barcode features) as the routing cost \u2014 penalising topological mismatch between the logical and physical graph structures.",
+    "novelty_score": 10.0,
+    "probability_score": 5.0,
+    "effort_score": 2.0,
+    "average_score": 5.7,
+    "elimination_reason": "Requires TDA library integration (Ripser, Gudhi), Vietoris-Rips complex construction, and persistence diagram distance computation \u2014 all inside the hot routing loop. Computational complexity is O(2^n) in the worst case. The theoretical benefit of topological features over spectral alignment (SAC) which captures similar global structure is unproven. Not feasible for production use.",
+    "round": 1
+  },
+  {
+    "name": "Flow-Capacity Routing (FCR)",
+    "status": "eliminated",
+    "description": "Model the coupling graph as a **unit-capacity flow network**. For each gate in the front layer, the routing cost is inversely proportional to the maximum flow (min-cut) between the two physical qubits hosting the logical operands. Low max-flow = bottleneck path = high cost.",
+    "novelty_score": 6.0,
+    "probability_score": 6.0,
+    "effort_score": 5.0,
+    "average_score": 5.7,
+    "elimination_reason": "Redundant with the stronger CTR idea. Commute time (pseudoinverse Laplacian) strictly generalises max-flow bottleneck intuition: it is a smooth, differentiable function of all paths simultaneously, precomputable in O(n\u00b3) once. Max-flow requires an O(n\u00b7m) Ford-Fulkerson call *per pair per SWAP candidate*, at worse total complexity. CTR dominates FCR on both mathematical richness and computational efficiency.",
+    "round": 1
+  }
+]

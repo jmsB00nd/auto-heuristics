@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260224_115258
+
+## Idea: Optimal Transport Routing Cost (OTRC)
+## Description: Cast the routing decision as an **optimal transport (Earth Mover's Distance) problem**. Define a "demand" probability measure μ over ordered physical qubit pairs — weighted by gate urgency — representing where interaction is needed. Define a "supply" measure ν over adjacent physical pairs in the coupling graph. The SWAP that minimises the Wasserstein-1 distance between the current demand and supply distributions is selected. Unlike distance averaging, this globally matches the entire interaction workload to coupling capacity.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on adder_n28__42CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

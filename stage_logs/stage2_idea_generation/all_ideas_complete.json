@@ -1,0 +1,134 @@
+[
+  {
+    "name": "Commute Time Routing (CTR)",
+    "status": "kept",
+    "description": "Replace the hop-count distance matrix with the **commute time** between physical qubits, derived from the Moore\u2013Penrose pseudoinverse of the coupling graph's Laplacian. Commute time encodes the full random-walk structure of the coupling graph: two nodes close in commute time have many short, diverse paths between them, meaning SWAPs can be routed with high flexibility. This is precomputed once and replaces `distance_matrix` entirely.",
+    "novelty_score": 8.0,
+    "probability_score": 7.0,
+    "effort_score": 6.0,
+    "average_score": 7.0,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Optimal Transport Routing Cost (OTRC)",
+    "status": "kept",
+    "description": "Cast the routing decision as an **optimal transport (Earth Mover's Distance) problem**. Define a \"demand\" probability measure \u03bc over ordered physical qubit pairs \u2014 weighted by gate urgency \u2014 representing where interaction is needed. Define a \"supply\" measure \u03bd over adjacent physical pairs in the coupling graph. The SWAP that minimises the Wasserstein-1 distance between the current demand and supply distributions is selected. Unlike distance averaging, this globally matches the entire interaction workload to coupling capacity.",
+    "novelty_score": 9.0,
+    "probability_score": 7.0,
+    "effort_score": 4.0,
+    "average_score": 6.7,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Boltzmann Free Energy Routing (BFER)",
+    "status": "kept",
+    "description": "Interpret routing as a **thermodynamic system**. Define an energy E(\u03c6) = total weighted distance and an entropy S(\u03c6) = Shannon entropy of the gate-activity distribution across physical qubits under mapping \u03c6. The cost is the Helmholtz free energy F = E \u2212 T\u00b7S. High entropy in the gate-activity distribution means the routing load is spread across the chip \u2014 a favourable situation. A temperature T anneals from high (entropy-dominated, exploratory) to low (energy-dominated, exploitative) as the circuit progresses.",
+    "novelty_score": 8.0,
+    "probability_score": 6.0,
+    "effort_score": 6.0,
+    "average_score": 6.7,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Causal Cone Depth-Weighted Priority (CCDWP)",
+    "status": "kept",
+    "description": "Weight each gate not by its simple dependency count, but by the **size of its full causal cone** \u2014 the number of all future gates that transitively depend on it in the DAG. A gate at the root of a large causal tree blocks exponentially more future gates if delayed. Additionally, weighting is normalised by remaining circuit depth, giving a \"blocking pressure\" score that decays for gates far from the current frontier.",
+    "novelty_score": 5.0,
+    "probability_score": 7.0,
+    "effort_score": 8.0,
+    "average_score": 6.7,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Spectral Alignment Cost (SAC)",
+    "status": "kept",
+    "description": "Compute the **spectral (Laplacian) embeddings** of both the remaining interaction graph (logical qubits, edges weighted by urgency) and the coupling graph (physical qubits). Project both into a shared k-dimensional Euclidean space and solve the orthogonal Procrustes problem to find the optimal rotation aligning the two embeddings under the current qubit mapping. The residual Frobenius norm after alignment is the routing cost \u2014 measuring how well the logical interaction topology can be \"fit\" onto the physical coupling topology.",
+    "novelty_score": 8.0,
+    "probability_score": 6.0,
+    "effort_score": 5.0,
+    "average_score": 6.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Hyperbolic Embedding Cost (HEC)",
+    "status": "kept",
+    "description": "Embed the coupling graph into the **Poincar\u00e9 disk** (hyperbolic space H\u00b2) using Riemannian optimisation. Hyperbolic geometry is uniquely suited to graphs with hierarchical or tree-like structure (which many quantum hardware topologies approximate). Distances in the Poincar\u00e9 disk between embedded physical qubits replace Euclidean/hop-count distances in the cost function. The metric naturally compresses long, bottleneck-prone paths and expands well-connected neighbourhoods.",
+    "novelty_score": 8.0,
+    "probability_score": 6.0,
+    "effort_score": 5.0,
+    "average_score": 6.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Graph Frustration Routing (GFR)",
+    "status": "kept",
+    "description": "Inspired by **frustrated spin systems** in statistical physics: a logical qubit pair (a,b) is \"frustrated\" if their physical images \u03c6(a), \u03c6(b) share few common neighbours in the coupling graph. Low shared neighbourhood means there are few alternate SWAP paths, so the routing is rigid and expensive. The cost multiplies standard distance by a local frustration factor, heavily penalising SWAPs that leave pairs in \"routing dead ends.\"",
+    "novelty_score": 7.0,
+    "probability_score": 6.0,
+    "effort_score": 6.0,
+    "average_score": 6.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Interaction Entropy Regularisation (IGER)",
+    "status": "kept",
+    "description": "Add an **entropy regularisation term** that rewards mappings where the total routing mismatch (weighted distance) is spread *uniformly* across all physical qubits, rather than concentrated on a few. Concentration creates congestion hotspots; entropy maximisation encourages load balancing. The regulariser is the Shannon entropy of the per-physical-qubit mismatch distribution.",
+    "novelty_score": 7.0,
+    "probability_score": 5.0,
+    "effort_score": 7.0,
+    "average_score": 6.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Quantum Walk Interference Cost (QWIC)",
+    "status": "eliminated",
+    "description": "Model SWAP propagation as a **continuous-time quantum walk** on the coupling graph. For each candidate SWAP, compute the quantum walk amplitude overlap between the position distributions of two interacting logical qubits at time t = \u03c0/4 (quarter-period). High overlap means they can \"meet\" with high quantum probability, implying fewer SWAPs needed.",
+    "novelty_score": 9.0,
+    "probability_score": 5.0,
+    "effort_score": 4.0,
+    "average_score": 6.0,
+    "elimination_reason": "Requires matrix exponentiation (O(n\u00b3)) per SWAP candidate per routing step. Unlike commute time (one-time precomputation), QWIC recomputes dynamically. Unclear theoretical advantage over CTR (classical commute time) for a classically-optimised problem. Computational overhead eliminates practical scalability.",
+    "round": 1
+  },
+  {
+    "name": "Tensor Contraction Order Cost (TCOC)",
+    "status": "eliminated",
+    "description": "Model the remaining circuit as a **tensor network** and use treewidth of the circuit's interaction hypergraph as a proxy for routing difficulty. A SWAP that reduces treewidth is preferred, as it decreases the complexity of all future entanglement operations.",
+    "novelty_score": 9.0,
+    "probability_score": 6.0,
+    "effort_score": 3.0,
+    "average_score": 6.0,
+    "elimination_reason": "Treewidth computation is NP-hard. Even min-fill approximations are O(n\u00b2\u00b7k) where k is treewidth. Integrating this into the inner routing loop (evaluated for every candidate SWAP at every routing step) is computationally infeasible for circuits beyond ~20 qubits. Not scalable.",
+    "round": 1
+  },
+  {
+    "name": "Persistent Topological Routing (PTR)",
+    "status": "eliminated",
+    "description": "Apply **Topological Data Analysis (TDA)**: build Vietoris-Rips filtrations on both the interaction graph (with urgency as metric) and the coupling graph (with hop-count as metric). Use the Wasserstein distance between their persistence diagrams (H\u2080 and H\u2081 barcode features) as the routing cost \u2014 penalising topological mismatch between the logical and physical graph structures.",
+    "novelty_score": 10.0,
+    "probability_score": 5.0,
+    "effort_score": 2.0,
+    "average_score": 5.7,
+    "elimination_reason": "Requires TDA library integration (Ripser, Gudhi), Vietoris-Rips complex construction, and persistence diagram distance computation \u2014 all inside the hot routing loop. Computational complexity is O(2^n) in the worst case. The theoretical benefit of topological features over spectral alignment (SAC) which captures similar global structure is unproven. Not feasible for production use.",
+    "round": 1
+  },
+  {
+    "name": "Flow-Capacity Routing (FCR)",
+    "status": "eliminated",
+    "description": "Model the coupling graph as a **unit-capacity flow network**. For each gate in the front layer, the routing cost is inversely proportional to the maximum flow (min-cut) between the two physical qubits hosting the logical operands. Low max-flow = bottleneck path = high cost.",
+    "novelty_score": 6.0,
+    "probability_score": 6.0,
+    "effort_score": 5.0,
+    "average_score": 5.7,
+    "elimination_reason": "Redundant with the stronger CTR idea. Commute time (pseudoinverse Laplacian) strictly generalises max-flow bottleneck intuition: it is a smooth, differentiable function of all paths simultaneously, precomputable in O(n\u00b3) once. Max-flow requires an O(n\u00b7m) Ford-Fulkerson call *per pair per SWAP candidate*, at worse total complexity. CTR dominates FCR on both mathematical richness and computational efficiency.",
+    "round": 1
+  }
+]

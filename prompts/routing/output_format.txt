@@ -1,0 +1,9 @@
+REQUIRED OUTPUT FORMAT :
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    # Your code here
+    return cost
+```
+
+You MUST follow this exact format.

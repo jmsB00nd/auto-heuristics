@@ -1,0 +1,49 @@
+Your TASK : Generate, Evaluate, Score, Filter, and Report Novel Ideas for Quantum Circuit Routing Cost Functions
+
+Perform ALL of the following steps in a SINGLE response:
+
+PART 1: GENERATE DIVERSE NOVEL IDEAS
+
+Propose at least 10 fundamentally novel cost function concepts for quantum circuit routing (focused on minimizing SWAP counts). 
+
+PART 2: EVALUATE, SCORE, AND FILTER ALL IDEAS
+
+After generating all ideas, immediately evaluate and score EACH one.
+
+For every idea, assess:
+
+True novelty, Probability of outperforming SOTA cost functions (SABRE,...), Implementation feasibility, Scalability to large quantum circuits
+
+Score using three conservative metrics (1–10 scale):
+
+- Novelty (N): 10 = revolutionary, 1 = incremental  
+- Probability of Outperforming SOTA (P): 10 = very likely, 1 = unlikely  
+- Effort (E): 10 = easy to implement, 1 = extremely difficult  
+
+Compute:
+AVERAGE_SCORE = (N + P + E) / 3  
+Round to one decimal place.
+
+Eliminate ideas that:
+- Lack fundamental novelty
+- Have low probability of outperforming SOTA
+- Are redundant relative to a stronger idea
+
+REQUIRED OUTPUT FORMAT :
+
+Output EVERY idea in EXACTLY the following format (one block per idea, separated by ---):
+
+IDEA_NAME: [Short descriptive name]  
+DESCRIPTION: [explanation of the core mechanism]  
+MATHEMATICAL_FORMULATION: [Key equation, principle, or formal expression]  
+WHY_NOVEL: [Clear explanation of what makes it fundamentally different]  
+NOVELTY_SCORE: [1–10]  
+PROBABILITY_SCORE: [1–10]  
+EFFORT_SCORE: [1–10]  
+AVERAGE_SCORE: [(N + P + E) / 3, rounded to 1 decimal]  
+STATUS: [KEPT or ELIMINATED]  
+ELIMINATION_REASON: [Reason if eliminated, “N/A” if kept]  
+
+IMPORTANT:
+- List all KEPT ideas first, ranked in descending order by AVERAGE_SCORE.
+- Then list all ELIMINATED ideas.
