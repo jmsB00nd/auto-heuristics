@@ -1,0 +1,52 @@
+[
+  {
+    "iteration": 1,
+    "strategy": "** Polynomial Qubit-Coupling Resonance",
+    "intuition": "** Gates sharing a logical qubit are *coupled*: routing one without the other creates cascading bottlenecks that a purely additive sum misses entirely. By penalizing the *product* of distances for every gate-pair competing for the same qubit (a second-order polynomial interaction term), we directly model joint routing difficulty \u2014 a qubit with two distant partners is superlinearly worse than two separate single-partner qubits.",
+    "status": "FAILED",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Timeout on multiplier_n45__462CYC.json",
+    "file_path": "heuristics/iter_search_1____Polynomial_Qubit-Coupling_Resonance.py"
+  },
+  {
+    "iteration": 2,
+    "strategy": "**Asymmetric Convergence Potential (ACP)**",
+    "intuition": "Instead of minimizing *absolute* post-swap distances (what the baseline does), we score each SWAP by its *directional delta* \u2014 the change in distance it causes per gate. The penalty is asymmetric: diverging a near-executable high-criticality gate is penalized **superlinearly** (\u221d crit\u00b2), while convergence is rewarded **proportionally to proximity** (\u221d 1/d_post). This captures the critical \"last-mile\" effect: reducing distance 2\u21921 makes a gate immediately executable and is worth exponentially more than reducing 10\u21929.",
+    "status": "SUCCESS",
+    "mean_swaps": 700.5454545454545,
+    "mean_depth": 1034.6818181818182,
+    "error": null,
+    "file_path": "heuristics/iter_search_2___Asymmetric_Convergence_Potential__ACP___.py"
+  },
+  {
+    "iteration": 3,
+    "strategy": "**Relay-Race Bottleneck with Harmonic Proximity Pull**",
+    "intuition": "The front layer is a synchronization barrier \u2014 all gates must execute before the circuit advances, so routing speed is determined by the *worst-positioned* gate (the bottleneck), not the average. We minimize the **maximum** criticality-weighted distance (minimax instead of sum), coupled with a **harmonic pull** term (\u221d `crit / d`) that creates a strong gravitational force toward near-executable gates without computing any before/after delta.",
+    "status": "SUCCESS",
+    "mean_swaps": 737.9545454545455,
+    "mean_depth": 999.9090909090909,
+    "error": null,
+    "file_path": "heuristics/iter_search_3___Relay-Race_Bottleneck_with_Harmonic_Proximity_Pull__.py"
+  },
+  {
+    "iteration": 4,
+    "strategy": "**Qubit Routing Frustration Index**",
+    "intuition": "Traditional cost functions are *gate-centric* \u2014 they sum distances per gate independently. Instead, we adopt a *qubit-centric* view: a logical qubit is \"frustrated\" when multiple pending gates pull it toward conflicting physical destinations simultaneously. We penalize the weighted **variance** of distance-demands across all pending gates per qubit \u2014 a qubit torn between a nearby gate (d=1) and a distant one (d=4) is superlinearly harder to route than two separate qubits each with one clear destination.",
+    "status": "FAILED",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Timeout on adder_n28__42CYC.json",
+    "file_path": "heuristics/iter_search_4___Qubit_Routing_Frustration_Index__.py"
+  },
+  {
+    "iteration": 5,
+    "strategy": "** Sharpe-Ratio Routing (Risk-Adjusted Improvement)",
+    "intuition": "** Borrowing from portfolio theory: a SWAP should maximize the *risk-adjusted* criticality-weighted improvement across all gates. Two SWAPs with identical mean improvement should prefer the lower-variance one \u2014 because quantum routing is a synchronization barrier, not an average, so high variance (some gates improve greatly, others worsen) is genuinely riskier than uniform progress. We score via `H = decay * (\u2212mean_improvement + \u03bb\u00b7std_improvement)`.",
+    "status": "FAILED",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Timeout on adder_n28__42CYC.json",
+    "file_path": "heuristics/iter_search_5____Sharpe-Ratio_Routing__Risk-Adjusted_Improvement_.py"
+  }
+]

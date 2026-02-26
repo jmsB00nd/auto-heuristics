@@ -1,0 +1,12 @@
+[
+  {
+    "iteration": 1,
+    "strategy": "** Polynomial Qubit-Coupling Resonance",
+    "intuition": "** Gates sharing a logical qubit are *coupled*: routing one without the other creates cascading bottlenecks that a purely additive sum misses entirely. By penalizing the *product* of distances for every gate-pair competing for the same qubit (a second-order polynomial interaction term), we directly model joint routing difficulty \u2014 a qubit with two distant partners is superlinearly worse than two separate single-partner qubits.",
+    "status": "FAILED",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Timeout on multiplier_n45__462CYC.json",
+    "file_path": "heuristics/iter_search_1____Polynomial_Qubit-Coupling_Resonance.py"
+  }
+]

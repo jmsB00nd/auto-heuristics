@@ -5,24 +5,17 @@ import threading as _threading_module
 import json
 import os
 import time as _time_module
-import copy
 import traceback as tb_module
-from datetime import datetime
 from pathlib import Path as _Path  
-
 from src.mapping.routing import Qlosure
 from src.utils.isl_data_loader import *
 from src.graph.graph import *
 from qpu.src.load_backend import *
-from utils.utils import _ensure_dir, _save_log, _save_json, _timestamp, file_to_string
-
+from utils.utils import save_log, save_json, _timestamp, file_to_string, run_with_token_counter
 import numpy as _np  
 from tqdm import tqdm as _tqdm  
 from rich.console import Console
 from rich.panel import Panel as _Panel  
-from rich.status import Status
-from rich.live import Live
-from rich.text import Text
 from rich.rule import Rule
 
 console = Console()
@@ -86,7 +79,7 @@ class OrchestratorV2:
         self.output_format = file_to_string('/home/jmsb00nd/Documents/auto-heuristics/prompts/routing/output_format.txt')
         self.idea_prompt = file_to_string("/home/jmsb00nd/Documents/auto-heuristics/prompts/routing/ideas_generation.txt")
     
-    def query_claude(self, prompt_text, reset_conversation=False):
+    def query_llm(self, prompt_text, reset_conversation=False):
         try:
             if reset_conversation:
                 self.conversation_history = []
@@ -94,12 +87,12 @@ class OrchestratorV2:
             self.conversation_history.append({"role": "user", "content": prompt_text})
 
             if self.use_conversation_mode and len(self.conversation_history) > 1:
-                formatted_input = self._format_conversation_for_cli()
+                formatted_input = self.format_conversation_for_cli()
             else:
                 formatted_input = prompt_text
 
             if self.show_token_counter:
-                response = self._run_with_token_counter(formatted_input)
+                response = run_with_token_counter(self.CLI_COMMAND, formatted_input)
             else:
                 with console.status("[bold green]Querying LLM...", spinner="dots"):
                     result = subprocess.run(
@@ -124,53 +117,7 @@ class OrchestratorV2:
             console.print(f"[bold red]Error:[/bold red] Execution failed: {e}")
             return None
 
-    def _run_with_token_counter(self, input_text):
-        process = subprocess.Popen(
-            self.CLI_COMMAND,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            shell=True,
-            bufsize=1,
-        )
-        process.stdin.write(input_text)
-        process.stdin.close()
-
-        full_response = ""
-        token_count = 0
-
-        with Live(self._create_counter_display(0, 0), refresh_per_second=10, console=console) as live:
-            while True:
-                char = process.stdout.read(1)
-                if not char:
-                    break
-                full_response += char
-                if char in ' \n\t.,;:!?':
-                    token_count += 1
-                if len(full_response) % 10 == 0:
-                    live.update(self._create_counter_display(token_count, len(full_response)))
-            live.update(self._create_counter_display(token_count, len(full_response)))
-
-        process.wait()
-        if process.returncode != 0:
-            stderr = process.stderr.read()
-            raise subprocess.CalledProcessError(process.returncode, self.CLI_COMMAND, stderr)
-        return full_response.strip()
-
-    def _create_counter_display(self, tokens, chars):
-        text = Text()
-        text.append("🤖 ", style="bold green")
-        text.append("LLM Generating... ", style="bold cyan")
-        text.append(f"Tokens: ", style="white")
-        text.append(f"{tokens:,}", style="bold yellow")
-        text.append(" | ", style="dim")
-        text.append(f"Characters: ", style="white")
-        text.append(f"{chars:,}", style="bold blue")
-        return text
-
-    def _format_conversation_for_cli(self):
+    def format_conversation_for_cli(self):
         formatted = ""
         for msg in self.conversation_history:
             if msg["role"] == "user":
@@ -309,11 +256,7 @@ class OrchestratorV2:
         down to just the function definition so that ``exec()`` places
         ``qlosure_poly_heuristic`` directly into ``local_scope``.
         """
-        # --- Step 1: Remove import lines (they are already in globals) ---
         lines = code.split('\n')
-
-        # --- Step 2: If the function is nested inside a class, dedent it ---
-        # Find the line that starts with  def qlosure_poly_heuristic
         func_start = None
         func_indent = 0
         for i, line in enumerate(lines):
@@ -324,24 +267,19 @@ class OrchestratorV2:
                 break
 
         if func_start is None:
-            # Function definition not found at all – return as-is
             return code
 
-        # Collect from func_start to end-of-function (next line at same or lesser indent, or EOF)
         func_lines = [lines[func_start]]
         for j in range(func_start + 1, len(lines)):
             line = lines[j]
-            # Empty / whitespace-only lines belong to the function body
             if line.strip() == '':
                 func_lines.append(line)
                 continue
             current_indent = len(line) - len(line.lstrip())
             if current_indent <= func_indent and line.strip() != '':
-                # We've exited the function body
                 break
             func_lines.append(line)
 
-        # Dedent by func_indent so the def is at column 0
         dedented = []
         for line in func_lines:
             if line.strip() == '':
@@ -351,7 +289,6 @@ class OrchestratorV2:
             else:
                 dedented.append(line.lstrip())
 
-        # Collect any import lines from the original code (they might be needed)
         import_lines = [l for l in lines[:func_start] if l.strip().startswith(('import ', 'from '))]
 
         result_lines = import_lines + [''] + dedented if import_lines else dedented
@@ -367,7 +304,7 @@ class OrchestratorV2:
 
         
         prompt = file_to_string("/home/jmsb00nd/Documents/auto-heuristics/prompts/routing/literature_review.txt")
-        response = self.query_claude(prompt, reset_conversation=True)
+        response = self.query_llm(prompt, reset_conversation=True)
 
         if not response:
             console.print("[bold yellow]Literature review failed. Proceeding without it.[/bold yellow]")
@@ -390,8 +327,8 @@ class OrchestratorV2:
                 display = content if len(content) < 2000 else content[:2000] + "\n\n[dim]... (truncated)[/dim]"
                 console.print(_Panel(display, title=f"[bold]{key}[/bold]", border_style=style))
 
-        _save_log(self.stage1_dir, "literature_review.txt", response)
-        _save_log(self.stage1_dir, "prompt.txt", prompt)
+        save_log(self.stage1_dir, "literature_review.txt", response)
+        save_log(self.stage1_dir, "prompt.txt", prompt)
         _Path("literature_review.txt").write_text(response, encoding="utf-8")
 
         console.print("[bold green]✓ Stage I complete.[/bold green]\n")
@@ -405,17 +342,17 @@ class OrchestratorV2:
         ))
 
         prompt = self.build_ideas_generation_prompt()
-        response = self.query_claude(prompt, reset_conversation=not self.use_conversation_mode)
-        _save_log(self.stage2_dir, "single_pass_ideas.txt", response or "")
+        response = self.query_llm(prompt, reset_conversation=not self.use_conversation_mode)
+        save_log(self.stage2_dir, "single_pass_ideas.txt", response or "")
 
         # Parse ideas from the combined response
         console.print("[bold]Parsing structured ideas...[/bold]")
-        kept_ideas, eliminated_ideas = self._parse_ideas_from_response(response or "")
+        kept_ideas, eliminated_ideas = self.parse_ideas_from_response(response or "")
 
         # If parsing from structured format fails, try fallback
         if not kept_ideas:
             console.print("[yellow]No kept ideas parsed from structured format. Trying fallback...[/yellow]")
-            kept_ideas = self._parse_ideas_from_generation_response(response or "")
+            kept_ideas = self.parse_ideas_from_generation_response(response or "")
             if kept_ideas:
                 console.print(f"[green]Recovered {len(kept_ideas)} ideas from fallback parser.[/green]")
 
@@ -432,9 +369,9 @@ class OrchestratorV2:
         # Save all artifacts
         self.all_generated_ideas = all_ideas
         self.top_ideas = kept_ideas[:self.target_top_ideas]
-        _save_json(self.stage2_dir, "all_ideas_complete.json", all_ideas)
-        _save_json(self.stage2_dir, "top_ideas_final.json", self.top_ideas)
-        _save_json(self.stage2_dir, "eliminated_ideas_complete.json", eliminated_ideas)
+        save_json(self.stage2_dir, "all_ideas_complete.json", all_ideas)
+        save_json(self.stage2_dir, "top_ideas_final.json", self.top_ideas)
+        save_json(self.stage2_dir, "eliminated_ideas_complete.json", eliminated_ideas)
 
         console.print(f"[green]{len(kept_ideas)} kept, {len(eliminated_ideas)} eliminated[/green]")
         console.print(f"[bold green]✓ Stage II complete. {len(self.top_ideas)} top ideas identified.[/bold green]\n")
@@ -468,7 +405,7 @@ class OrchestratorV2:
             )
         return ""
 
-    def _parse_ideas_from_response(self, response_text, generation_response=None):
+    def parse_ideas_from_response(self, response_text, generation_response=None):
         """Parse structured idea blocks from LLM response.
 
         Uses multiple parsing strategies with fallbacks:
@@ -537,7 +474,7 @@ class OrchestratorV2:
         # --- Strategy 4: Extract from original generation response ---
         if not kept and not eliminated and generation_response:
             console.print("[yellow]Fallback: Extracting ideas from generation response...[/yellow]")
-            kept = self._parse_ideas_from_generation_response(generation_response)
+            kept = self.parse_ideas_from_generation_response(generation_response)
 
         # --- Strategy 5: Last resort - try to extract ANY idea names from text ---
         if not kept and not eliminated:
@@ -629,7 +566,7 @@ class OrchestratorV2:
 
         return idea
 
-    def _parse_ideas_from_generation_response(self, gen_response):
+    def parse_ideas_from_generation_response(self, gen_response):
         """Fallback parser: extract ideas directly from the generation response (Step 1).
 
         The generation response uses IDEA_NAME: / DESCRIPTION: / --- format.
@@ -716,8 +653,8 @@ class OrchestratorV2:
         # Final cross-idea comparison report
         console.print("[bold]Generating final cross-idea comparison report...[/bold]")
         final_report = self._generate_stage4_cross_idea_report(all_ideas_results)
-        _save_log(self.stage4_dir, "final_cross_idea_report.txt", final_report)
-        _save_json(self.stage4_dir, "all_ideas_results.json", all_ideas_results)
+        save_log(self.stage4_dir, "final_cross_idea_report.txt", final_report)
+        save_json(self.stage4_dir, "all_ideas_results.json", all_ideas_results)
 
         console.print(_Panel(final_report[:4000], title="[bold]Cross-Idea Comparison[/bold]", border_style="green"))
         console.print(f"[bold green]✓ Stage IV complete. {len(all_ideas_results)} ideas tested.[/bold green]\n")
@@ -733,8 +670,8 @@ class OrchestratorV2:
 
         console.print(f"[bold]Implementing {idea_name} ...[/bold]")
         prompt = self.build_single_implementation_prompt(idea)
-        response = self.query_claude(prompt, reset_conversation=True)
-        _save_log(idea_stage_dir, "implementation.txt", response or "")
+        response = self.query_llm(prompt, reset_conversation=True)
+        save_log(idea_stage_dir, "implementation.txt", response or "")
 
         # Extract code
         code = self.parse_response(response)
@@ -745,7 +682,7 @@ class OrchestratorV2:
                 "status": "FAILED", "error": "Code extraction failed",
                 "mean_swaps": float('inf'), "mean_depth": 0, "timestamp": _timestamp(),
             }
-            _save_json(idea_stage_dir, "implementation_results.json", [result])
+            save_json(idea_stage_dir, "implementation_results.json", [result])
             return [result]
 
         # Run code
@@ -775,13 +712,13 @@ class OrchestratorV2:
             else:
                 fix_prompt = self.build_fix_prompt(idea, 1, code, stats)
             
-            fix_response = self.query_claude(fix_prompt)
+            fix_response = self.query_llm(fix_prompt)
             
             # Save with appropriate label
             if is_timeout:
-                _save_log(idea_stage_dir, f"timeout_optimization_{retry}.txt", fix_response or "")
+                save_log(idea_stage_dir, f"timeout_optimization_{retry}.txt", fix_response or "")
             else:
-                _save_log(idea_stage_dir, f"fix_attempt_{retry}.txt", fix_response or "")
+                save_log(idea_stage_dir, f"fix_attempt_{retry}.txt", fix_response or "")
 
             new_code = self.parse_response(fix_response or "")
             if new_code:
@@ -833,8 +770,8 @@ class OrchestratorV2:
         # Per-idea final report
         console.print(f"[bold]Generating report for {idea_name}...[/bold]")
         idea_report = self.generate_stage3_final_report(idea, [result])
-        _save_log(idea_stage_dir, "final_report.txt", idea_report)
-        _save_json(idea_stage_dir, "implementation_results.json", [result])
+        save_log(idea_stage_dir, "final_report.txt", idea_report)
+        save_json(idea_stage_dir, "implementation_results.json", [result])
 
         console.print(_Panel(
             idea_report[:2000],
@@ -1054,4 +991,113 @@ Ideas Tested: {len(all_ideas_results)}
             "top_ideas_count": len(self.top_ideas),
             "ideas_tested": list(all_results.keys()) if all_results else [],
         }
-        _save_json(LOG_DIR, "pipeline_summary.json", summary)
+        save_json(LOG_DIR, "pipeline_summary.json", summary)
+        
+    def iterative_heuristic_search(self, num_iterations, base_prompt):
+        """
+        Iteratively generates, evaluates, and refines a heuristic cost function.
+        Appends the history of past attempts and their scores to the prompt 
+        to ensure the LLM learns from previous mistakes and successes.
+        """
+        console.print(Rule("ITERATIVE HEURISTIC SEARCH", style="bold cyan"))
+        console.print(_Panel(
+            f"[bold cyan]Starting {num_iterations} iterations of iterative generation & evaluation...[/bold cyan]",
+            border_style="cyan",
+        ))
+
+        # Ensure directories exist
+        iterative_log_dir = os.path.join(LOG_DIR, "iterative_search")
+        os.makedirs(iterative_log_dir, exist_ok=True)
+        os.makedirs("heuristics", exist_ok=True)
+
+        current_prompt = base_prompt
+        all_results = []
+
+        for i in range(1, num_iterations + 1):
+            console.print(Rule(f"Iteration {i} / {num_iterations}", style="bold magenta"))
+
+            response = self.query_llm(current_prompt, reset_conversation=True)
+            save_log(iterative_log_dir, f"iteration_{i}_response.txt", response or "")
+
+            if not response:
+                console.print(f"[bold red]Failed to get a response from LLM on iteration {i}. Skipping.[/bold red]")
+                continue
+
+            strategy_match = re.search(r'STRATEGY:\s*(.*?)(?=\nINTUITION|\nCODE|\n|$)', response, re.IGNORECASE)
+            intuition_match = re.search(r'INTUITION:\s*(.*?)(?=\nCODE|\nSTRATEGY|\n|$)', response, re.IGNORECASE | re.DOTALL)
+
+            strategy = strategy_match.group(1).strip() if strategy_match else f"Generated_Idea_{i}"
+            intuition = intuition_match.group(1).strip() if intuition_match else "No intuition parsed."
+
+            console.print(f"[bold cyan]Generated Idea:[/bold cyan] {strategy}")
+            console.print(f"[bold cyan]Intuition:[/bold cyan] {intuition[:200]}{'...' if len(intuition) > 200 else ''}")
+
+            code = self.parse_response(response)
+
+            if not code:
+                console.print("[bold red]✘ Failed to extract Python code. Updating history and skipping to next iteration.[/bold red]")
+                current_prompt += f"\n\n### History - Iteration {i}\nStatus: Failed to extract valid python code.\n"
+                continue
+
+            safe_strategy = re.sub(r'[^\w\-]', '_', strategy)
+            file_name = f"heuristics/iter_search_{i}_{safe_strategy}.py"
+            with open(file_name, "w", encoding="utf-8") as f:
+                f.write(f"# Strategy: {strategy}\n# Intuition: {intuition}\n\n{code}")
+            
+            console.print(f"[dim]Code extracted and saved to [bold]{file_name}[/bold][/dim]")
+
+            console.print("[bold yellow]Evaluating heuristic...[/bold yellow]")
+            stats = self.inject_and_run(code, timeout_seconds=self.timeout_seconds)
+
+            succeeded = not stats.get('error')
+            mean_swaps = stats.get('mean_swaps', float('inf'))
+            mean_depth = stats.get('mean_depth', 0)
+
+            if succeeded:
+                console.print(
+                    f"[bold green]✔ Iteration {i} SUCCESS[/bold green]\n"
+                    f"  Avg Swaps: {mean_swaps:.2f} | Avg Depth: {mean_depth:.2f}"
+                )
+                status_text = f"SUCCESS - Swaps: {mean_swaps:.2f}, Depth: {mean_depth:.2f}"
+            else:
+                error_msg = stats.get('error', 'Unknown Error')
+                console.print(f"[bold red]✘ Iteration {i} FAILED: {error_msg}[/bold red]")
+                status_text = f"FAILED - Error: {error_msg}"
+
+            current_prompt += (
+                f"\n\n### History - Iteration {i}\n"
+                f"STRATEGY: {strategy}\n"
+                f"INTUITION: {intuition}\n"
+                f"RESULT: {status_text}\n"
+            )
+
+            result_entry = {
+                "iteration": i,
+                "strategy": strategy,
+                "intuition": intuition,
+                "status": "SUCCESS" if succeeded else "FAILED",
+                "mean_swaps": mean_swaps,
+                "mean_depth": mean_depth,
+                "error": stats.get('error'),
+                "file_path": file_name
+            }
+            all_results.append(result_entry)
+            save_json(iterative_log_dir, f"results_up_to_{i}.json", all_results)
+
+        console.print(Rule("Iterative Search Complete", style="bold white"))
+        successful_runs = [r for r in all_results if r["status"] == "SUCCESS"]
+        
+        if successful_runs:
+            best_run = min(successful_runs, key=lambda x: x["mean_swaps"])
+            console.print(_Panel(
+                f"[bold green]Best Strategy:[/bold green] {best_run['strategy']} (Iteration {best_run['iteration']})\n"
+                f"[bold green]Mean Swaps:[/bold green] {best_run['mean_swaps']:.2f}\n"
+                f"[bold green]Mean Depth:[/bold green] {best_run['mean_depth']:.2f}\n"
+                f"[bold green]Saved at:[/bold green] {best_run['file_path']}",
+                title="[bold]Iterative Pipeline Winner[/bold]",
+                border_style="green"
+            ))
+        else:
+            console.print("[bold red]No successful heuristics were generated during this run.[/bold red]")
+
+        return all_results

@@ -1,0 +1,76 @@
+---
+
+STRATEGY: **Asymmetric Convergence Potential (ACP)**
+
+INTUITION: Instead of minimizing *absolute* post-swap distances (what the baseline does), we score each SWAP by its *directional delta* — the change in distance it causes per gate. The penalty is asymmetric: diverging a near-executable high-criticality gate is penalized **superlinearly** (∝ crit²), while convergence is rewarded **proportionally to proximity** (∝ 1/d_post). This captures the critical "last-mile" effect: reducing distance 2→1 makes a gate immediately executable and is worth exponentially more than reducing 10→9.
+
+CODE:
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    p0, p1 = swap_gate
+    swap_heat = max(self.decay_parameter[p0], self.decay_parameter[p1])
+
+    def reverse_swap(phys):
+        """Reconstruct pre-swap physical location from post-swap mapping."""
+        if phys == p0: return p1
+        if phys == p1: return p0
+        return phys
+
+    # --- Front Layer: Delta-Asymmetric Scoring ---
+    front_score = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+
+        # Reconstruct pre-swap physical locations
+        Q1_pre = reverse_swap(Q1)
+        Q2_pre = reverse_swap(Q2)
+
+        d_post = self.distance_matrix[Q1][Q2]
+        d_pre  = self.distance_matrix[Q1_pre][Q2_pre]
+        crit   = self.dag_dependencies_count[g] + 1
+        delta  = d_post - d_pre  # positive = worse, negative = better
+
+        if delta > 0:
+            # Divergence: superlinear penalty — breaking near-alignments is catastrophic
+            front_score += (crit ** 2) * delta
+        elif delta < 0 and d_post > 0:
+            # Convergence: reward amplified by proximity (last-mile effect)
+            # reaching d=1 from d=2 is rewarded 9x more than d=10→9
+            front_score += crit * delta / d_post
+        else:
+            # No movement: residual penalty proportional to remaining distance
+            front_score += crit * d_post * 0.1
+
+    # --- Extended Layer: Standard Criticality-Weighted Lookahead ---
+    ext_score = 0.0
+    ext_size = len(self.extended_layer)
+    if ext_size > 0:
+        for g in self.extended_layer:
+            q1, q2 = self.access2q[g]
+            Q1 = self.temp_mapping_dict[q1]
+            Q2 = self.temp_mapping_dict[q2]
+            depth = self.extended_layer_index.get(g, 0) + 1
+            crit  = self.dag_dependencies_count[g] + 1
+            ext_score += crit * self.distance_matrix[Q1][Q2] / depth
+        ext_score /= ext_size
+
+    front_size = max(len(self.front_layer), 1)
+    H = swap_heat * (front_score / front_size + 0.5 * ext_score)
+    return H
+```
+
+---
+
+**Why this is fundamentally different from the baseline and Iteration 1:**
+
+| Aspect | Baseline | Iter 1 (failed) | ACP (this) |
+|---|---|---|---|
+| Distance signal | Absolute `d_post` | Product of paired distances | **Delta `d_post - d_pre`** |
+| Criticality role | Linear weight | Linear weight | **Quadratic for divergence, linear for convergence** |
+| Penalty shape | Uniform | Multiplicative (O(n²)) | **Asymmetric by direction** |
+| Key physics | Minimize distance | Coupling penalty | **Last-mile amplification** |
+| Complexity | O(n) | O(n²) → timeout | O(n) |
+
+The `reverse_swap` trick is the key enabler — it reconstructs the pre-swap qubit positions algebraically without needing to store history, allowing true delta computation at zero overhead.

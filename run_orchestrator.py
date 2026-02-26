@@ -43,6 +43,13 @@ if not os.path.exists("context_api.txt"):
 if not os.path.exists(BENCHMARK_DIR):
     console.print(f"[error]Error: Benchmark directory '{BENCHMARK_DIR}' does not exist.[/error]")
     exit(1)
+    
+prompt_path = "/home/jmsb00nd/Documents/auto-heuristics/context_api.txt"
+if not os.path.exists(prompt_path):
+    print(f"Error: Could not find {prompt_path}")
+
+with open(prompt_path, "r", encoding="utf-8") as f:
+    base_prompt = f.read()
 
 # ----------------------------------------------------------------
 # Initialize
@@ -64,4 +71,12 @@ orchestrator = OrchestratorV2(
 )
 
 
-orchestrator.run_full_pipeline()
+NUM_ITERATIONS = 5 
+    
+print(f"Starting iterative search for {NUM_ITERATIONS} iterations...")
+results = orchestrator.iterative_heuristic_search(
+    num_iterations=NUM_ITERATIONS, 
+    base_prompt=base_prompt
+)
+
+print(f"\nFinished! Processed {len(results)} heuristics.")
