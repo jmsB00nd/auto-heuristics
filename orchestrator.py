@@ -4,6 +4,7 @@ import types as _types_module
 import threading as _threading_module  
 import json
 import os
+from datetime import datetime
 import time as _time_module
 import traceback as tb_module
 from pathlib import Path as _Path  
@@ -17,9 +18,11 @@ from tqdm import tqdm as _tqdm
 from rich.console import Console
 from rich.panel import Panel as _Panel  
 from rich.rule import Rule
+import pandas as pd
 
 console = Console()
-LOG_DIR = "stage_logs"
+current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+LOG_DIR = f"logs/{current_time}_run"
 
 class OrchestratorV2:
 
@@ -66,10 +69,12 @@ class OrchestratorV2:
         self.conversation_history = []
 
         # Stage log dirs
-        self.stage1_dir = os.path.join(LOG_DIR, "stage1_literature_review")
-        self.stage2_dir = os.path.join(LOG_DIR, "stage2_idea_generation")
-        self.stage3_dir = os.path.join(LOG_DIR, "stage3_implementation_planning")
-        self.stage4_dir = os.path.join(LOG_DIR, "stage4_implementation")
+        self.stage1_dir = os.path.join(LOG_DIR, "literature_review")
+        self.stage2_dir = os.path.join(LOG_DIR, "idea_generation")
+        self.stage3_dir = os.path.join(LOG_DIR, "implementation")
+        
+        self.total_tokens = 0 
+        self.sota_baselines = self.load_sota_baselines()
         self.init_prompt()
 
     def init_prompt(self) :
@@ -92,7 +97,8 @@ class OrchestratorV2:
                 formatted_input = prompt_text
 
             if self.show_token_counter:
-                response = run_with_token_counter(self.CLI_COMMAND, formatted_input)
+                response, token_count = run_with_token_counter(self.CLI_COMMAND, formatted_input)
+                self.total_tokens += token_count
             else:
                 with console.status("[bold green]Querying LLM...", spinner="dots"):
                     result = subprocess.run(
@@ -105,6 +111,7 @@ class OrchestratorV2:
                         shell=True,
                     )
                     response = result.stdout.strip()
+                    self.total_tokens += len(response.split())
 
             if self.use_conversation_mode:
                 self.conversation_history.append({"role": "assistant", "content": response})
@@ -116,6 +123,29 @@ class OrchestratorV2:
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] Execution failed: {e}")
             return None
+
+
+    def load_sota_baselines(self):
+        """Loads and calculates SOTA benchmarks for final comparison."""
+        results = {}
+        try:
+            df = pd.read_csv("/home/jmsb00nd/Documents/auto-heuristics/benchmarks/train_set_with_baselines.csv")
+            numeric_cols = df.columns.drop(["original_folder", "original_filename", "new_filename"], errors="ignore")
+            df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+
+            methods = ["sabre", "qmap", "pytket", "cirq"]
+            for method in methods:
+                swap_col = f"{method}_sherbrooke_swaps_trivial"
+                depth_col = f"{method}_sherbrooke_depth_trivial"
+                
+                if swap_col in df.columns and depth_col in df.columns:
+                    results[method] = {
+                        "mean_swaps": df[swap_col].mean(),
+                        "mean_depth": df[depth_col].mean()
+                    }
+        except Exception as e:
+            console.print(f"[bold yellow]Warning: Could not load SOTA baselines. Check CSV path. Error: {e}[/bold yellow]")
+        return results
 
     def format_conversation_for_cli(self):
         formatted = ""
@@ -640,7 +670,7 @@ class OrchestratorV2:
         for idea_idx, idea in enumerate(ideas_to_implement):
             idea_name = idea.get('name', f'Idea_{idea_idx}')
             idea_name_safe = re.sub(r'[^\w\-]', '_', idea_name)
-            idea_stage_dir = os.path.join(self.stage4_dir, f"idea_{idea_idx}_{idea_name_safe}")
+            idea_stage_dir = os.path.join(self.stage3_dir, f"idea_{idea_idx}_{idea_name_safe}")
 
             console.print(Rule(
                 f"Idea {idea_idx + 1}/{len(ideas_to_implement)}: {idea_name}",
@@ -652,9 +682,9 @@ class OrchestratorV2:
 
         # Final cross-idea comparison report
         console.print("[bold]Generating final cross-idea comparison report...[/bold]")
-        final_report = self._generate_stage4_cross_idea_report(all_ideas_results)
-        save_log(self.stage4_dir, "final_cross_idea_report.txt", final_report)
-        save_json(self.stage4_dir, "all_ideas_results.json", all_ideas_results)
+        final_report = self.generate_cross_idea_report(all_ideas_results)
+        save_log(self.stage3_dir, "final_cross_idea_report.txt", final_report)
+        save_json(self.stage3_dir, "all_ideas_results.json", all_ideas_results)
 
         console.print(_Panel(final_report[:4000], title="[bold]Cross-Idea Comparison[/bold]", border_style="green"))
         console.print(f"[bold green]✓ Stage IV complete. {len(all_ideas_results)} ideas tested.[/bold green]\n")
@@ -898,8 +928,8 @@ Descreption : {idea.get('description', '')}
 """
         return report
 
-    def _generate_stage4_cross_idea_report(self, all_ideas_results):
-        """Generate a comparison report across all tested ideas."""
+    def generate_cross_idea_report(self, all_ideas_results):
+        """Generate a comparison report across all tested ideas including detailed SOTA metrics."""
         report = f"""
 Cross-Idea Comparison Report
 Generated: {_timestamp()}
@@ -929,10 +959,47 @@ Ideas Tested: {len(all_ideas_results)}
                     'successful_iterations': 0,
                 })
 
+        # Calculate requested metrics
+        successful_ideas = [ib for ib in idea_bests if ib['mean_swaps'] < float('inf')]
+        generation_success_rate = (len(successful_ideas) / len(idea_bests)) * 100 if idea_bests else 0
+        
+        if successful_ideas:
+            avg_score = _np.mean([ib['mean_swaps'] for ib in successful_ideas])
+            best_score = min([ib['mean_swaps'] for ib in successful_ideas])
+            worst_score = max([ib['mean_swaps'] for ib in successful_ideas])
+            best_idea = min(successful_ideas, key=lambda x: x['mean_swaps'])
+        else:
+            avg_score = float('inf')
+            best_score = float('inf')
+            worst_score = float('inf')
+            best_idea = None
+
+        report += "\n## Global Metrics\n"
+        report += f"- **Generation Success Rate:** {generation_success_rate:.2f}%\n"
+        report += f"- **Average Score (Mean Swaps):** {avg_score if avg_score != float('inf') else 'N/A':.2f}\n"
+        report += f"- **Best Score:** {best_score if best_score != float('inf') else 'N/A':.2f}\n"
+        report += f"- **Worst Score:** {worst_score if worst_score != float('inf') else 'N/A':.2f}\n"
+        report += f"- **Total Number of Tokens:** {self.total_tokens:,}\n"
+
+        # Compare against SOTA if baselines loaded and we have at least 1 successful heuristic
+        if best_idea and hasattr(self, 'sota_baselines') and self.sota_baselines:
+            report += f"\n## Outperform Rate (vs SOTA)\n"
+            report += f"Comparing Best Heuristic ({best_idea['name']} with **{best_score:.2f}** mean swaps) against baseline methods:\n\n"
+            
+            for method, metrics in self.sota_baselines.items():
+                sota_swaps = metrics["mean_swaps"]
+                # Outperformance formula: Positive percentage means the heuristic is better (fewer swaps)
+                outperform_pct = ((sota_swaps - best_score) / sota_swaps) * 100
+                status = "OUTPERFORMS" if outperform_pct > 0 else "UNDERPERFORMS"
+                report += f"- **{method.upper()}** (Score: {sota_swaps:.2f}): {status} by **{outperform_pct:.2f}%**\n"
+        elif not getattr(self, 'sota_baselines', None):
+            report += "\n## Outperform Rate (vs SOTA)\n"
+            report += "[SOTA Benchmark CSV not found or failed to load. Outperform metrics skipped.]\n"
+
         # Sort by best mean_swaps
         idea_bests.sort(key=lambda x: x['mean_swaps'])
 
-        report += "\n## Ranking (by Best Mean Swaps)\n"
+        report += "\n## Idea Ranking (by Best Mean Swaps)\n"
         for rank, ib in enumerate(idea_bests, 1):
             status = "✔" if ib['mean_swaps'] < float('inf') else "✘"
             report += (
@@ -943,12 +1010,13 @@ Ideas Tested: {len(all_ideas_results)}
                 f"- Successful / Total Iterations: {ib['successful_iterations']} / {ib['total_iterations']}\n"
             )
 
-        if idea_bests and idea_bests[0]['mean_swaps'] < float('inf'):
-            report += f"\n## Overall Winner: {idea_bests[0]['name']} (Mean Swaps: {idea_bests[0]['mean_swaps']:.2f})\n"
+        if best_idea:
+            report += f"\n## Overall Winner: {best_idea['name']} (Mean Swaps: {best_idea['mean_swaps']:.2f})\n"
         else:
             report += "\n## No successful ideas.\n"
 
         return report
+
 
 
     def run_full_pipeline(self):
@@ -990,114 +1058,7 @@ Ideas Tested: {len(all_ideas_results)}
             "total_ideas_generated": len(self.all_generated_ideas),
             "top_ideas_count": len(self.top_ideas),
             "ideas_tested": list(all_results.keys()) if all_results else [],
+            "total_tokens_used": getattr(self, 'total_tokens', 0)
         }
         save_json(LOG_DIR, "pipeline_summary.json", summary)
         
-    def iterative_heuristic_search(self, num_iterations, base_prompt):
-        """
-        Iteratively generates, evaluates, and refines a heuristic cost function.
-        Appends the history of past attempts and their scores to the prompt 
-        to ensure the LLM learns from previous mistakes and successes.
-        """
-        console.print(Rule("ITERATIVE HEURISTIC SEARCH", style="bold cyan"))
-        console.print(_Panel(
-            f"[bold cyan]Starting {num_iterations} iterations of iterative generation & evaluation...[/bold cyan]",
-            border_style="cyan",
-        ))
-
-        # Ensure directories exist
-        iterative_log_dir = os.path.join(LOG_DIR, "iterative_search")
-        os.makedirs(iterative_log_dir, exist_ok=True)
-        os.makedirs("heuristics", exist_ok=True)
-
-        current_prompt = base_prompt
-        all_results = []
-
-        for i in range(1, num_iterations + 1):
-            console.print(Rule(f"Iteration {i} / {num_iterations}", style="bold magenta"))
-
-            response = self.query_llm(current_prompt, reset_conversation=True)
-            save_log(iterative_log_dir, f"iteration_{i}_response.txt", response or "")
-
-            if not response:
-                console.print(f"[bold red]Failed to get a response from LLM on iteration {i}. Skipping.[/bold red]")
-                continue
-
-            strategy_match = re.search(r'STRATEGY:\s*(.*?)(?=\nINTUITION|\nCODE|\n|$)', response, re.IGNORECASE)
-            intuition_match = re.search(r'INTUITION:\s*(.*?)(?=\nCODE|\nSTRATEGY|\n|$)', response, re.IGNORECASE | re.DOTALL)
-
-            strategy = strategy_match.group(1).strip() if strategy_match else f"Generated_Idea_{i}"
-            intuition = intuition_match.group(1).strip() if intuition_match else "No intuition parsed."
-
-            console.print(f"[bold cyan]Generated Idea:[/bold cyan] {strategy}")
-            console.print(f"[bold cyan]Intuition:[/bold cyan] {intuition[:200]}{'...' if len(intuition) > 200 else ''}")
-
-            code = self.parse_response(response)
-
-            if not code:
-                console.print("[bold red]✘ Failed to extract Python code. Updating history and skipping to next iteration.[/bold red]")
-                current_prompt += f"\n\n### History - Iteration {i}\nStatus: Failed to extract valid python code.\n"
-                continue
-
-            safe_strategy = re.sub(r'[^\w\-]', '_', strategy)
-            file_name = f"heuristics/iter_search_{i}_{safe_strategy}.py"
-            with open(file_name, "w", encoding="utf-8") as f:
-                f.write(f"# Strategy: {strategy}\n# Intuition: {intuition}\n\n{code}")
-            
-            console.print(f"[dim]Code extracted and saved to [bold]{file_name}[/bold][/dim]")
-
-            console.print("[bold yellow]Evaluating heuristic...[/bold yellow]")
-            stats = self.inject_and_run(code, timeout_seconds=self.timeout_seconds)
-
-            succeeded = not stats.get('error')
-            mean_swaps = stats.get('mean_swaps', float('inf'))
-            mean_depth = stats.get('mean_depth', 0)
-
-            if succeeded:
-                console.print(
-                    f"[bold green]✔ Iteration {i} SUCCESS[/bold green]\n"
-                    f"  Avg Swaps: {mean_swaps:.2f} | Avg Depth: {mean_depth:.2f}"
-                )
-                status_text = f"SUCCESS - Swaps: {mean_swaps:.2f}, Depth: {mean_depth:.2f}"
-            else:
-                error_msg = stats.get('error', 'Unknown Error')
-                console.print(f"[bold red]✘ Iteration {i} FAILED: {error_msg}[/bold red]")
-                status_text = f"FAILED - Error: {error_msg}"
-
-            current_prompt += (
-                f"\n\n### History - Iteration {i}\n"
-                f"STRATEGY: {strategy}\n"
-                f"INTUITION: {intuition}\n"
-                f"RESULT: {status_text}\n"
-            )
-
-            result_entry = {
-                "iteration": i,
-                "strategy": strategy,
-                "intuition": intuition,
-                "status": "SUCCESS" if succeeded else "FAILED",
-                "mean_swaps": mean_swaps,
-                "mean_depth": mean_depth,
-                "error": stats.get('error'),
-                "file_path": file_name
-            }
-            all_results.append(result_entry)
-            save_json(iterative_log_dir, f"results_up_to_{i}.json", all_results)
-
-        console.print(Rule("Iterative Search Complete", style="bold white"))
-        successful_runs = [r for r in all_results if r["status"] == "SUCCESS"]
-        
-        if successful_runs:
-            best_run = min(successful_runs, key=lambda x: x["mean_swaps"])
-            console.print(_Panel(
-                f"[bold green]Best Strategy:[/bold green] {best_run['strategy']} (Iteration {best_run['iteration']})\n"
-                f"[bold green]Mean Swaps:[/bold green] {best_run['mean_swaps']:.2f}\n"
-                f"[bold green]Mean Depth:[/bold green] {best_run['mean_depth']:.2f}\n"
-                f"[bold green]Saved at:[/bold green] {best_run['file_path']}",
-                title="[bold]Iterative Pipeline Winner[/bold]",
-                border_style="green"
-            ))
-        else:
-            console.print("[bold red]No successful heuristics were generated during this run.[/bold red]")
-
-        return all_results

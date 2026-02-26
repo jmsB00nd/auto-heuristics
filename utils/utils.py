@@ -85,4 +85,6 @@ def run_with_token_counter(command, input_text):
     if process.returncode != 0:
         stderr = process.stderr.read()
         raise subprocess.CalledProcessError(process.returncode, command, stderr)
-    return full_response.strip()
+    
+    # Return both response text and counted output tokens to the caller
+    return full_response.strip(), token_count
