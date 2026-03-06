@@ -1,0 +1,78 @@
+
+# Implementation Report
+# Generated: 20260227_093148
+
+## Idea: Harmonic Inverse Distance Priority Cost (HIDPC)
+## Description: Replace arithmetic mean aggregation over front/extended layer distances with the harmonic mean. The harmonic mean H = n / Σ(1/x_i) is dominated by its smallest values: a single nearly-executable gate (small distance) pulls the entire cost low, creating strong incentive to "complete" nearly-routable gates before attacking hard ones. The arithmetic mean in SABRE/baseline treats all gate distances uniformly; HIDPC creates asymmetric urgency that finishes easy gates first, reducing stalling.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: SUCCESS
+- Mean Swaps: 702.0909090909091
+- Mean Depth: 1220.5454545454545
+- Error: None
+
+## Best Result
+- Iteration: 1
+- Mean Swaps: 702.0909090909091
+- Mean Depth: 1220.5454545454545
+
+## Best Code:
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    W = 0.5
+    front_layer_size = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    # --- Front Layer: Weighted Harmonic Mean ---
+    # Weighted harmonic mean: H = Σ(w_i) / Σ(w_i / d_i)
+    # A single small distance dominates: creates urgency to finish near-executable gates.
+    f_weight_sum = 0.0
+    f_inv_sum = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+        weight = deps + 1
+        d = self.distance_matrix[Q1][Q2] + 1  # +1 avoids div-by-zero; d=1 now pulls hardest
+        f_weight_sum += weight
+        f_inv_sum += weight / d
+
+    # H_front = total_weight / Σ(weight/d); lower is better (dominated by smallest d)
+    f_harmonic = f_weight_sum / f_inv_sum if f_inv_sum > 0.0 else 0.0
+
+    # --- Extended Layer: Weighted Harmonic Mean with Layer Decay ---
+    # Gates deeper in the lookahead receive lower weights (layer_factor discounts them).
+    e_weight_sum = 0.0
+    e_inv_sum = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_factor = self.extended_layer_index.get(g, 0) + 1
+        deps = self.dag_dependencies_count[g]
+        weight = (deps + 1) / layer_factor  # deeper gates contribute less
+        d = self.distance_matrix[Q1][Q2] + 1
+        e_weight_sum += weight
+        e_inv_sum += weight / d
+
+    e_harmonic = e_weight_sum / e_inv_sum if e_inv_sum > 0.0 else 0.0
+
+    # Combine: decay-weighted sum of front + lookahead harmonic costs
+    H = max_decay * (
+        f_harmonic
+        + W * (e_harmonic if extended_layer_size else 0.0)
+    )
+
+    return H
+```
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 1
+- Failed: 0

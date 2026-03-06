@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260226_195132
+
+## Idea: Effective Resistance (Commute Time) Routing Cost (ERCRC)
+## Description: Replace hop-count with the *electrical effective resistance* R_eff(i,j) = (e_i - e_j)^T L^+ (e_i - e_j), where L^+ is the Moore-Penrose pseudoinverse of the graph Laplacian. Effective resistance is the expected length of a random walk from i to j and back, and naturally accounts for all parallel paths — not just the shortest. Paths through graph bottlenecks have exponentially larger effective resistance, giving a theoretically grounded difficulty estimate.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on multiplier_n75__1308CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

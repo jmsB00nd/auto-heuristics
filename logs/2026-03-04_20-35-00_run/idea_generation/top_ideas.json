@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Chain Continuity Reward Cost (CCRC)",
+    "status": "KEPT",
+    "description": "Track the set of recently-executed gates (within the last k routing steps). For each gate g in the front/extended layer, if one of its virtual qubits also appeared in a recently-executed gate, reduce its effective distance weight by a continuity bonus \u03b2 \u2208 (0,1). The idea is that the routing algorithm has already \"moved\" toward this qubit's region; continuing the chain is cheaper. Gates with no chain context receive full weight 1. This rewards the algorithm for maintaining routing momentum along sequential gate chains rather than jumping erratically across the chip.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Resistance-Weighted Shortest Path Cost (RWSPC)",
+    "status": "KEPT",
+    "description": "Replace hop-count distance d(Q1,Q2) with a resistance-weighted path distance rw_dist(Q1,Q2). Walk the shortest path between Q1 and Q2 on the coupling graph and, for each edge e=(u,v) along that path, add the local edge resistance r(e) = 1 / min(deg(u), deg(v)). Low-degree nodes (bridges, leaves in heavy-hex topology) contribute higher resistance per hop, making paths through topological bottlenecks naturally more expensive \u2014 without the instability of full pseudoinverse computation (unlike ERCRC).",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Lyapunov Power Law Cost (LPLC)",
+    "status": "KEPT",
+    "description": "Replace the linear distance penalty d with a super-linear power d^p where p \u2208 (1, 2). This function has a well-known theoretical property: it is a Lyapunov function for the routing dynamical system, guaranteeing that any SWAP strictly reducing a qubit pair's distance yields strict cost decrease. The key insight is that p=1 (linear) creates flat gradients for large distances and p=2 (squared) over-penalizes far pairs. The fractional power p=1.5 (or tunable) provides a steeper-than-linear but sub-quadratic penalty, strongly prioritizing near-adjacent pairs without exploding for far pairs.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  }
+]

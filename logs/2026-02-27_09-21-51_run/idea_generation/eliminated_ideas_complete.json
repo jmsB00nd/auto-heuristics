@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Geometric Mean Layer Aggregation Cost (GMLAC)",
+    "status": "eliminated",
+    "description": "Use geometric mean (\u03a0 x_i)^(1/n) instead of arithmetic mean to aggregate gate distances within each layer. The geometric mean is less dominated by outliers than arithmetic mean and more sensitive than harmonic mean. It creates a balanced middle ground between \"minimize worst distance\" and \"minimize all distances.\"",
+    "novelty_score": 5.0,
+    "probability_score": 6.0,
+    "effort_score": 8.0,
+    "average_score": 6.3,
+    "elimination_reason": "Insufficiently novel \u2014 changing the mean type without changing the underlying cost structure is an incremental tweak. The geometric mean provides no principled routing-theoretic motivation, and the advantage over HIDPC (which has clear \"completion first\" semantics) is unclear. Redundant given HIDPC is KEPT.",
+    "round": 1
+  },
+  {
+    "name": "Algebraic Relaxation Distance Cost (ARDC)",
+    "status": "eliminated",
+    "description": "Replace hop-count distance with algebraic distance, computed via iterative label relaxation: each node initializes a random vector and iterates x_v \u2190 average(x_{neighbors(v)}) for k steps. The L2 distance between final label vectors of Q1 and Q2 serves as a multi-scale topology-aware distance, cheaper than spectral embedding (O(k|E|) vs. O(n\u00b3) for eigenvectors).",
+    "novelty_score": 8.0,
+    "probability_score": 5.0,
+    "effort_score": 6.0,
+    "average_score": 6.3,
+    "elimination_reason": "The random initialization makes the distance stochastic \u2014 different random seeds give different routing decisions, causing non-deterministic and potentially non-convergent behavior. Fixing the seed helps but reduces novelty (similar to excluded SEDC in spirit). Risk of flat gradient in later routing stages when few gates remain.",
+    "round": 1
+  },
+  {
+    "name": "Topological Eccentricity Penalty Cost (TEPC)",
+    "status": "eliminated",
+    "description": "For each gate (Q1,Q2), penalize routing paths that pass through high-eccentricity (peripheral) physical qubits \u2014 nodes far from the graph center. eccentricity(v) = max_u d(v,u). Routing through peripheral nodes creates routing detours for future gates. Weight cost by max eccentricity along the shortest path.",
+    "novelty_score": 6.0,
+    "probability_score": 5.0,
+    "effort_score": 7.0,
+    "average_score": 6.0,
+    "elimination_reason": "Low probability of outperforming SOTA. Eccentricity captures global graph structure but provides weak routing signal: the bottleneck is rarely which nodes the path passes through, but rather the distance itself. On IBM heavy-hex topologies, peripheral qubits may actually be necessary routing intermediaries with no alternatives, making this penalty counterproductive.",
+    "round": 1
+  },
+  {
+    "name": "Dynamic Gate Density Window Cost (DGDWC)",
+    "status": "eliminated",
+    "description": "Adaptively expand or contract the extended lookahead window based on local gate density. When the remaining circuit has high gate density (many gates per qubit per layer), extend the window; when sparse, shrink it. Adapts to circuit structure rather than using a fixed extended layer depth.",
+    "novelty_score": 6.0,
+    "probability_score": 6.0,
+    "effort_score": 7.0,
+    "average_score": 6.3,
+    "elimination_reason": "The density estimation adds computational overhead and the adaptive window complicates convergence analysis. The CPALC idea (KEPT) already addresses adaptive lookahead more cleanly through a principled exponential decay. DGDWC is redundant with CPALC and less theoretically grounded.",
+    "round": 1
+  },
+  {
+    "name": "Automorphism Orbit Equivalence Cost (AOEC)",
+    "status": "eliminated",
+    "description": "For topologies with non-trivial automorphism groups (grids, heavy-hex rings), compute the automorphism group Aut(G). Group qubits by their orbit under Aut(G) \u2014 qubits in the same orbit are topologically equivalent. Replace distance with orbit-representative distance, and add a term penalizing mappings that assign equivalent logical qubits to different orbit classes when they share many gates.",
+    "novelty_score": 8.0,
+    "probability_score": 4.0,
+    "effort_score": 4.0,
+    "average_score": 5.3,
+    "elimination_reason": "Computing the full automorphism group is expensive (graph isomorphism-hard in general) and the method only applies to highly symmetric topologies. For irregular topologies (trapped ion, neutral atom arrays, future IBM devices), trivial automorphism group renders it useless. Low generalizability and implementation cost outweigh potential gains.",
+    "round": 1
+  },
+  {
+    "name": "Qubit Access Time Prediction Cost (QATPC)",
+    "status": "eliminated",
+    "description": "For each front-layer gate after a candidate SWAP, run a local mini-BFS to estimate the minimum number of additional SWAPs needed to make gate g executable, accounting for how other candidate SWAPs in the current step may help. Use this estimated access time instead of raw distance.",
+    "novelty_score": 8.0,
+    "probability_score": 6.0,
+    "effort_score": 4.0,
+    "average_score": 6.0,
+    "elimination_reason": "Computing exact minimum SWAPs needed is NP-hard in general (equivalent to routing itself). Any approximation introduces estimation error that can destabilize convergence. The mini-BFS approximation degrades to distance when other SWAPs aren't considered, losing its advantage. Convergence is not guaranteed as estimation errors can create oscillating cost signals.",
+    "round": 1
+  }
+]

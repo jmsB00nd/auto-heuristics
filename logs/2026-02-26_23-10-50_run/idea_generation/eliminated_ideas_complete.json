@@ -1,0 +1,46 @@
+[
+  {
+    "name": "Multi-Commodity Flow Routing Cost (MCFRC)",
+    "status": "eliminated",
+    "description": "Model all front-layer gate pairs simultaneously as commodities in a multi-commodity flow (MCF) problem on the coupling graph. Solve the fractional MCF to get an optimal routing plan. Use decrease in MCF objective per SWAP as cost signal.",
+    "novelty_score": 9.0,
+    "probability_score": 7.0,
+    "effort_score": 5.0,
+    "average_score": 7.0,
+    "elimination_reason": "Fractional MCF requires solving a large LP at each SWAP selection step. Even with warm-starting, this is O(n\u00b3) per evaluation, making it impractical for circuits with >50 qubits. The single-commodity version (MFRPC, kept) captures the key insight with O(VE) precomputation.",
+    "round": 1
+  },
+  {
+    "name": "Algebraic Gate Momentum Cost (AGMC)",
+    "status": "eliminated",
+    "description": "Track \"momentum\" of each physical qubit as a direction vector in the coupling graph based on its last k SWAP moves. Penalize SWAPs that reverse qubit momentum (anti-parallel moves). Uses exponential decay: m_Q(t) = \u03b1\u00b7m_Q(t-1) + direction(last_swap_of_Q), \u03b1 < 1.",
+    "novelty_score": 8.0,
+    "probability_score": 6.0,
+    "effort_score": 7.0,
+    "average_score": 7.0,
+    "elimination_reason": "Momentum terms can create oscillatory dynamics in dense front layers: a qubit routed east then forced to go west incurs large penalty even when west is optimal. Exponential decay mitigates but does not eliminate this. Convergence is not guaranteed in adversarial DAG structures. The anti-reversal penalty can trap the algorithm in local optima.",
+    "round": 1
+  },
+  {
+    "name": "Minimum Spanning Tree Stretch Cost (MSTSC)",
+    "status": "eliminated",
+    "description": "Precompute the MST of the coupling graph. Define stretch(i,j) = d_MST(i,j)/d_G(i,j) \u2265 1. Multiply hop-count distance by stretch: str(Q1,Q2) \u00b7 d(Q1,Q2).",
+    "novelty_score": 7.0,
+    "probability_score": 6.0,
+    "effort_score": 8.0,
+    "average_score": 7.0,
+    "elimination_reason": "On practical NISQ topologies (IBM heavy-hex, Google Sycamore grid), most node pairs have stretch close to 1.0 because the graphs are sparse and near-tree-like already. The stretch signal provides minimal differentiation across gate pairs. HKDDC captures the same multi-path topology information with far greater discrimination power.",
+    "round": 1
+  },
+  {
+    "name": "Hyperbolic Embedding Routing Cost (HERC)",
+    "status": "eliminated",
+    "description": "Embed the coupling graph in the Poincar\u00e9 disk (hyperbolic space H\u00b2) using force-directed hyperbolic embedding. Use the hyperbolic distance d_H(i,j) = 2 arctanh(||z_i \u2295 (-z_j)||) as routing cost. Captures hierarchical topology naturally.",
+    "novelty_score": 9.0,
+    "probability_score": 5.0,
+    "effort_score": 5.0,
+    "average_score": 6.3,
+    "elimination_reason": "NISQ hardware coupling graphs (grids, heavy-hex) are NOT tree-like, so hyperbolic embedding adds significant distortion. The embedding optimization itself is non-convex and expensive. The resulting distance metric has unclear monotonic relationship with SWAP count on non-hierarchical topologies. Convergence is not guaranteed because d_H may not decrease monotonically as qubits approach adjacency in the coupling graph.",
+    "round": 1
+  }
+]

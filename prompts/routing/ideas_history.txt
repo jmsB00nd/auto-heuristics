@@ -1,0 +1,40 @@
+IDEAS NOT TO TEST (THEY DON'T CONVERGE):
+
+Idea: Stochastic DAG Activation Probability Cost (SDAPC)
+Description: Instead of treating the extended layer as a fixed window, model the entire remaining DAG as a stochastic process. Compute P(g, k) = probability that gate g becomes executable within the next k routing steps, via dynamic programming on the DAG structure. Each gate's contribution to the cost is then weighted by its activation probability, giving a principled, globally-consistent lookahead that automatically degrades for gates blocked by many unresolved dependencies.
+
+Idea: Spectral Embedding Displacement Cost (SEDC)
+Description: Embed each physical qubit into R^k using the k smallest non-trivial eigenvectors of the coupling graph Laplacian (spectral embedding). Physical proximity in the Euclidean spectral space predicts multi-hop routing efficiency better than hop count, because the spectral embedding is globally consistent and reflects the full graph topology. The cost measures squared spectral-space displacement between qubit pairs across the front and extended layers.
+
+Idea: Effective Resistance (Commute Time) Routing Cost (ERCRC)
+Description: Replace hop-count with the *electrical effective resistance* R_eff(i,j) = (e_i - e_j)^T L^+ (e_i - e_j), where L^+ is the Moore-Penrose pseudoinverse of the graph Laplacian. Effective resistance is the expected length of a random walk from i to j and back, and naturally accounts for all parallel paths — not just the shortest. Paths through graph bottlenecks have exponentially larger effective resistance, giving a theoretically grounded difficulty estimate.
+
+Idea: Anharmonic Potential Well Cost (APWC)
+Description: Replace linear/quadratic distance penalty with an anharmonic potential V(d) = d² + β·d⁴. The quartic term creates a steep "wall" for large distances, strongly penalizing qubits far apart while barely penalizing close pairs. This asymmetry better reflects the combinatorial hardness of routing: the cost of bridging 4 hops is disproportionately worse than 2 hops. The β parameter is tunable per hardware topology.
+
+Idea: Concurrent Routing Interference Cost (CRIC)
+Description: When multiple gates in the front layer simultaneously need qubits routed, their shortest paths may share coupling graph edges, creating "traffic congestion." For each candidate SWAP, count how many gate-pairs' shortest paths share that SWAP edge, and penalize proportionally. This is the first method to model routing as a concurrent multi-agent path-finding problem at the cost-function level.
+
+Idea: Tensor Product Neighborhood Alignment Cost (TPNAC)
+Description: For each gate (q1→Q1, q2→Q2), the neighborhoods N(Q1) and N(Q2) in the coupling graph represent the "routing options" available. If N(Q1) ∩ N(Q2) ≠ ∅, the qubits share a common neighbor, enabling 2-SWAP routing. Penalize gates by d(Q1,Q2) scaled inversely by |N(Q1) ∩ N(Q2)| + 1. This rewards situations where the coupling topology naturally facilitates the gate.
+
+Idea: Fourier Topology Frequency Cost (FTFC)
+Description: For hardware topologies with periodic structure (IBM heavy-hex, Google Sycamore grid), embed physical qubit indices into a periodic domain and apply a discrete Fourier transform to the qubit position difference. Use frequency-domain distance as the routing cost, which naturally captures periodicity and long-range resonance in the coupling graph.
+
+Idea: Edge Congestion Anticipation Cost (ECAC)
+Description: Precompute shortest routing paths for all gate pairs in F∪E. Count how many paths cross each coupling edge (edge load). A candidate SWAP is penalized if it uses a high-load edge, forcing subsequent routing to find more expensive alternatives.
+
+Idea: Graph Bottleneck Avoidance Cost (GBAC)
+Description: For each gate pair (Q1,Q2), weight their distance by the inverse of the minimum vertex cut on any path between them. Paths through narrow graph bottlenecks get higher cost, penalizing mappings that force routing through topological chokepoints.
+
+Idea: Critical Path Gate Urgency Cost (CPGUC)
+Description: Weights each gate's routing cost by its position on the circuit's **critical path** — the longest dependency chain from that gate to the circuit output. Gates on the critical path are the bottleneck for total circuit depth; routing them late directly extends depth. Precompute CP(g) = length of longest directed path from g to circuit output in the gate DAG. Normalize: w_g = CP(g) / max_{g'} CP(g'). Replace the uniform or dependency-count weight in the baseline with this critical-path urgency weight.
+
+Idea: Heat Kernel Diffusion Distance Cost (HKDDC)
+Description: Replace the hop-count distance d(i,j) with the **diffusion distance** derived from the graph heat kernel K_t = e^{-tL} (matrix exponential of −t × graph Laplacian L). The diffusion distance h_t(i,j) = ||K_t(i,·) − K_t(j,·)||₂ measures how differently heat diffuses from i vs. j — it is small when the two nodes are well-connected via multiple short paths, and large when separated by bottlenecks. Unlike hop count, it captures the **full topological structure** at scale t. Precomputed offline; plug into standard cost formula.
+
+Idea: Maximum Flow Routing Pressure Cost (MFRPC)
+Description: Gate pairs separated by the same hop count may have vastly different routing difficulty depending on how many **parallel paths** exist between them. A pair on a graph bottleneck with max-flow = 1 requires exclusive use of one edge; a pair with max-flow = 4 has flexible alternatives. Define routing pressure as distance divided by max-flow: gates near bottlenecks get disproportionately high cost, driving the algorithm to resolve them first and avoid congestion.
+
+Idea: k-Step Random Walk Distance Cost (KRWDC)
+Description: Replace hop-count distance with the **k-step random walk divergence** between two nodes. The k-step transition matrix P^k = (D⁻¹A)^k gives the probability of reaching node j from node i in exactly k steps. The L2 distance between row i and row j of P^k measures how differently the k-step neighborhood looks from i vs. j — a topology-aware distance. For k=2, captures 2-hop neighborhoods; for k=3, 3-hop. Captures qualitatively different information than hop count at very low computational overhead (one matrix power).

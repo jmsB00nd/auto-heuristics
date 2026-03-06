@@ -1,0 +1,72 @@
+[
+  {
+    "name": "Qubit Interaction Co-location Amortization Cost (QICAC)",
+    "status": "KEPT",
+    "description": "Precompute for every logical qubit pair (q1, q2) the total number of gates in the *entire remaining* circuit where both q1 and q2 appear together. If a pair must interact k times in the future, the routing cost of closing their current distance is amortized over k future gains. This drives the algorithm to co-locate high-frequency interaction pairs early, preventing repeated routing of the same pair.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Scheduling Slack Urgency Cost (SSUC)",
+    "status": "KEPT",
+    "description": "Precompute ASAP(g) (as-soon-as-possible depth) and ALAP(g) (as-late-as-possible depth) for every gate in the DAG. The scheduling slack slack(g) = ALAP(g) \u2212 ASAP(g) measures how much freedom exists for scheduling g. Gates on the critical path have slack = 0; routing them late directly extends total circuit depth. Replace the raw dependency-count weight with an urgency weight inversely proportional to slack.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Path Length Variance Penalization Cost (PLVPC)",
+    "status": "KEPT",
+    "description": "The standard cost aggregates distances via mean, ignoring *spread*. When some front-layer gates have distance 0 while others have distance 6, the algorithm must still resolve the far ones sequentially \u2014 the bottleneck is the maximum, not the mean. PLVPC penalizes high variance in front-layer distances, forcing the routing toward a balanced state where all gates are approximately equally close to execution.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Coupling Graph Degree-Ratio Peripheral Penalty Cost (CGDRPPC)",
+    "status": "KEPT",
+    "description": "Physical qubits in low-degree positions of the coupling graph (e.g., endpoints in heavy-hex chains) are harder to route through: they have fewer available SWAPs and act as routing dead-ends. When a front/extended layer gate's qubits are assigned to peripheral physical qubits, the routing cost is disproportionately higher. Penalize distances by the \"peripheral weight\" of involved physical qubits.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Cascade Gate Unlock Potential Cost (CGUPC)",
+    "status": "KEPT",
+    "description": "When gate g is executed, it may unblock several successor gates. CGUPC precomputes for each gate g the number of immediate DAG successors that would become executable once g is routed (i.e., all of their other predecessors are already resolved). Gates with high unlock potential are prioritized: routing them first triggers a cascade of free gate executions.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Remaining Circuit Interaction Pressure Cost (RCIPC)",
+    "status": "KEPT",
+    "description": "For each logical qubit q, define its \"interaction pressure\" as the fraction of remaining gates in the full circuit that involve q. High-pressure qubits must participate in many future interactions and need favorable physical positions. Their current routing distances are amplified to incentivize proactive repositioning.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Gate Parallelism Isolation Urgency Cost (GPIUC)",
+    "status": "KEPT",
+    "description": "Some front-layer gates share no qubits with any other front-layer gate \u2014 they are \"isolated\" and can only execute sequentially after routing. Gates with many parallelism partners (gates that share no qubits with them and can run concurrently once routed) are less urgent because progress happens simultaneously. Isolated gates are highest urgency since no other gate benefits from their SWAP.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Betweenness-Weighted Bottleneck Avoidance Cost (BWBAC)",
+    "status": "KEPT",
+    "description": "Betweenness centrality BC(v) measures the fraction of all-pairs shortest paths in the coupling graph that pass through node v. High-BC physical qubits are routing bottlenecks: many circuits must route through them, causing congestion. When current qubit assignments force gates to route through high-BC nodes, the cost is amplified, incentivizing assignments that avoid topological bottlenecks.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Exponential Extended Layer Decay Cost (EELDC)",
+    "status": "KEPT",
+    "description": "The baseline uses 1/layer_index as the extended-layer weight, creating a hyperbolic decay. Replace this with an exponential decay exp(\u2212\u03b1 \u00b7 layer_index). Exponential decay creates a sharper \"relevance boundary\" between near and far lookahead, and the tunable temperature \u03b1 allows topology-specific calibration. At high \u03b1 the cost is purely front-layer; at low \u03b1, deep extended layers still matter.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Progressive Contraction Deadline Cost (PCDC)",
+    "status": "KEPT",
+    "description": "Assign each gate g a \"deadline\" = ALAP_depth(g), the latest circuit depth at which it can be executed without extending the critical path. As the current circuit depth advances toward deadline(g), the routing urgency increases. Gates past their deadline critically extend circuit depth; their distance cost is amplified by a deadline-pressure factor.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  }
+]

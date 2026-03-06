@@ -1,0 +1,33 @@
+{
+  "Chain Continuity Reward Cost (CCRC)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: cannot convert dictionary update sequence element #0 to a sequence",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "cannot convert dictionary update sequence element #0 to a sequence"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "cannot convert dictionary update sequence element #0 to a sequence"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "cannot convert dictionary update sequence element #0 to a sequence"
+      }
+    ]
+  },
+  "Resistance-Weighted Shortest Path Cost (RWSPC)": {
+    "mean_swaps": 688.9545454545455,
+    "mean_depth": 1003.1818181818181,
+    "error": null,
+    "failures": []
+  },
+  "Lyapunov Power Law Cost (LPLC)": {
+    "mean_swaps": 724.5909090909091,
+    "mean_depth": 1087.409090909091,
+    "error": null,
+    "failures": []
+  }
+}

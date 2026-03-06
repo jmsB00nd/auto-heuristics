@@ -1,0 +1,468 @@
+# QUANTUM CIRCUIT ROUTING COST FUNCTIONS — FULL ANALYSIS
+
+---
+
+## PART 1 & 2: ALL IDEAS (KEPT FIRST, RANKED BY SCORE)
+
+---
+
+IDEA_NAME: Differential Gate Priority Cost (DGPC)
+DESCRIPTION: Standard cost functions apply the same penalty regardless of whether a candidate SWAP worsens some gates while improving others. DGPC introduces an asymmetric loss: for each candidate SWAP, compute ΔD(g) = d_after(Q1,Q2) − d_before(Q1,Q2) for every gate in F∪E. Distance reductions contribute their normal weight; distance *increases* for any gate incur an amplified regressive penalty α > 1. This creates a landscape that strongly disfavors SWAPs that sacrifice progress on any gate, even while helping another.
+MATHEMATICAL_FORMULATION:
+```
+regressive(g) = max(0, d_after(Q1,Q2) - d_before(Q1,Q2))
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1)/|F| × (d(Q1,Q2) + α × regressive(g))
+  + W × Σ_{g∈E} (deps+1)/|E| × (d(Q1,Q2) + α × regressive(g)) / layer_factor
+]
+```
+Convergence guaranteed: d(Q1,Q2) decreases as qubits approach; regressive(g) ≥ 0 is bounded; the cost gradient strictly favors SWAPs that reduce net total distance.
+WHY_NOVEL: All existing cost functions (SABRE, QCAP, baseline) are purely forward-looking: they reward distance reduction but never explicitly penalize regressive moves for other gates. DGPC is the first to introduce an asymmetric loss distinguishing improvement from regression within a single SWAP evaluation.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Gate-Coupling Resonance Cost (GCRC)
+DESCRIPTION: In real quantum circuits (VQE, QFT, error-correction), the same logical qubit pair (q1, q2) appears in many repeated gates. If d(Q1,Q2)=3 today and (q1,q2) appears 8 times in the remaining circuit, resolving their distance NOW has 8× the benefit. GCRC precomputes the global pair interaction frequency across the *entire* remaining unexecuted circuit (not just F∪E window) and uses it as a multiplicative resonance weight, transforming the local greedy heuristic into a globally-informed objective.
+MATHEMATICAL_FORMULATION:
+```
+pair_freq(q1,q2) = |{g in all remaining unexecuted gates : g involves q1 and q2}|
+resonance(g) = 1 + log(1 + pair_freq(q1,q2))   [log dampens extreme counts]
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × resonance(g) × d(Q1,Q2) / Σ_{g∈F} resonance(g)
+  + W × Σ_{g∈E} (deps+1) × resonance(g) × d(Q1,Q2) / (layer × Σ_{g∈E} resonance(g))
+]
+```
+Convergence: resonance(g) is a fixed precomputed scalar (updated only when gates complete). d(Q1,Q2) decreases monotonically as routing progresses. Fully convergent.
+WHY_NOVEL: No existing method exploits global circuit-level pair repetition frequency as a routing weight. SABRE and variants only look at a local F∪E window. GCRC is the first to use long-range temporal interaction frequency to bias routing priority toward high-reuse qubit pairs.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Interaction Chain Priority Cost (ICPC)
+DESCRIPTION: When gate g1(q1,q2) is in F and gate g2(q2,q3) is in E — sharing qubit q2 — routing g1 displaces q2's physical location, directly impacting g2's future distance. ICPC explicitly models these cross-gate interaction chains: for each gate g in F, find all extended-layer gates that share a logical qubit, and weight g's routing priority by the depth of its successor chain. Completing a high-chain-depth gate unlocks a cascade of easier subsequent routing.
+MATHEMATICAL_FORMULATION:
+```
+chain_depth(g) = |{g' ∈ E : g shares a logical qubit with g'}|
+chain_bonus(g) = 1 + γ × chain_depth(g) / max_chain_depth
+w_g = (deps+1) × chain_bonus(g)
+
+H = max_decay × [
+    Σ_{g∈F} w_g × d(Q1,Q2) / Σ_{g∈F} w_g
+  + W × Σ_{g∈E} w_g × d(Q1,Q2) / (layer × Σ_{g∈E} w_g)
+]
+```
+Convergence: chain_depth is a DAG-structural quantity (static between gate completions). w_g ≥ 1. d(Q1,Q2) decreases as routing progresses. Robust convergence.
+WHY_NOVEL: Existing methods treat front- and extended-layer gates as independent. ICPC is the first to explicitly weight gates by their qubit-sharing chain length to the extended layer, creating a cross-layer dependency signal that goes beyond depth/dependency counts.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Progressive Distance Deflation Cost (PDDC)
+DESCRIPTION: In the baseline, distance d=4 costs exactly twice as much as d=2. But routing difficulty is not linear: the first few hops have many path options (high flexibility), while the final hop is deterministic (only one valid SWAP). Using log(1+d) captures this deflation: nearly-executable gates (d=1,2) contribute minimally, focusing routing effort on distant pairs. The log also prevents extreme distances from dominating the objective.
+MATHEMATICAL_FORMULATION:
+```
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × log(1 + d(Q1,Q2)) / |F|
+  + W × Σ_{g∈E} (deps+1) × log(1 + d(Q1,Q2)) / (layer × |E|)
+]
+```
+Convergence: log(1+d) is strictly monotone in d ≥ 0. When d=0, log(1)=0 (gate contributes nothing, immediately executable). When d decreases from 4→3→...→0, H decreases continuously. Perfectly convergent by construction.
+WHY_NOVEL: All SOTA cost functions use linear distance. PDDC introduces a fundamentally different distance-to-cost mapping: sub-linear (log) scaling that reweights the routing problem from a proportional to a diminishing-returns objective, changing which gates are prioritized at each step.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Successor Fan-Out Urgency Cost (SFOUC)
+DESCRIPTION: The urgency of a front-layer gate is determined not just by its DAG depth but by its *fan-out*: how many gates it directly unlocks upon completion. A gate with fan-out=5 is a bottleneck gate — completing it simultaneously makes 5 new gates eligible for routing. SFOUC weights routing distance by fan-out, prioritizing bottleneck-breaking gates.
+MATHEMATICAL_FORMULATION:
+```
+fanout(g) = |{g' ∈ DAG : g is a direct predecessor of g'}|
+urgency_weight(g) = (deps+1) × (1 + α × sqrt(fanout(g)))
+  [sqrt prevents extreme fan-out from dominating; α=0.5 default]
+
+H = max_decay × [
+    Σ_{g∈F} urgency_weight(g) × d(Q1,Q2) / Σ_{g∈F} urgency_weight(g)
+  + W × Σ_{g∈E} urgency_weight(g) × d(Q1,Q2) / (layer × Σ_{g∈E} urgency_weight(g))
+]
+```
+Convergence: fanout(g) is a fixed DAG property (precomputed). urgency_weight ≥ 1. The normalization Σ urgency_weight ensures H is bounded. d(Q1,Q2) decreases as routing progresses. Robust convergence.
+WHY_NOVEL: Existing methods (including the baseline) weight by *in*-degree (deps = predecessors). SFOUC weights by *out*-degree (fan-out = successors), which measures how much routing g unblocks the future circuit. This is a fundamentally different DAG-theoretic signal.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Residual Gate Load Pressure Cost (RGLPC)
+DESCRIPTION: Each physical qubit Q carries a "routing pressure": the total weighted routing burden imposed by all pending gates involving Q. When Q is involved in many nearby pending gates (high pressure), it is a routing bottleneck. RGLPC scales each gate's distance contribution by the geometric mean of its qubits' pressure values, amplifying cost for gates at congested physical nodes.
+MATHEMATICAL_FORMULATION:
+```
+pressure(Q) = Σ_{g∈F∪E containing Q} (deps_g + 1) × d(Q, Q_partner_of_Q_in_g)
+max_pressure = max_Q pressure(Q) + ε
+
+pressure_scale(g) = sqrt(pressure(Q1) × pressure(Q2)) / max_pressure  ∈ [0,1]
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × (1 + β × pressure_scale(g)) × d(Q1,Q2) / |F|
+  + W × Σ_{g∈E} (deps+1) × (1 + β × pressure_scale(g)) × d(Q1,Q2) / (layer × |E|)
+]
+```
+Convergence: pressure(Q) is computed fresh each step from current mapping. pressure_scale ∈ [0,1] ensures bounded multiplicative weight. d(Q1,Q2) decreases as routing improves. Converges.
+WHY_NOVEL: No existing method measures per-qubit routing pressure as a multiplicative penalty. RGLPC introduces a node-level congestion signal that goes beyond edge-level or path-level analysis, penalizing gate pairs at over-committed physical qubits.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Harmonic Distance Priority Cost (HDPC)
+DESCRIPTION: Arithmetic averaging of gate distances gives equal weight to all gates. Harmonic averaging fundamentally changes which gates dominate: the harmonic mean is controlled by the *smallest* values (gates closest to executable). By using a weighted harmonic mean, HDPC ensures the algorithm urgently resolves gates at d=1,2 before they fall off the executable horizon — the "last-mile" problem that arithmetic averages systematically under-prioritize.
+MATHEMATICAL_FORMULATION:
+```
+ε = 0.1  [prevent division by zero when d=0]
+
+H_F = |F| / Σ_{g∈F} [ 1 / ((deps+1) × (d(Q1,Q2) + ε)) ]
+
+H_E = |E| / Σ_{g∈E} [ layer / ((deps+1) × (d(Q1,Q2) + ε)) ]
+
+H = max_decay × (H_F + W × H_E)
+```
+Convergence: As any d(Q1,Q2) → 0, that gate's term → ∞ in the denominator sum → H → 0. As all d → 0, H → 0. The cost function correctly vanishes when all gates are executable. No divergence issues with ε > 0.
+WHY_NOVEL: Every SOTA cost function uses arithmetic or weighted-arithmetic aggregation. Harmonic aggregation is a structurally different summary statistic with opposite sensitivity: it prioritizes near-zero distances, creating a mathematically distinct routing gradient.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Qubit Pair Future Frequency Cost (QPFWC)
+DESCRIPTION: If logical qubit pair (q1,q2) appears together in 8 future gates but currently d(Q1,Q2)=3, resolving their distance NOW has 8× the long-term benefit. QPFWC precomputes the global future interaction frequency for every qubit pair across the *entire* remaining circuit (not just F∪E window) and uses log-scaled frequency as a multiplicative weight. This transforms the local greedy cost into a globally-informed long-horizon objective without requiring expensive lookahead.
+MATHEMATICAL_FORMULATION:
+```
+pair_freq(q1,q2) = |{g in all remaining unexecuted gates : g involves q1 and q2}|
+  [updated incrementally as gates complete]
+
+global_weight(g) = 1 + log(1 + pair_freq(q1,q2))
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × global_weight(g) × d(Q1,Q2) / Σ_{g∈F} global_weight(g)
+  + W × Σ_{g∈E} (deps+1) × global_weight(g) × d(Q1,Q2) / (layer × Σ_{g∈E} global_weight(g))
+]
+```
+Convergence: global_weight is a scalar that only changes when gates complete (monotone update). d(Q1,Q2) decreases as routing progresses. Normalization ensures bounded H. Converges.
+WHY_NOVEL: GCRC focuses on pairs in F∪E window; QPFWC uses the *entire* remaining circuit. The key distinction from GCRC is the scope: QPFWC captures global temporal reuse patterns that lie beyond any reasonable window size, making it uniquely powerful for deep circuits.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Predictive Displacement Vector Cost (PDVC)
+DESCRIPTION: For each logical qubit q, compute its "ideal physical target": the node in the coupling graph that minimizes the total weighted distance to all of q's gate partners in F∪E. Rather than routing q toward its immediate gate partner, route it toward this globally-optimal position for all pending interactions. The routing cost of a gate is the distance from q's current mapping to its ideal target — a multi-task routing signal.
+MATHEMATICAL_FORMULATION:
+```
+ideal(q) = argmin_{V ∈ coupling_graph}
+    Σ_{g∈F∪E containing q} (deps_g+1) × dist_matrix[V][Q_partner_of_q_in_g]
+  [can be approximated by weighted centroid heuristic over distance matrix rows]
+
+vector_cost(g) = dist_matrix[Q1][ideal(q1)] + dist_matrix[Q2][ideal(q2)]
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × vector_cost(g) / |F|
+  + W × Σ_{g∈E} (deps+1) × vector_cost(g) / (layer × |E|)
+]
+```
+Convergence: ideal(q) is recomputed each step using precomputed distance_matrix (fast). As routing progresses toward ideal targets, vector_cost → 0. Stable convergence.
+WHY_NOVEL: All existing methods route each gate independently toward its partner. PDVC routes qubits toward their *multi-interaction optimal position*, creating a globally-consistent displacement field. This is the first method to treat qubit routing as a multi-task positioning problem.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Normalized Interaction Pressure Cost (NIPC)
+DESCRIPTION: Each qubit Q's "interaction pressure" is the count of concurrent pending gates involving it in F∪E. Qubits under high concurrent load are routing bottlenecks. NIPC weights each gate by the product of its qubits' concurrent loads, then normalizes the entire cost by total pressure — distributing routing effort proportional to actual multi-task load, not syntactic depth.
+MATHEMATICAL_FORMULATION:
+```
+qubit_load(Q) = |{g ∈ F∪E : Q is a qubit in g}|
+
+interaction_pressure(g) = qubit_load(Q1) × qubit_load(Q2) + 1
+  [product of loads; +1 ensures minimum weight = 1]
+
+total_pressure = Σ_{g∈F∪E} interaction_pressure(g)
+
+H = max_decay × [
+    Σ_{g∈F} interaction_pressure(g)/total_pressure_F × d(Q1,Q2)
+  + W × Σ_{g∈E} interaction_pressure(g)/total_pressure_E × d(Q1,Q2) / layer
+]
+  where total_pressure_F = Σ_{g∈F} interaction_pressure(g), etc.
+```
+Convergence: qubit_load is a count bounded by |F∪E|. interaction_pressure ∈ [1, |F∪E|²]. Normalization ensures weights sum to 1. d decreases as routing progresses. Convergent.
+WHY_NOVEL: Existing methods weight by dependency count (past) or fan-out (future). NIPC weights by *concurrent load* (present): how many simultaneous tasks are competing for each qubit. This introduces a real-time contention signal absent from all existing methods.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Path Fork Diversity Cost (PFDC)
+DESCRIPTION: Two gate pairs may share the same hop-count distance but have radically different routing flexibility. A pair (Q1,Q2) with 8 shortest paths has many rerouting options; a pair with 1 path is constrained to a single bottleneck edge. PFDC scales each gate's adjusted distance by the inverse-log of its path fork count: bottleneck pairs get amplified cost (routing is hard), flexible pairs get discounted cost (routing is easy).
+MATHEMATICAL_FORMULATION:
+```
+fork_count(Q1,Q2) = number of shortest paths from Q1 to Q2 in coupling graph
+  [precomputed for all pairs via modified BFS; O(V(V+E)) offline]
+
+fork_diversity(Q1,Q2) = log(1 + fork_count(Q1,Q2))  [always ≥ log(1) = 0, add ε]
+
+adjusted_distance(g) = d(Q1,Q2) / (fork_diversity(Q1,Q2) + ε)
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × adjusted_distance(g) / |F|
+  + W × Σ_{g∈E} (deps+1) × adjusted_distance(g) / (layer × |E|)
+]
+```
+Convergence: fork_count is precomputed and static (topology doesn't change). adjusted_distance decreases as d(Q1,Q2) decreases. Well-bounded. Converges.
+WHY_NOVEL: The excluded GBAC uses min vertex-cut; PFDC uses path count multiplicity — a fundamentally different quantity. GBAC measures the narrowest bottleneck; PFDC measures routing flexibility (alternative routes), which more directly predicts SWAP efficiency.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Decay-Compensated Urgency Cost (DCUC)
+DESCRIPTION: The SABRE decay correctly penalizes recently-moved qubits to prevent thrashing. But it over-penalizes qubits that require many SWAPs due to large initial distances — a qubit that *needs* to move but keeps being avoided accumulates artificially high decay. DCUC introduces a compensating urgency: if qubit Q has been stationary (decay ≈ 1) for many steps while its pending gate distance remains large, its effective decay is reduced, restoring its routing priority.
+MATHEMATICAL_FORMULATION:
+```
+idle_steps(q) = steps since qubit q was last SWAP'd
+max_pending_dist(q) = max_{g∈F∪E containing q} d(Q, Q_partner)
+
+urgency(q) = min(1.0,  idle_steps(q) × max_pending_dist(q) / urgency_cap)
+  [urgency_cap = tunable constant, e.g. 10]
+
+effective_decay(q) = max(1.0, decay(q) - γ × urgency(q))  [γ ∈ [0,1]]
+max_eff_decay = max(effective_decay(q1), effective_decay(q2))
+
+H = max_eff_decay × [Σ_{g∈F}(deps+1)×d(Q1,Q2)/|F| + W×Σ_{g∈E}(deps+1)×d(Q1,Q2)/(layer×|E|)]
+```
+Convergence: effective_decay ≥ 1 always. urgency ∈ [0,1] bounds the compensation. The main distance signal is identical to baseline. Converges.
+WHY_NOVEL: SABRE decay is one-directional: it only penalizes active qubits. DCUC introduces a bidirectional mechanism — over-penalized idle qubits recover priority. This is the first method to correct for the decay mechanism's systematic bias against large-distance gate pairs.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Distance-Velocity Coupling Cost (DVCC)
+DESCRIPTION: Not all front-layer gates that fail to progress are equally problematic. DVCC tracks the "routing velocity" of each gate — how quickly its d(Q1,Q2) is decreasing over recent routing steps. Gates that are "stuck" (velocity ≈ 0) despite being in the front layer represent hard sub-problems requiring focused attention. DVCC amplifies stuck gates' cost contribution by a velocity-inverse weight.
+MATHEMATICAL_FORMULATION:
+```
+velocity(g) = max(0, d_prev(Q1,Q2) - d_curr(Q1,Q2))
+  [measured per SWAP; maintained as exponential moving average: v̄ ← 0.8×v̄ + 0.2×velocity]
+
+stuck_weight(g) = 1 / (1 + λ × velocity_ema(g))
+  [→ 1 for stuck gates, → 1/(1+∞) for fast-moving gates; λ=2 default]
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × stuck_weight(g) × d(Q1,Q2) / |F|
+  + W × Σ_{g∈E} (deps+1) × stuck_weight(g) × d(Q1,Q2) / (layer × |E|)
+]
+```
+Convergence: The EMA ensures velocity_ema is a smoothed, bounded quantity ∈ [0, max_d]. stuck_weight ∈ (0,1]. d decreases as routing progresses. No divergence paths.
+WHY_NOVEL: No existing routing cost function uses historical distance velocity as a feedback signal. DVCC introduces a closed-loop control mechanism: progress is tracked and under-performing gates self-amplify their cost signal, creating adaptive routing urgency.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Qubit Centrality-Adjusted Distance Cost (QCADC)
+DESCRIPTION: Physical qubits differ in their routing utility: high-betweenness-centrality qubits sit on many shortest paths (routing hubs), while peripheral qubits are dead-ends reachable by few routes. When a gate's qubits are peripheral, the effective routing difficulty exceeds what hop-count alone implies. QCADC scales gate distances by a centrality penalty that amplifies cost for peripheral qubit pairs.
+MATHEMATICAL_FORMULATION:
+```
+BC(Q) = betweenness_centrality(Q) in coupling graph, normalized ∈ [0,1]
+  [precomputed offline; O(VE) for unweighted graphs]
+
+centrality_penalty(g) = 1 + α × (2 - BC(Q1) - BC(Q2)) / 2
+  [→ 1 for max-centrality pairs, → 1+α for fully peripheral pairs; α=0.5 default]
+
+H = max_decay × [
+    Σ_{g∈F} (deps+1) × centrality_penalty(g) × d(Q1,Q2) / |F|
+  + W × Σ_{g∈E} (deps+1) × centrality_penalty(g) × d(Q1,Q2) / (layer × |E|)
+]
+```
+Convergence: centrality_penalty is a static precomputed scalar ∈ [1, 1+α]. d(Q1,Q2) decreases as routing progresses. Multiplying by a fixed positive constant preserves convergence.
+WHY_NOVEL: Existing methods treat all physical qubit positions as equivalent beyond hop-count distance. QCADC introduces graph-theoretic centrality as a difficulty multiplier, explicitly encoding the topological routing advantage of hub qubits vs. peripheral qubits.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Gate Pair Competitive Exclusion Cost (GPCE)
+DESCRIPTION: When two front-layer gates g1(q1,q2) and g2(q3,q4) share a physical routing path (their shortest paths use common edges), routing g1 may displace qubits needed by g2, increasing its routing cost. GPCE penalizes candidate SWAPs that use edges shared by multiple front-layer gates' shortest paths.
+MATHEMATICAL_FORMULATION:
+```
+shared_path_penalty(g1, g2) = |SP(Q1,Q2) ∩ SP(Q3,Q4)|  [edge overlap of shortest paths]
+H_g = d(Q1,Q2) + β × Σ_{g'∈F, g'≠g} shared_path_penalty(g, g')
+```
+WHY_NOVEL: Models front-layer gate competition explicitly via path sharing — different from baseline's independent gate treatment.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Conceptually equivalent to the excluded Concurrent Routing Interference Cost (CRIC). Requires shortest-path computation per SWAP evaluation that becomes stale across steps, leading to non-convergent routing decisions similar to the excluded ECAC/CRIC patterns.
+
+---
+
+IDEA_NAME: Circuit Completion Momentum Cost (CCMC)
+DESCRIPTION: Track the "completion momentum" = gates completed per SWAP over the last K steps. When momentum is high, the W weight on the extended layer decreases (exploitation mode). When momentum drops, W increases (exploration). This adaptive feedback prevents over-committing to a local approach.
+MATHEMATICAL_FORMULATION:
+```
+momentum = Σ_{last K steps} gates_completed / K
+W_adaptive = W_base / (momentum + ε)
+H = max_decay × (H_F + W_adaptive × H_E)
+```
+WHY_NOVEL: First cost function with explicit feedback control loop based on routing success rate.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: W_adaptive introduces a history-dependent feedback loop that can produce oscillatory behavior: low momentum → high W → over-prioritizes extended layer → fewer F completions → momentum stays low → instability. Convergence not guaranteed for all circuit types.
+
+---
+
+IDEA_NAME: Layer-Stratified Dual-Decay Cost (LSDDC)
+DESCRIPTION: Weight each extended-layer gate by a double exponential: e^{−α×layer_index} × e^{−β×deps}, combining layer depth decay with dependency decay multiplicatively instead of the baseline's additive (deps+1)/layer_factor approach.
+MATHEMATICAL_FORMULATION:
+```
+w_g = (deps+1) × exp(-α × layer_index(g)) × exp(-β × deps_g)
+H = max_decay × [Σ_{g∈F} w_g×d / |F| + W×Σ_{g∈E} w_g×d / |E|]
+```
+WHY_NOVEL: Multiplicative dual-exponential decay vs. baseline's additive polynomial.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 6.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Insufficiently novel. The dual exponential is a mathematical variation on the baseline's (deps+1)/layer_factor weighting — same conceptual mechanism. Does not introduce fundamentally new routing signal; just a monotone reparameterization.
+
+---
+
+IDEA_NAME: Temporal Horizon Tightening Cost (THTC)
+DESCRIPTION: Use a time-varying sigmoid to weight extended-layer contributions, where the sigmoid "tightens" as routing progresses: early in routing, all layers contribute equally; late in routing, only the immediate front layer matters. σ(layer, t) = 1/(1 + exp(α(layer − β(1−t/T_max)))).
+MATHEMATICAL_FORMULATION:
+```
+σ(layer, t) = 1 / (1 + exp(α × (layer_index - β × (1 - t/T_max))))
+H = max_decay × Σ_{g∈F∪E} (deps+1) × σ(layer_g, t) × d(Q1,Q2) / normalization
+```
+WHY_NOVEL: Thermodynamically inspired time-varying cost horizon; no prior routing method adapts layer weights dynamically with routing progress.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: The time-varying parameter t/T_max requires estimating total routing steps (T_max unknown a priori). The sigmoid introduces two hyperparameters (α, β) that require per-circuit tuning. Risk of non-convergent behavior similar to excluded APWC (non-linear transformation of distance) when sigmoid flattens.
+
+---
+
+IDEA_NAME: Qubit Interaction Gravity Cost (QIGC)
+DESCRIPTION: Model each physical qubit as exerting gravitational attraction proportional to pending gate load. A SWAP is preferred if it moves qubits toward the "center of mass" of pending gate interactions. gravity(Q) = Σ_{g∈F∪E containing Q} w_g / (dist_to_com + 1)².
+MATHEMATICAL_FORMULATION:
+```
+com = argmin_{V} Σ_{g∈F∪E} w_g × dist_matrix[V][Q1_g] + dist_matrix[V][Q2_g]
+gravity_cost(g) = d(Q1,Q2) / (dist_matrix[Q1][com] + dist_matrix[Q2][com] + 1)
+H = max_decay × Σ_g (deps+1) × gravity_cost(g) / |layer|
+```
+WHY_NOVEL: First physics-inspired gravitational field model for quantum routing.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 5.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: The "center of mass" in a discrete graph is not a topologically stable attractor. As gates complete, the COM shifts discontinuously, causing the cost gradient to flip direction erratically. Dividing by (dist_to_com) can amplify noise near the COM, leading to non-convergent oscillatory routing patterns.
+
+---
+
+## SUMMARY TABLE (KEPT IDEAS)
+
+| Rank | Idea | N | P | E | Avg |
+|------|------|---|---|---|-----|
+| 1 | DGPC — Differential Gate Priority | 8 | 7 | 8 | **7.7** |
+| 2 | GCRC — Gate-Coupling Resonance | 8 | 7 | 7 | **7.3** |
+| 3 | ICPC — Interaction Chain Priority | 8 | 7 | 7 | **7.3** |
+| 4 | PDDC — Progressive Distance Deflation | 7 | 6 | 9 | **7.3** |
+| 5 | SFOUC — Successor Fan-Out Urgency | 7 | 7 | 8 | **7.3** |
+| 6 | RGLPC — Residual Gate Load Pressure | 7 | 6 | 8 | **7.0** |
+| 7 | HDPC — Harmonic Distance Priority | 7 | 6 | 8 | **7.0** |
+| 8 | NIPC — Normalized Interaction Pressure | 7 | 6 | 8 | **7.0** |
+| 9 | QPFWC — Qubit Pair Future Frequency | 7 | 7 | 7 | **7.0** |
+| 10 | PDVC — Predictive Displacement Vector | 8 | 6 | 7 | **7.0** |
+| 11 | PFDC — Path Fork Diversity | 8 | 6 | 6 | **6.7** |
+| 12 | DCUC — Decay-Compensated Urgency | 7 | 6 | 7 | **6.7** |
+| 13 | DVCC — Distance-Velocity Coupling | 7 | 6 | 7 | **6.7** |
+| 14 | QCADC — Qubit Centrality-Adjusted | 7 | 6 | 7 | **6.7** |
+
+**Top recommendations for implementation:**
+- **DGPC** (7.7): Asymmetric regression penalty — minimal overhead, strong convergence signal, directly addresses a gap in all existing methods.
+- **SFOUC** (7.3): Fan-out urgency — trivial to precompute, complementary to the baseline's in-degree weighting.
+- **PDDC** (7.3): Log distance deflation — one-line change to baseline, guaranteed convergence, changes the entire priority ordering of gates.
+- **GCRC / QPFWC** (7.3 / 7.0): Global pair frequency — powerful for structured circuits (VQE, QFT); worth testing on real benchmark suites.

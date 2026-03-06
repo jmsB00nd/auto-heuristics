@@ -1,0 +1,50 @@
+def qlosure_poly_heuristic(self, swap_gate):
+    # Lyapunov Power Law Cost (LPLC)
+    # Replaces linear distance d with d^p, p in (1,2).
+    # Strict convexity of d^p guarantees: any SWAP reducing d by 1
+    # yields a strict cost decrease d^p - (d-1)^p > 0 for all d >= 1.
+    # p=1.5 balances: steeper than linear (avoids flat gradients for large d)
+    # but sub-quadratic (avoids over-penalizing distant pairs).
+    # Marginal gain: p * d^(p-1) = 1.5 * sqrt(d), grows with d.
+
+    p = 1.5   # Lyapunov exponent: (1, 2) open interval
+    W = 0.5   # Extended layer discount weight
+
+    front_layer_size = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    # Front layer: pure power-law Lyapunov potential (no dependency weighting)
+    # V_front = sum_g  dist(Q1, Q2)^p
+    # Removing (deps+1) is intentional: the Lyapunov property relies solely
+    # on the geometry of d^p, not on circuit structure weights.
+    f_potential = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        d = self.distance_matrix[Q1][Q2]
+        f_potential += d ** p
+
+    # Extended layer: power-law potential with harmonic layer discount.
+    # Gates deeper in the lookahead are discounted by 1/layer_idx,
+    # but still penalized super-linearly — preserving the Lyapunov property
+    # at each lookahead depth independently.
+    e_potential = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        d = self.distance_matrix[Q1][Q2]
+        layer_idx = self.extended_layer_index.get(g, 0) + 1  # 1-indexed depth
+        e_potential += (d ** p) / layer_idx
+
+    # Aggregate: decay-scaled, normalized by layer size
+    H = max_decay * (
+        f_potential / front_layer_size
+        + W * (e_potential / extended_layer_size if extended_layer_size else 0.0)
+    )
+
+    return H

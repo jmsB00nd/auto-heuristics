@@ -1,0 +1,105 @@
+Now I have a full picture of the available data structures. Let me implement the QPFPS cost function.
+
+Key design decisions:
+- BFS from each front-layer gate's successors to find the minimum DAG depth at which the **same pair** (q1, q2) interacts again
+- Imminence = `1 / next_depth` — peaks at 1 when re-interaction is one step away
+- Front layer: distance amplified by `(1 + γ · imminence)` — pairs with imminent re-use are strongly penalized for being far apart
+- Extended layer: "hot-pair" boost when the pair already appears in front_layer (avoids expensive BFS on every lookahead gate)
+- BFS capped at depth 20 to stay tractable on deep circuits
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    from collections import deque
+
+    MAX_DEPTH = 20   # BFS horizon for next re-interaction search
+    GAMMA     = 2.0  # Imminence amplification factor (front layer)
+    GAMMA_E   = 1.0  # Imminence amplification factor (extended layer)
+    W         = 1.0  # Extended-layer weight
+
+    front_layer_size    = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    def next_reinteraction_depth(start_gate, tq1, tq2):
+        """
+        BFS over dag2q from start_gate's successors.
+        Returns the minimum hop-depth at which the pair (tq1, tq2)
+        interact again, capped at MAX_DEPTH+1 when not found.
+        """
+        visited = {start_gate}
+        queue   = deque()
+        for s in self.dag2q.get(start_gate, set()):
+            if s not in visited:
+                visited.add(s)
+                queue.append((s, 1))
+        while queue:
+            g, d = queue.popleft()
+            if d > MAX_DEPTH:
+                continue
+            gq1, gq2 = self.access2q[g]
+            if (gq1 == tq1 and gq2 == tq2) or (gq1 == tq2 and gq2 == tq1):
+                return d
+            for s in self.dag2q.get(g, set()):
+                if s not in visited:
+                    visited.add(s)
+                    queue.append((s, d + 1))
+        return MAX_DEPTH + 1  # no re-interaction found within horizon
+
+    # --- Front layer: QPFPS core ---
+    # Precompute imminence per gate while accumulating f_score
+    hot_pairs = {}   # (min_q, max_q) -> imminence (for extended-layer reuse)
+    f_score = 0.0
+
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1     = self.temp_mapping_dict[q1]
+        Q2     = self.temp_mapping_dict[q2]
+        dist   = self.distance_matrix[Q1][Q2]
+
+        nd        = next_reinteraction_depth(g, q1, q2)
+        imminence = 1.0 / nd if nd <= MAX_DEPTH else 0.0
+
+        # Amplified urgency: current distance matters MORE when re-interaction is near
+        f_score += dist * (1.0 + GAMMA * imminence)
+
+        pair = (min(q1, q2), max(q1, q2))
+        # Retain the strongest imminence for this pair (used in extended layer)
+        if pair not in hot_pairs or imminence > hot_pairs[pair]:
+            hot_pairs[pair] = imminence
+
+    # --- Extended layer: proximity-decay with hot-pair imminence boost ---
+    e_score = 0.0
+
+    for g in self.extended_layer:
+        q1, q2   = self.access2q[g]
+        Q1        = self.temp_mapping_dict[q1]
+        Q2        = self.temp_mapping_dict[q2]
+        dist      = self.distance_matrix[Q1][Q2]
+        layer_fac = self.extended_layer_index.get(g, 0) + 1
+
+        pair      = (min(q1, q2), max(q1, q2))
+        imminence = hot_pairs.get(pair, 0.0)  # inherited from front-layer BFS
+
+        e_score += dist * (1.0 + GAMMA_E * imminence) / layer_fac
+
+    H = max_decay * (
+        f_score / front_layer_size
+        + W * (e_score / extended_layer_size if extended_layer_size else 0.0)
+    )
+    return H
+```
+
+**What makes this fundamentally different from both baselines:**
+
+| Aspect | Baseline (deps weighting) | RIF baseline | **QPFPS** |
+|---|---|---|---|
+| Weight signal | `dag_dependencies_count[g]` (depth of the gate in DAG) | Total future interactions across full circuit | **Next** re-interaction hop-distance via BFS |
+| Scope | Global topological depth | Global remaining circuit | **Pair-local, time-resolved** future |
+| Key insight | Deep gates matter more | Frequent pairs matter more | **Imminent re-users must stay close now** |
+| Extended layer | Layer decay + deps | Layer decay + RIF | Layer decay + **inherited imminence from front-layer BFS** |
+
+The core novel contribution is the **imminence amplifier** `1/nd`: when `nd=1` (pair immediately reinteracts), the cost doubles (`GAMMA=2`) — strongly rewarding SWAPs that pre-position the pair. When `nd` is large or infinite, imminence collapses to 0 and the cost reduces to plain distance, avoiding over-penalization for pairs that won't meet again soon.

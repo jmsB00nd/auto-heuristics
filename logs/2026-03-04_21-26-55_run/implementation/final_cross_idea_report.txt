@@ -1,0 +1,43 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-05 22:07:43
+Ideas Tested: 7
+
+## Global Metrics
+- **Generation Success Rate:** 42.86%
+- **Average Score (Mean Swaps):** 765.91
+- **Best Score:** 683.18
+- **Worst Score:** 832.64
+- **Total Number of Tokens:** 9,258
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔ Successor Fan-Out Urgency Cost (SFOUC)
+- Mean Swaps: 683.1818181818181
+- Mean Depth: 1091.6818181818182
+
+### 2. ✔ Two-Hop Neighborhood Overlap Distance Cost (NODC)
+- Mean Swaps: 781.9090909090909
+- Mean Depth: 1109.090909090909
+
+### 3. ✔ Inverse Eccentricity Distance Scaling Cost (IEDSC)
+- Mean Swaps: 832.6363636363636
+- Mean Depth: 1179.909090909091
+
+### 4. ✘ Circuit Progress-Adaptive Decay Cost (CPADC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 5. ✘ Shortest Path Diversity Cost (SPDC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 6. ✘ Gate Dependency Pressure Diffusion Cost (GDPDC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 7. ✘ Free Qubit Opportunity Cost (FQOC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner: Successor Fan-Out Urgency Cost (SFOUC) (Mean Swaps: 683.18)

@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260227_093719
+
+## Idea: Gate Chain Length Weighted Cost (GCLWC)
+## Description: Precompute for each gate g: chain(g) = length of the longest sequence of consecutive 2-qubit gates reachable from g by following direct successor dependencies (2q-gate successors only). A gate heading a long 2q-chain represents a "routing marathon" — resolving its mapping early prevents a cascade of sequential SWAP insertions. Replace baseline's backward-looking (deps+1) weight with forward-looking chain(g), computed offline in O(|V|+|E|) by reverse topological sort over the DAG.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on multiplier_n75__1308CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

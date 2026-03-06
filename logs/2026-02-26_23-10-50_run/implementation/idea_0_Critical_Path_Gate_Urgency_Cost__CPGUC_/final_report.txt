@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260226_234006
+
+## Idea: Critical Path Gate Urgency Cost (CPGUC)
+## Description: Weights each gate's routing cost by its position on the circuit's **critical path** — the longest dependency chain from that gate to the circuit output. Gates on the critical path are the bottleneck for total circuit depth; routing them late directly extends depth. Precompute CP(g) = length of longest directed path from g to circuit output in the gate DAG. Normalize: w_g = CP(g) / max_{g'} CP(g'). Replace the uniform or dependency-count weight in the baseline with this critical-path urgency weight.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on multiplier_n75__1308CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

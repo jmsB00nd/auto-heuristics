@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260227_095241
+
+## Idea: Global Circuit Co-execution Affinity Cost (GCCAC)
+## Description: Precompute for each logical qubit pair (q1,q2): A(q1,q2) = total number of 2-qubit gates between q1 and q2 across the ENTIRE circuit (not just the current window). Use A as the routing weight instead of local dependency count. Logical qubit pairs with many global interactions benefit most from physical proximity — their affinity should drive routing priority throughout the circuit, not just when their gates happen to be in the current extended layer.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on multiplier_n75__1308CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

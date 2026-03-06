@@ -1,0 +1,103 @@
+{
+  "Anharmonic Potential Well Cost (APWC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Anharmonic Potential Well Cost (APWC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    # --- Topology-adaptive beta (cached) ----------------------------------\n    # Normalise the quartic term so that at the graph diameter the quadratic\n    # and quartic contributions are equal: beta = 1 / diameter^2.\n    # This makes the potential symmetric at the extremes and strictly steeper\n    # than pure d^2 for all d > 1, without blowing up on small graphs.\n    if not hasattr(self, '_apwc_beta'):\n        dm = self.distance_matrix\n        n  = self.num_qubits\n        diameter = max(dm[i][j] for i in range(n) for j in range(n))\n        # Guard against degenerate topologies\n        self._apwc_beta = 1.0 / (diameter * diameter) if diameter > 0 else 0.1\n\n    beta = self._apwc_beta\n\n    # Inline hot-path lookups\n    tm   = self.temp_mapping_dict\n    dm   = self.distance_matrix\n    a2q  = self.access2q\n    ddc  = self.dag_dependencies_count\n    eli  = self.extended_layer_index\n\n    # ------------------------------------------------------------------\n    # Anharmonic potential V(d) = d^2 + beta * d^4\n    # For d=1: V\u22481+beta   (barely penalised)\n    # For d=4: V=16+256*beta  (steeply penalised \u2013 the quartic \"wall\")\n    # ------------------------------------------------------------------\n\n    # --- Front-layer cost -----------------------------------------------\n    # Each ready gate contributes its full anharmonic potential,\n    # weighted by criticality (downstream dependency count + 1).\n    f_cost = 0.0\n    fl = self.front_layer\n    fl_size = len(fl)\n    if fl_size == 0:\n        return 0.0\n\n    for gid in fl:\n        qs = a2q[gid]\n        p1, p2 = tm[qs[0]], tm[qs[1]]\n        if p1 == -1 or p2 == -1:\n            continue\n        d = dm[p1][p2]\n        d2 = d * d\n        V = d2 + beta * d2 * d2          # d^2 + beta*d^4\n        crit = ddc[gid] + 1\n        f_cost += crit * V\n\n    # --- Extended-layer (lookahead) cost --------------------------------\n    # Future gates discount linearly with temporal depth so that the\n    # immediate horizon dominates.  A tighter lookahead cap (20 gates)\n    # prevents timeout on deep circuits.\n    e_cost = 0.0\n    el = self.extended_layer\n    el_size = len(el)\n\n    MAX_LOOKAHEAD = 20\n    seen = 0\n    for gid in el:\n        if seen >= MAX_LOOKAHEAD:\n            break\n        qs = a2q[gid]\n        p1, p2 = tm[qs[0]], tm[qs[1]]\n        if p1 == -1 or p2 == -1:\n            seen += 1\n            continue\n        d = dm[p1][p2]\n        d2 = d * d\n        V = d2 + beta * d2 * d2\n        depth = eli.get(gid, 0) + 1      # 1-indexed depth\n        crit  = ddc[gid] + 1\n        e_cost += crit * V / depth\n        seen += 1\n\n    # --- Qubit-health multiplier ----------------------------------------\n    # Prefer swaps that avoid hot/noisy physical qubits.\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # --- Aggregate ----------------------------------------------------------\n    # Normalise each layer by its own size so circuits with large front\n    # layers don't swamp the lookahead signal.\n    H = max_decay * (\n        f_cost / fl_size\n        + (0.5 * e_cost / el_size if el_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "mean_depth": 0,
+        "mean_runtime": 0,
+        "total_circuits": 22,
+        "successful_runs": 0,
+        "failed_runs": 3,
+        "error": "All circuits failed",
+        "first_failure_error": "list index out of range",
+        "first_failure_traceback": "Traceback (most recent call last):\n  File \"/home/jmsb00nd/Documents/auto-heuristics/orchestrator.py\", line 228, in inject_and_run\n    raise exception_container['error']\n  File \"/home/jmsb00nd/Documents/auto-heuristics/orchestrator.py\", line 210, in run_with_timeout\n    min_swaps, min_depth, _ = router.run(heuristic_method=\"Qlosure\")\n  File \"/home/jmsb00nd/Documents/auto-heuristics/src/mapping/routing.py\", line 102, in run\n    swap_count = self.execute_algorithm(\n  File \"/home/jmsb00nd/Documents/auto-heuristics/src/mapping/routing.py\", line 151, in execute_algorithm\n    local_swap_count = self.apply_qlosure_heuristic(param)\n  File \"/home/jmsb00nd/Documents/auto-heuristics/src/mapping/routing.py\", line 231, in apply_qlosure_heuristic\n    score = self.qlosure_poly_heuristic(swap_gate)\n  File \"<string>\", line 10, in qlosure_poly_heuristic\n  File \"<string>\", line 10, in <genexpr>\nIndexError: list index out of range\n"
+      },
+      "status": "FAILED",
+      "error": "All circuits failed",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_203338"
+    }
+  ],
+  "Concurrent Routing Interference Cost (CRIC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Concurrent Routing Interference Cost (CRIC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    u, v = swap_gate[0], swap_gate[1]\n\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    if front_layer_size == 0:\n        return 0.0\n\n    max_decay = max(self.decay_parameter[u], self.decay_parameter[v])\n\n    # ------------------------------------------------------------------ #\n    # Core CRIC primitive: \"Is the candidate SWAP edge (u,v) on a         #\n    # shortest path from Q1 to Q2?\"                                        #\n    #                                                                      #\n    # An undirected edge {u,v} lies on SOME shortest path from Q1 to Q2  #\n    # iff either of these holds:                                           #\n    #   d(Q1,u) + 1 + d(v,Q2) == d(Q1,Q2)   (traverse u\u2192v)              #\n    #   d(Q1,v) + 1 + d(u,Q2) == d(Q1,Q2)   (traverse v\u2192u)              #\n    #                                                                      #\n    # This is strictly broader than walking a single greedy path: it      #\n    # captures every gate whose routing options include this edge, even   #\n    # when multiple equally-short alternatives exist.                     #\n    # ------------------------------------------------------------------ #\n    def edge_on_shortest_path(Q1, Q2, dist):\n        if Q1 < 0 or Q2 < 0 or dist == 0:\n            return False\n        return (\n            self.distance_matrix[Q1][u] + 1 + self.distance_matrix[v][Q2] == dist\n            or\n            self.distance_matrix[Q1][v] + 1 + self.distance_matrix[u][Q2] == dist\n        )\n\n    # ------------------------------------------------------------------ #\n    # Step 1: Front layer \u2014 routing distance & path-sharing count         #\n    #                                                                      #\n    # k  = number of gates whose shortest paths pass through (u,v).      #\n    # Weighted by criticality (dep+1) so urgent gates count more.        #\n    # ------------------------------------------------------------------ #\n    f_distance = 0.0\n    k_front = 0            # unweighted gate count sharing the edge\n\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n\n        dist = self.distance_matrix[Q1][Q2]\n        deps = self.dag_dependencies_count[g]\n        f_distance += (deps + 1) * dist\n\n        if edge_on_shortest_path(Q1, Q2, dist):\n            k_front += 1\n\n    # ------------------------------------------------------------------ #\n    # Step 2: Pairwise routing interference  C(k, 2) = k*(k-1)/2         #\n    #                                                                      #\n    # If k gates all route through (u,v), they form C(k,2) competing     #\n    # pairs.  This SWAP resolves routing for at most ONE of them \u2014 the   #\n    # remaining k-1 gates still need this edge in future rounds, meaning #\n    # we have \"locked in\" congestion rather than relieved it.            #\n    #                                                                      #\n    # Normalise by the maximum possible pairs so the term is always in   #\n    # [0, 1] regardless of front-layer size.                             #\n    # ------------------------------------------------------------------ #\n    pairwise_conflict = k_front * (k_front - 1) / 2\n    max_pairs = front_layer_size * (front_layer_size - 1) / 2\n    norm_conflict = pairwise_conflict / max(max_pairs, 1.0)\n\n    # ------------------------------------------------------------------ #\n    # Step 3: Extended layer \u2014 discounted distance & lookahead conflict   #\n    # ------------------------------------------------------------------ #\n    e_distance = 0.0\n    e_conflict = 0.0  # fractionally discounted by layer depth\n\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n\n        dist = self.distance_matrix[Q1][Q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        e_distance += (deps + 1) * dist / layer_factor\n\n        if edge_on_shortest_path(Q1, Q2, dist):\n            e_conflict += 1.0 / layer_factor\n\n    norm_e_conflict = e_conflict / max(extended_layer_size, 1.0)\n\n    # ------------------------------------------------------------------ #\n    # Step 4: CRIC cost assembly                                          #\n    #                                                                      #\n    # Base routing cost (mirroring the reference heuristic structure):   #\n    #   f_cost  = weighted distance over front layer, per gate            #\n    #   e_cost  = discounted weighted distance over extended layer        #\n    #                                                                      #\n    # Congestion amplifier:                                               #\n    #   (1 + alpha * norm_conflict)  multiplies the routing cost so that #\n    #   a SWAP on a contested edge is penalised even when it reduces      #\n    #   distance \u2014 the multi-agent competition for this edge makes the   #\n    #   routing plan globally less efficient.                             #\n    #                                                                      #\n    # Extended-layer lookahead conflict adds a secondary term to steer   #\n    # away from edges that will be bottlenecks in upcoming rounds.       #\n    #                                                                      #\n    # cost = decay                                                        #\n    #        \u00d7 (1 + \u03b1\u00b7norm_conflict_front)                               #\n    #        \u00d7 ( f_cost/|F|  +  W\u00b7e_cost/|E| )                          #\n    #        + decay \u00d7 \u03b2\u00b7norm_conflict_extended                          #\n    # ------------------------------------------------------------------ #\n    f_cost = f_distance / front_layer_size\n    e_cost = (e_distance / extended_layer_size) if extended_layer_size else 0.0\n\n    ALPHA = 1.5   # how strongly front-layer pairwise conflict amplifies cost\n    BETA  = 0.4   # additive penalty weight for future congestion\n    W_EXT = 0.5   # relative weight of extended lookahead routing cost\n\n    congestion_amplifier = 1.0 + ALPHA * norm_conflict\n\n    cost = max_decay * (\n        congestion_amplifier * (f_cost + W_EXT * e_cost)\n        + BETA * norm_e_conflict\n    )\n\n    return cost",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on adder_n28__42CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on adder_n28__42CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_203909"
+    }
+  ],
+  "Algebraic Commutator-Penalty Distance Cost (ACPDC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Algebraic Commutator-Penalty Distance Cost (ACPDC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    alpha = 0.5  # commutator-penalty scaling factor\n    W = 1.0\n    front_layer_size = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    def compute_C_g(gate_id):\n        \"\"\"\n        Count non-commuting successors of gate_id that share at least one\n        logical qubit with it. Two gates sharing a qubit in a serialized DAG\n        impose a strict ordering constraint (algebraic commutator != 0).\n        \"\"\"\n        gate_qubits = set(self.access2q[gate_id])\n        successors = self.dag2q.get(gate_id, set())\n        count = 0\n        for succ in successors:\n            succ_qubits = set(self.access2q[succ])\n            if gate_qubits & succ_qubits:  # shared qubit => non-commuting\n                count += 1\n        return count\n\n    f_distance = 0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        C_g = compute_C_g(g)\n        # (1 + alpha * C_g): gates deeper in a non-commuting chain are more urgent\n        weight = 1.0 + alpha * C_g\n        f_distance += weight * self.distance_matrix[Q1][Q2]\n\n    e_distance = 0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        C_g = compute_C_g(g)\n        weight = 1.0 + alpha * C_g\n        e_distance += weight * self.distance_matrix[Q1][Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W * (e_distance / extended_layer_size if extended_layer_size else 0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": 681.8181818181819,
+        "mean_depth": 1077.1363636363637,
+        "mean_runtime": 4.6877371723001655,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 681.8181818181819,
+      "mean_depth": 1077.1363636363637,
+      "timestamp": "20260226_204253"
+    }
+  ],
+  "Tensor Product Neighborhood Alignment Cost (TPNAC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Tensor Product Neighborhood Alignment Cost (TPNAC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    W = 0.5\n    front_layer_size  = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # ------------------------------------------------------------------ #\n    # Core TPNAC metric                                                   #\n    # ------------------------------------------------------------------ #\n    def tpnac(Q1, Q2):\n        if Q1 < 0 or Q2 < 0:\n            return 0.0\n        dist = self.distance_matrix[Q1][Q2]\n        if dist == 0:\n            return 0.0\n        # |N(Q1) \u2229 N(Q2)|  \u2014 set intersection of hardware neighbours\n        common = len(self.backend[Q1] & self.backend[Q2])\n        return dist / (common + 1)\n\n    # ------------------------------------------------------------------ #\n    # Front-layer cost                                                    #\n    #   Weighted by criticality so bottleneck gates (many dependants)     #\n    #   dominate the objective.                                           #\n    # ------------------------------------------------------------------ #\n    f_cost = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        criticality = self.dag_dependencies_count[g] + 1\n        f_cost += criticality * tpnac(Q1, Q2)\n\n    # ------------------------------------------------------------------ #\n    # Extended-layer (lookahead) cost                                     #\n    #   Discounted by lookahead depth so near-future gates carry more     #\n    #   weight than distant future gates.                                 #\n    # ------------------------------------------------------------------ #\n    e_cost = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        depth       = self.extended_layer_index.get(g, 0) + 1\n        criticality = self.dag_dependencies_count[g] + 1\n        e_cost += criticality * tpnac(Q1, Q2) / depth\n\n    # ------------------------------------------------------------------ #\n    # Final cost                                                          #\n    # ------------------------------------------------------------------ #\n    H = max_decay * (\n        f_cost / front_layer_size\n        + W * (e_cost / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on qugan_n71__72CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on qugan_n71__72CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_204737"
+    }
+  ],
+  "Gate Depth-Weighted Topological Distance Cost (GDWTDC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Gate Depth-Weighted Topological Distance Cost (GDWTDC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    total_depth = max(self.get_circuit_depth(), 1)  # avoid division by zero\n\n    front_layer_size = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # --- Front layer: high urgency for early gates ---\n    f_cost = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n\n        # Estimate gate's circuit-time position from physical qubit depths\n        gate_depth = max(self.qubit_depth.get(Q1, 0), self.qubit_depth.get(Q2, 0))\n        depth_ratio = gate_depth / total_depth          # in [0, 1]\n        # Urgency: early gates (depth_ratio \u2248 0) \u2192 urgency \u2248 1 (must resolve soon)\n        #          late  gates (depth_ratio \u2248 1) \u2192 urgency \u2248 0 (can wait)\n        urgency = 1.0 - depth_ratio\n\n        dist = self.distance_matrix[Q1][Q2]\n        # Base distance scaled by a (1 + urgency) factor so urgency \u2208 [1, 2]\n        f_cost += (1.0 + urgency) * dist\n\n    # --- Extended (lookahead) layer: also apply urgency gradient ---\n    e_cost = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n\n        gate_depth = max(self.qubit_depth.get(Q1, 0), self.qubit_depth.get(Q2, 0))\n        depth_ratio = gate_depth / total_depth\n        urgency = 1.0 - depth_ratio\n\n        # Discount lookahead gates by their distance from the front\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        dist = self.distance_matrix[Q1][Q2]\n        e_cost += (1.0 + urgency) * dist / layer_factor\n\n    H = max_decay * (\n        f_cost / front_layer_size\n        + (e_cost / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": 741.4545454545455,
+        "mean_depth": 951.5454545454545,
+        "mean_runtime": 5.515499895269221,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 741.4545454545455,
+      "mean_depth": 951.5454545454545,
+      "timestamp": "20260226_205231"
+    }
+  ]
+}

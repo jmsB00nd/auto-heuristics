@@ -1,0 +1,332 @@
+# Quantum Circuit Routing: Novel Cost Function Generation & Evaluation
+
+---
+
+## PART 1 & 2: IDEAS — KEPT (ranked by AVERAGE_SCORE descending)
+
+---
+
+IDEA_NAME: Critical Path Gate Urgency Cost (CPGUC)
+DESCRIPTION: Weights each gate's routing cost by its position on the circuit's **critical path** — the longest dependency chain from that gate to the circuit output. Gates on the critical path are the bottleneck for total circuit depth; routing them late directly extends depth. Precompute CP(g) = length of longest directed path from g to circuit output in the gate DAG. Normalize: w_g = CP(g) / max_{g'} CP(g'). Replace the uniform or dependency-count weight in the baseline with this critical-path urgency weight.
+MATHEMATICAL_FORMULATION:
+```
+CP(g)  = max_{paths g→output in DAG} |path|
+w_g    = CP(g) / max_{g'∈F∪E} CP(g')    ∈ (0,1]
+
+H = max_decay · [ Σ_{g∈F} w_g · d(Q1,Q2) / |F|
+                + W · Σ_{g∈E} w_g · d(Q1,Q2) / (|E| · l_g) ]
+```
+WHY_NOVEL: Existing cost functions (SABRE, qlosure) weight gates by dependency count or layer index — local DAG properties. CP(g) is a **global** circuit-depth-critical property: it directly measures how much this gate controls total compiled depth. No existing routing heuristic exploits the critical-path structure of the gate DAG as a routing weight.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Commutation-Aware SWAP Reuse Cost (CASRC)
+DESCRIPTION: When multiple front-layer gates **commute** (share no qubit and act on commuting operator algebras), a single SWAP can simultaneously progress routing for several of them. Define a commutation class partition of F: gates in the same class can be freely reordered. For each candidate SWAP, count how many gates across commutation classes benefit from it. A SWAP that reduces distance for N commuting gates is N× more efficient than a SWAP that only helps one. The cost is deflated by this reuse factor, incentivizing globally efficient moves.
+MATHEMATICAL_FORMULATION:
+```
+commute(g1,g2) = 1 if qubits(g1)∩qubits(g2)=∅ and [U_g1, U_g2]=0
+
+REUSE(s) = max over commutation classes C of:
+           |{g ∈ F∪E : g ∈ C  AND  d_after_s(Q1,Q2) < d_before(Q1,Q2)}|
+
+H = max_decay · [ Σ_{g∈F} d(Q1,Q2) / (|F| · (1 + α·REUSE(s)))
+                + W · Σ_{g∈E} d(Q1,Q2) / (|E| · l_g) ]
+```
+WHY_NOVEL: All existing methods evaluate each gate's routing need independently. CASRC is the first cost function that exploits algebraic commutativity of the quantum gate set to amortize SWAP cost across commuting gates. It turns a circuit-algebra property into a routing efficiency multiplier — a fundamentally different signal.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Heat Kernel Diffusion Distance Cost (HKDDC)
+DESCRIPTION: Replace the hop-count distance d(i,j) with the **diffusion distance** derived from the graph heat kernel K_t = e^{-tL} (matrix exponential of −t × graph Laplacian L). The diffusion distance h_t(i,j) = ||K_t(i,·) − K_t(j,·)||₂ measures how differently heat diffuses from i vs. j — it is small when the two nodes are well-connected via multiple short paths, and large when separated by bottlenecks. Unlike hop count, it captures the **full topological structure** at scale t. Precomputed offline; plug into standard cost formula.
+MATHEMATICAL_FORMULATION:
+```
+K_t     = e^{-tL}   (precomputed once; L = D - A, graph Laplacian)
+h_t(i,j)= ||K_t(i,:) - K_t(j,:)||_2
+
+H = max_decay · [ Σ_{g∈F} h_t(Q1,Q2) / |F|
+                + W · Σ_{g∈E} h_t(Q1,Q2) / (|E| · l_g) ]
+```
+Convergence: h_t(i,j) → 0 as i→j (same node); as routing proceeds, Q1,Q2 approach adjacency, cost decreases monotonically toward executable configuration.
+WHY_NOVEL: Heat kernels are used in spectral geometry and manifold learning but never in quantum routing. Unlike effective resistance (don't-test list) or hop count, the diffusion distance is **multi-scale**: small t gives local neighborhood structure, large t gives global topology. The scale parameter t can be tuned per hardware topology.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Maximum Flow Routing Pressure Cost (MFRPC)
+DESCRIPTION: Gate pairs separated by the same hop count may have vastly different routing difficulty depending on how many **parallel paths** exist between them. A pair on a graph bottleneck with max-flow = 1 requires exclusive use of one edge; a pair with max-flow = 4 has flexible alternatives. Define routing pressure as distance divided by max-flow: gates near bottlenecks get disproportionately high cost, driving the algorithm to resolve them first and avoid congestion.
+MATHEMATICAL_FORMULATION:
+```
+mf(i,j)      = max_flow(i,j) on coupling graph with unit edge capacities
+                (precomputed via Dinic's algorithm: O(V²·E))
+
+Pressure_g   = d(Q1,Q2) / (mf(Q1,Q2) + ε)
+
+H = max_decay · [ Σ_{g∈F} Pressure_g / |F|
+                + W · Σ_{g∈E} Pressure_g / (|E| · l_g) ]
+```
+Convergence: when Q1,Q2 adjacent, d=1 and mf≥1 always (they share an edge), so Pressure_g → 1/(1+ε) (bounded minimum); gates then execute and leave F.
+WHY_NOVEL: All prior cost functions use distance as a scalar proxy for routing difficulty. MFRPC uses network flow theory to encode **topological routing flexibility** — the denominator mf(i,j) can differ by 4× for same-distance pairs in IBM heavy-hex. First method to divide distance by max-flow as a pressure signal.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: k-Step Random Walk Distance Cost (KRWDC)
+DESCRIPTION: Replace hop-count distance with the **k-step random walk divergence** between two nodes. The k-step transition matrix P^k = (D⁻¹A)^k gives the probability of reaching node j from node i in exactly k steps. The L2 distance between row i and row j of P^k measures how differently the k-step neighborhood looks from i vs. j — a topology-aware distance. For k=2, captures 2-hop neighborhoods; for k=3, 3-hop. Captures qualitatively different information than hop count at very low computational overhead (one matrix power).
+MATHEMATICAL_FORMULATION:
+```
+P     = D⁻¹ A          (random walk matrix; precomputed)
+P^k   = P multiplied k times (precomputed offline)
+
+rw_k(i,j) = ||P^k(i,:) - P^k(j,:)||_2²
+
+H = max_decay · [ Σ_{g∈F} rw_k(Q1,Q2) / |F|
+                + W · Σ_{g∈E} rw_k(Q1,Q2) / (|E| · l_g) ]
+```
+Convergence: rw_k(i,i) = 0 for any k (a node's row compared to itself is 0); as Q1→Q2 (adjacency), rw_k → 0. Gates execute when adjacent → dropped from F → cost decreases.
+WHY_NOVEL: Unlike spectral embedding (don't-test list, uses eigenvectors globally) or effective resistance (uses pseudoinverse), k-step RW distance is a **local, tunable, purely combinatorial** distance. k is a hyperparameter that interpolates between purely local (k=1) and global (k→∞) topology. No existing routing method uses random-walk divergence as a distance metric.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Graph Signal Laplacian Smoothness Cost (GSLSC)
+DESCRIPTION: Encode the routing problem as a **graph signal processing** task. Assign each physical qubit Q a real-valued priority signal f(Q) = sum of priorities of all front-layer and extended-layer gates using Q. An ideal mapping has this signal be **smooth** over the coupling graph: nearby physical qubits should host related gate partners. The Laplacian quadratic form f^T L f = Σ_{(i,j)∈E} (f(i)−f(j))² measures signal roughness. After applying a candidate SWAP(a,b), the mapping changes, yielding new f'. The cost of the SWAP is the resulting smoothness — lower is better.
+MATHEMATICAL_FORMULATION:
+```
+f(Q) = Σ_{g∈F, g uses Q} priority(g) + β · Σ_{g∈E, g uses Q} priority(g)/l_g
+
+After SWAP(a,b): f'(a)=f(b), f'(b)=f(a), others unchanged
+
+H = max_decay · f'^T L f'
+  = max_decay · Σ_{(i,j)∈E_coupling} (f'(i) - f'(j))²
+```
+Convergence: As qubits are routed to be adjacent for their gate partners, the priority signal concentrates on local neighborhoods → f'^T L f' decreases. When all F gates have Q1 adjacent to Q2, signal is locally constant → f'^T L f' = 0 over gate-relevant subgraph.
+WHY_NOVEL: The first routing cost function formulated as a **graph signal smoothness optimization problem**. Prior work views routing as a combinatorial distance problem; GSLSC views it as making the qubit priority landscape smooth over the hardware topology — a signal processing reinterpretation. The Laplacian quadratic form captures all pairwise adjacency interactions simultaneously.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Resistance Distance Gradient Cost (RDGC)
+DESCRIPTION: The effective resistance R_eff(i,j) = (e_i−e_j)^T L⁺ (e_i−e_j) is a well-defined graph metric (in the don't-test list as an absolute distance). RDGC is fundamentally different: instead of using R_eff as a static distance, it computes the **marginal decrease in total effective resistance** caused by each candidate SWAP. A SWAP is evaluated by how much it reduces Σ_g R_eff(Q1_g, Q2_g) over all front/extended gates. This gradient signal identifies SWAPs that most efficiently collapse the resistance landscape toward zero.
+MATHEMATICAL_FORMULATION:
+```
+R_eff(i,j) = (e_i-e_j)^T L^+ (e_i-e_j)   where L^+ = Moore-Penrose pseudoinverse
+
+ΔR(s) = Σ_{g∈F} [R_eff_before(Q1,Q2) - R_eff_after_s(Q1,Q2)]
+       + W · Σ_{g∈E} [R_eff_before(Q1,Q2) - R_eff_after_s(Q1,Q2)] / l_g
+
+H = max_decay · (-ΔR(s))    [minimize H = maximize resistance decrease]
+```
+Convergence: ΔR(s) ≥ 0 for good SWAPs. As qubits become adjacent and gates execute, the total R_eff sum decreases monotonically to 0 (when all remaining gates have adjacent qubits, R_eff = 1 per gate).
+WHY_NOVEL: ERCRC (don't-test list) uses R_eff as an absolute routing distance metric — a drop-in replacement for hop count. RDGC uses it as a **differential signal**: it measures the gradient of the global resistance landscape w.r.t. each SWAP action. This reframes routing as gradient descent on the effective resistance potential, a completely different mathematical paradigm.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Submodular Gate Coverage Cost (SGCC)
+DESCRIPTION: Define a **gate coverage function** COV(s) = number of gates in F∪E that become executable (distance = 1) if SWAP s is applied. This function is submodular: the marginal gain of adding a SWAP diminishes as more SWAPs are applied. Use the marginal coverage gain as a bonus term subtracted from the distance cost: a SWAP that covers many gates gets a large bonus, making the effective cost much lower. This combines greedy submodular maximization theory with standard distance minimization.
+MATHEMATICAL_FORMULATION:
+```
+COV(s) = |{g ∈ F∪E : d_after_s(Q1_g, Q2_g) = 1}|
+
+Δ_COV(s) = COV(s) - COV(∅)   (marginal coverage gain)
+
+f_dist = Σ_{g∈F} d(Q1,Q2) / |F|
+e_dist = Σ_{g∈E} d(Q1,Q2) / (|E| · l_g)
+
+H = max_decay · [f_dist + W · e_dist - α · Δ_COV(s) / |F∪E|]
+```
+α ∈ (0,1] controls coverage bonus strength.
+Convergence: f_dist + W·e_dist ≥ α·Δ_COV for reasonable α, so H > 0 always; as gates are executed and leave F, both the distance terms and the coverage bonus diminish to 0.
+WHY_NOVEL: Submodular optimization is a cornerstone of combinatorial optimization theory but has never been applied to quantum routing. SGCC is the first to formulate **SWAP selection as a submodular coverage maximization problem**, providing a theoretical basis (greedy achieves (1−1/e) approximation) for the one-SWAP-at-a-time selection strategy that all routing algorithms use.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Gate Pair Bipartite Matching Cost (GPBMC)
+DESCRIPTION: Model the routing problem as a **minimum weight bipartite matching** between front-layer gate pairs and coupling graph edges. Each gate g needs its qubit pair (Q1,Q2) to be assigned to some adjacent edge (a,b). The matching weight is the current distance d(Q1,Q2) to that edge's midpoint. Solve the minimum weight matching M* to get the theoretically optimal assignment of gates to edges. For each candidate SWAP, compute the post-SWAP matching cost M*_after and use ΔM = M*_before − M*_after as the SWAP quality measure. Prefer SWAPs with the largest matching improvement.
+MATHEMATICAL_FORMULATION:
+```
+weight(g, edge_e=(a,b)) = d(Q1, a) + d(Q2, b)   (assignment cost)
+
+M* = min_weight_matching over {(g, e) : g∈F, e∈E_coupling}
+
+H = max_decay · [ M*_after_swap / M*_before_swap · f_dist
+                + W · e_dist ]
+```
+Convergence: M*_after / M*_before ∈ (0,1] for improving SWAPs; as front-layer gates reach their target edges, matching weight → |F| · 1 (minimum); gates execute → |F| shrinks → H → 0.
+WHY_NOVEL: No existing routing cost function uses matching theory. This reframes routing as an **assignment problem**: finding the optimal bijection between logical gate needs and physical edge resources. The matching cost provides a **global lower bound** on remaining SWAP count, giving a theoretically grounded cost that other heuristics approximate only accidentally.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Causal Cone Entropy Gate Weighting Cost (CCEGWC)
+DESCRIPTION: The downstream **causal cone** of a gate g = {all gates that transitively depend on g in the DAG}. Partition C(g) into depth levels: n_l(g) = gates at depth l below g. The **causal cone entropy** H_g = −Σ_l p_l log p_l (where p_l = n_l/|C(g)|) measures how "spread" or "concentrated" g's future impact is. A gate with high-entropy cone (uniform spread across many levels) contributes evenly to future circuit depth; a low-entropy gate (impact concentrated at one level) creates a critical bottleneck. High-entropy gates deserve higher routing priority.
+MATHEMATICAL_FORMULATION:
+```
+C(g)     = transitive closure of g's successors in gate DAG
+n_l(g)   = |{g' ∈ C(g) : depth(g') - depth(g) = l}|
+H_g      = -Σ_l (n_l(g)/|C(g)|) · log₂(n_l(g)/|C(g)|)
+
+w_g      = exp(H_g) / Σ_{g'∈F} exp(H_g')   (softmax over F)
+
+H = max_decay · [ Σ_{g∈F} w_g · d(Q1,Q2)
+                + W · Σ_{g∈E} d(Q1,Q2) / (|E| · l_g) ]
+```
+Convergence: w_g is precomputed, positive, and sums to 1 over F. Identical convergence structure to baseline (weighted distance → 0 as qubits become adjacent).
+WHY_NOVEL: Gate weights in all prior methods are based on local DAG properties (degree, layer index). CCEGWC uses **information-theoretic structure of the entire downstream causal cone** — a global, entropy-based signal that captures how a gate's execution propagates through circuit complexity. First application of Shannon entropy to gate priority weighting in routing.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Cheeger Edge Bottleneck Cost (CEBC)
+DESCRIPTION: The **edge betweenness centrality** BC(e) of a coupling edge e = fraction of all-pairs shortest paths that pass through e. An edge with high betweenness is a routing **bottleneck**: many gate pairs must route through it, creating congestion. CEBC uses BC(e) as a weight on the routing path: paths that traverse high-betweenness edges are penalized, because using a bottleneck edge for one gate blocks routing for others. This operationalizes the Cheeger constant bottleneck principle in a computationally tractable way.
+MATHEMATICAL_FORMULATION:
+```
+BC(e)     = Σ_{s≠t} σ(s,t|e) / σ(s,t)   (edge betweenness centrality)
+BC_norm(e)= BC(e) / max_{e'} BC(e')       ∈ (0,1]
+
+path_cost(g) = Σ_{e ∈ SP(Q1,Q2)} (1 + γ · BC_norm(e))
+
+H = max_decay · [ Σ_{g∈F} path_cost(g) / |F|
+                + W · Σ_{g∈E} path_cost(g) / (|E| · l_g) ]
+```
+Convergence: path_cost(g) ≥ d(Q1,Q2) (lower bounded by hop count); goes to (1+γ·BC_norm) when adjacent; gates execute → F shrinks → H → 0.
+WHY_NOVEL: All prior work uses hop count or effective resistance as routing difficulty — purely geometric measures. CEBC uses **topological flow centrality** to encode how scarce a routing resource is. High-betweenness edges are shared resources; the cost function discourages their use, implicitly solving the multi-gate congestion problem without explicit multi-agent planning.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Multi-Commodity Flow Routing Cost (MCFRC)
+DESCRIPTION: Model all front-layer gate pairs simultaneously as commodities in a multi-commodity flow (MCF) problem on the coupling graph. Solve the fractional MCF to get an optimal routing plan. Use decrease in MCF objective per SWAP as cost signal.
+MATHEMATICAL_FORMULATION: min Σ_{(g,paths)} flow_g · path_length_g subject to flow conservation and edge capacity constraints. H(s) = MCF_after(s) / MCF_before.
+WHY_NOVEL: First routing method to use network flow globally over all gate pairs simultaneously.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 7.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Fractional MCF requires solving a large LP at each SWAP selection step. Even with warm-starting, this is O(n³) per evaluation, making it impractical for circuits with >50 qubits. The single-commodity version (MFRPC, kept) captures the key insight with O(VE) precomputation.
+
+---
+
+IDEA_NAME: Algebraic Gate Momentum Cost (AGMC)
+DESCRIPTION: Track "momentum" of each physical qubit as a direction vector in the coupling graph based on its last k SWAP moves. Penalize SWAPs that reverse qubit momentum (anti-parallel moves). Uses exponential decay: m_Q(t) = α·m_Q(t-1) + direction(last_swap_of_Q), α < 1.
+MATHEMATICAL_FORMULATION: H = max_decay · Σ_{g∈F} d(Q1,Q2) · (1 + β · max(0, -cos(angle(m_Q1, target_direction_Q1)))) / |F|
+WHY_NOVEL: First routing cost to introduce qubit-level inertia dynamics from classical mechanics.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Momentum terms can create oscillatory dynamics in dense front layers: a qubit routed east then forced to go west incurs large penalty even when west is optimal. Exponential decay mitigates but does not eliminate this. Convergence is not guaranteed in adversarial DAG structures. The anti-reversal penalty can trap the algorithm in local optima.
+
+---
+
+IDEA_NAME: Minimum Spanning Tree Stretch Cost (MSTSC)
+DESCRIPTION: Precompute the MST of the coupling graph. Define stretch(i,j) = d_MST(i,j)/d_G(i,j) ≥ 1. Multiply hop-count distance by stretch: str(Q1,Q2) · d(Q1,Q2).
+MATHEMATICAL_FORMULATION: H = max_decay · [Σ_{g∈F} stretch(Q1,Q2) · d(Q1,Q2) / |F| + W · e_dist]
+WHY_NOVEL: Uses MST path inflation as a routing difficulty multiplier.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: On practical NISQ topologies (IBM heavy-hex, Google Sycamore grid), most node pairs have stretch close to 1.0 because the graphs are sparse and near-tree-like already. The stretch signal provides minimal differentiation across gate pairs. HKDDC captures the same multi-path topology information with far greater discrimination power.
+
+---
+
+IDEA_NAME: Hyperbolic Embedding Routing Cost (HERC)
+DESCRIPTION: Embed the coupling graph in the Poincaré disk (hyperbolic space H²) using force-directed hyperbolic embedding. Use the hyperbolic distance d_H(i,j) = 2 arctanh(||z_i ⊕ (-z_j)||) as routing cost. Captures hierarchical topology naturally.
+MATHEMATICAL_FORMULATION: H = max_decay · [Σ_{g∈F} d_H(Q1,Q2) / |F| + W · e_dist]
+WHY_NOVEL: Hyperbolic geometry naturally represents tree-like hierarchical graphs with no distortion; brings manifold learning to routing.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 6.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: NISQ hardware coupling graphs (grids, heavy-hex) are NOT tree-like, so hyperbolic embedding adds significant distortion. The embedding optimization itself is non-convex and expensive. The resulting distance metric has unclear monotonic relationship with SWAP count on non-hierarchical topologies. Convergence is not guaranteed because d_H may not decrease monotonically as qubits approach adjacency in the coupling graph.
+
+---
+
+## Summary Table
+
+| Rank | Name | N | P | E | Avg |
+|------|------|---|---|---|-----|
+| 1 | CPGUC | 7 | 8 | 8 | **7.7** |
+| 1 | CASRC | 8 | 8 | 7 | **7.7** |
+| 3 | HKDDC | 8 | 7 | 7 | **7.3** |
+| 3 | MFRPC | 8 | 7 | 7 | **7.3** |
+| 3 | KRWDC | 7 | 7 | 8 | **7.3** |
+| 3 | GSLSC | 8 | 7 | 7 | **7.3** |
+| 3 | RDGC  | 8 | 7 | 7 | **7.3** |
+| 3 | SGCC  | 8 | 7 | 7 | **7.3** |
+| 9 | GPBMC | 8 | 7 | 6 | **7.0** |
+| 9 | CCEGWC| 7 | 7 | 7 | **7.0** |
+| 9 | CEBC  | 8 | 6 | 7 | **7.0** |
+| — | MCFRC *(elim.)* | 9 | 7 | 5 | 7.0 |
+| — | AGMC *(elim.)*  | 8 | 6 | 7 | 7.0 |
+| — | MSTSC *(elim.)* | 7 | 6 | 8 | 7.0 |
+| — | HERC *(elim.)*  | 9 | 5 | 5 | 6.3 |
+
+**Top implementation priorities:** CPGUC and CASRC (highest scores, strong convergence guarantees, O(|DAG|) precomputation). SGCC and MFRPC follow as strong alternatives with novel theoretical grounding.

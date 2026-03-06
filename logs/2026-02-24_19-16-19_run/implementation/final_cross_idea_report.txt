@@ -1,0 +1,53 @@
+
+Cross-Idea Comparison Report
+Generated: 20260226_200050
+Ideas Tested: 5
+
+## Global Metrics
+- **Generation Success Rate:** 40.00%
+- **Average Score (Mean Swaps):** 806.61
+- **Best Score:** 673.95
+- **Worst Score:** 939.27
+- **Total Number of Tokens:** 12,205
+
+## Outperform Rate (vs SOTA)
+Comparing Best Heuristic (Commutator-Aware Non-Blocking Gate Liberation Cost (CANGLC) with **673.95** mean swaps) against baseline methods:
+
+- **SABRE** (Score: 705.727273): OUTPERFORMS by **4.50%**
+- **QMAP** (Score: 706.590909 ): OUTPERFORMS by **4..68%**
+- **PYTKET** (Score: 794.863636 ): OUTPERFORMS by **15.21%**
+- **QLOSURE** (Score: 794.863636 ): OUTPERFORMS by **15.21%**
+
+## Idea Ranking (by Best Mean Swaps)
+
+### 1. ✔ Commutator-Aware Non-Blocking Gate Liberation Cost (CANGLC)
+- Best Mean Swaps: 673.9545454545455
+- Best Mean Depth: 1110.8181818181818
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 2. ✔ Ollivier-Ricci Curvature Weighted Cost (ORCWC)
+- Best Mean Swaps: 939.2727272727273
+- Best Mean Depth: 1101.3636363636363
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 3. ✘ Stochastic DAG Activation Probability Cost (SDAPC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+### 4. ✘ Spectral Embedding Displacement Cost (SEDC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+### 5. ✘ Effective Resistance (Commute Time) Routing Cost (ERCRC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+## Overall Winner: Commutator-Aware Non-Blocking Gate Liberation Cost (CANGLC) (Mean Swaps: 673.95)

@@ -1,0 +1,77 @@
+Good — I can confirm `self.distance_matrix` is a precomputed hop-distance matrix over the hardware graph. That's all I need to derive 2-hop neighborhoods efficiently.
+
+Here is the implementation:
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    W = 1
+    front_layer_size = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+    # ── Build 2-hop neighborhood cache (keyed on physical qubit index) ──────
+    # Neighborhoods are topology-only, so we cache once per Qlosure instance.
+    if not hasattr(self, '_nodc_two_hop_cache'):
+        n = len(self.distance_matrix)
+        self._nodc_two_hop_cache = {
+            q: frozenset(p for p in range(n) if 0 < self.distance_matrix[q][p] <= 2)
+            for q in range(n)
+        }
+
+    def jaccard_two_hop(q1, q2):
+        """Jaccard similarity of 2-hop open neighborhoods of q1 and q2."""
+        n1 = self._nodc_two_hop_cache[q1]
+        n2 = self._nodc_two_hop_cache[q2]
+        union_size = len(n1 | n2)
+        if union_size == 0:
+            return 0.0
+        return len(n1 & n2) / union_size
+
+    # ── Front-layer cost ─────────────────────────────────────────────────────
+    f_distance = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+
+        jac = jaccard_two_hop(Q1, Q2)
+        topo_factor = 1.0 - jac           # high overlap → cheap routing → low cost
+
+        f_distance += (deps + 1) * self.distance_matrix[Q1][Q2] * topo_factor
+
+    # ── Extended-layer cost ──────────────────────────────────────────────────
+    e_distance = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_factor = self.extended_layer_index.get(g, 0) + 1
+        deps = self.dag_dependencies_count[g]
+
+        jac = jaccard_two_hop(Q1, Q2)
+        topo_factor = 1.0 - jac
+
+        e_distance += (deps + 1) * self.distance_matrix[Q1][Q2] * topo_factor / layer_factor
+
+    H = max_decay * (
+        f_distance / front_layer_size
+        + W * ((e_distance / extended_layer_size) if extended_layer_size else 0)
+    )
+
+    return H
+```
+
+**How it differs from the baseline:**
+
+| Aspect | Baseline | NODC |
+|---|---|---|
+| Distance weight | `(deps+1)` only | `(deps+1) × (1 − Jaccard)` |
+| Topology model | Hop-count only | 2-hop neighborhood overlap |
+| Routing signal | Path length | Structural availability of intermediaries |
+
+**Key design decisions:**
+
+- **Open neighborhood** (`0 < dist <= 2`): excludes the qubit itself so Jaccard only measures *shared intermediary* qubits.
+- **`1 − Jaccard` as multiplier**: when Q1 and Q2 share many 2-hop neighbors (many common intermediaries), the swap is structurally cheap — the cost is discounted proportionally. Topologically isolated pairs receive the full distance penalty.
+- **`_nodc_two_hop_cache`**: the hardware topology is fixed during routing, so neighborhoods are computed once and reused across all `qlosure_poly_heuristic` calls, keeping overhead negligible.
+- **Decay + layer-factor structure preserved**: the outer `max_decay` and `1/layer_factor` terms are retained so the heuristic integrates cleanly into the existing SABRE-style search loop.

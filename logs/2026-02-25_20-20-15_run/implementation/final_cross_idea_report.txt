@@ -1,0 +1,52 @@
+
+Cross-Idea Comparison Report
+Generated: 20260226_205231
+Ideas Tested: 5
+
+## Global Metrics
+- **Generation Success Rate:** 40.00%
+- **Average Score (Mean Swaps):** 711.64
+- **Best Score:** 681.82
+- **Worst Score:** 741.45
+- **Total Number of Tokens:** 9,924
+
+## Outperform Rate (vs SOTA)
+Comparing Best Heuristic (Algebraic Commutator-Penalty Distance Cost (ACPDC) with **681.82** mean swaps) against baseline methods:
+
+- **SABRE** (Score: 705.727273): OUTPERFORMS by **3,38%**
+- **QMAP** (Score: 706.590909): OUTPERFORMS by **3,50%**
+- **PYTKET** (Score: 794.863636): OUTPERFORMS by **14,54%**
+
+## Idea Ranking (by Best Mean Swaps)
+
+### 1. ✔ Algebraic Commutator-Penalty Distance Cost (ACPDC)
+- Best Mean Swaps: 681.8181818181819
+- Best Mean Depth: 1077.1363636363637
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 2. ✔ Gate Depth-Weighted Topological Distance Cost (GDWTDC)
+- Best Mean Swaps: 741.4545454545455
+- Best Mean Depth: 951.5454545454545
+- Best at Iteration: 1
+- Successful / Total Iterations: 1 / 1
+
+### 3. ✘ Anharmonic Potential Well Cost (APWC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+### 4. ✘ Concurrent Routing Interference Cost (CRIC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+### 5. ✘ Tensor Product Neighborhood Alignment Cost (TPNAC)
+- Best Mean Swaps: N/A (all failed)
+- Best Mean Depth: 0
+- Best at Iteration: None
+- Successful / Total Iterations: 0 / 1
+
+## Overall Winner: Algebraic Commutator-Penalty Distance Cost (ACPDC) (Mean Swaps: 681.82)

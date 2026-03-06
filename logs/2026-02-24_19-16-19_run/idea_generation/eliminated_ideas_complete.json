@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Cayley Graph Geodesic Permutation Cost (CGPC)",
+    "status": "eliminated",
+    "description": "Embed the set of all logical-to-physical mappings as elements of S_n (symmetric group). The coupling graph defines a generating set S for S_n (adjacent transpositions). The cost of a mapping is its geodesic distance in the Cayley graph Cay(S_n, S), i.e., the minimum number of generators (SWAPs) to reach the identity permutation from the current mapping.",
+    "novelty_score": 9.0,
+    "probability_score": 4.0,
+    "effort_score": 2.0,
+    "average_score": 5.0,
+    "elimination_reason": "Computing geodesic distances in Cay(S_n, S) is #P-hard in general. Even approximations require exponential preprocessing. Fundamentally intractable for n > 10. Strong theoretical novelty does not translate to practical implementation.",
+    "round": 1
+  },
+  {
+    "name": "Persistent Homology Gate Interaction Cost (PHGIC)",
+    "status": "eliminated",
+    "description": "Build a filtered simplicial complex from the gate interaction graph (one simplex per gate dependency, filtered by distance). Use persistent homology to identify topological \"holes\" (H_1 cycles) in the interaction graph. Gates whose qubit pairs span a topological barrier (H_1 generator) are assigned higher cost, as their routing must break a cycle.",
+    "novelty_score": 9.0,
+    "probability_score": 3.0,
+    "effort_score": 3.0,
+    "average_score": 5.0,
+    "elimination_reason": "Coupling graphs for quantum hardware are planar or near-planar with trivial H_1. The topological signal would be near-zero for all common hardware topologies (heavy-hex, grid). Very high implementation complexity for essentially no practical signal.",
+    "round": 1
+  },
+  {
+    "name": "Quantum Walk Interference Amplitude Cost (QWIAC)",
+    "status": "eliminated",
+    "description": "Run a discrete quantum walk on the coupling graph starting from Q1 and measure the amplitude at Q2 after T steps. High amplitude = easy routing; low amplitude (destructive interference) = hard routing. Cost = 1 - |<Q2|U^T|Q1>|^2.",
+    "novelty_score": 9.0,
+    "probability_score": 4.0,
+    "effort_score": 5.0,
+    "average_score": 6.0,
+    "elimination_reason": "Quantum walk amplitudes are oscillatory and non-monotone in T \u2014 the cost function would not converge reliably. Sensitivity to T parameter makes the cost unstable. The interference pattern bears no provable relationship to SWAP count. Intriguing but fundamentally non-convergent without heavy regularization.",
+    "round": 1
+  },
+  {
+    "name": "Tensor Network Bond Dimension Cost (TNBDC)",
+    "status": "eliminated",
+    "description": "Represent the unexecuted circuit as a tensor network (MPS/MERA). Model each SWAP as a contraction of two index tensors. Prefer SWAPs that minimize the bond dimension growth of the resulting tensor network. Low bond dimension = efficient simulation = low entanglement = fewer routing complications.",
+    "novelty_score": 8.0,
+    "probability_score": 4.0,
+    "effort_score": 4.0,
+    "average_score": 5.3,
+    "elimination_reason": "Schmidt rank of individual gates is constant (2 for 2-qubit gates). The bond dimension signal is uniform across all two-qubit gates, providing no discrimination between routing choices. Would require full circuit simulation to extract meaningful entanglement structure, making it computationally intractable at routing time.",
+    "round": 1
+  },
+  {
+    "name": "Entropy Production Rate Cost (EPRC)",
+    "status": "eliminated",
+    "description": "Model the qubit mapping as a probability distribution p over physical positions (softmax of affinity). Each SWAP induces a transition; minimize KL-divergence between the current distribution and a target distribution derived from gate interaction frequencies.",
+    "novelty_score": 7.0,
+    "probability_score": 4.0,
+    "effort_score": 6.0,
+    "average_score": 5.7,
+    "elimination_reason": "The \"target distribution\" must be recomputed at every step, and its definition is ill-posed for general circuits. KL divergence between point masses (hard mappings) requires softmax regularization that introduces arbitrary hyperparameters. Convergence to the correct routing solution is not guaranteed \u2014 the KL landscape may have spurious local minima unrelated to SWAP count.",
+    "round": 1
+  }
+]

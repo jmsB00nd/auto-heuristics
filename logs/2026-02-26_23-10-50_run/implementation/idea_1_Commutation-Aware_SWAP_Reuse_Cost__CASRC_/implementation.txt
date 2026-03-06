@@ -1,0 +1,101 @@
+Looking at the CASRC idea, I need to:
+
+1. Partition front-layer gates into **commutation classes** via Union-Find on shared qubits (gates in different components can freely commute)
+2. Measure which classes **benefit** from the candidate SWAP (distance reduction)
+3. Compute a **reuse factor** = number of benefiting commutation classes
+4. **Deflate** the routing cost by this factor — a SWAP helping N independent gate groups is N× more efficient
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    front_layer = list(self.front_layer)
+    front_layer_size = len(front_layer)
+
+    if front_layer_size == 0:
+        return 0.0
+
+    # --- Step 1: Build commutation classes via Union-Find ---
+    # Gates sharing a logical qubit are in the same conflict chain (don't commute freely).
+    # Gates in DIFFERENT connected components commute freely and can be reordered.
+    parent = {g: g for g in front_layer}
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:          # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    qubit_to_gate = {}
+    for g in front_layer:
+        q1, q2 = self.access2q[g]
+        for q in (q1, q2):
+            if q in qubit_to_gate:
+                union(g, qubit_to_gate[q])
+            qubit_to_gate[q] = g
+
+    # --- Step 2: Accumulate per-class distance and improvement signal ---
+    class_dist = {}   # commutation-class root → total distance after swap
+    class_impr = {}   # commutation-class root → any gate improved?
+
+    for g in front_layer:
+        q1, q2 = self.access2q[g]
+        Q1_b = self.mapping_dict[q1]
+        Q2_b = self.mapping_dict[q2]
+        Q1_a = self.temp_mapping_dict[q1]
+        Q2_a = self.temp_mapping_dict[q2]
+
+        d_before = self.distance_matrix[Q1_b][Q2_b]
+        d_after  = self.distance_matrix[Q1_a][Q2_a]
+
+        cls = find(g)
+        class_dist[cls] = class_dist.get(cls, 0.0) + d_after
+        class_impr[cls] = class_impr.get(cls, False) or (d_after < d_before)
+
+    # --- Step 3: Reuse factor = # independent gate groups that benefit ---
+    # A SWAP helping N commuting groups is N× more globally efficient → deflate cost
+    benefiting_classes = sum(1 for cls, improved in class_impr.items() if improved)
+    reuse_factor = max(1, benefiting_classes)
+
+    # --- Step 4: Front-layer cost deflated by commutation reuse ---
+    total_front_dist = sum(class_dist.values())
+    front_cost = (total_front_dist / front_layer_size) / reuse_factor
+
+    # --- Step 5: Extended lookahead (decay by layer depth) ---
+    extended_layer_size = len(self.extended_layer)
+    e_distance = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_idx = self.extended_layer_index.get(g, 0) + 1
+        e_distance += self.distance_matrix[Q1][Q2] / layer_idx
+
+    e_cost = (e_distance / extended_layer_size) if extended_layer_size else 0.0
+
+    # --- Step 6: Qubit noise/heat penalty ---
+    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+    # --- CASRC Final Cost ---
+    # Globally efficient SWAPs (high reuse_factor) are strongly incentivised
+    W = 0.5
+    H = max_decay * (front_cost + W * e_cost)
+
+    return H
+```
+
+**Key design decisions:**
+
+| Component | Role |
+|---|---|
+| `Union-Find on qubits` | Partitions front layer into commutation classes in O(α·N) time |
+| `class_impr[cls]` | Marks a class as benefiting if *any* gate in it sees distance reduction |
+| `reuse_factor` | Counts independent classes that benefit — divides front cost directly |
+| `/ reuse_factor` | Deflation: a SWAP helping 3 independent classes costs ⅓ of one helping just 1 |
+| Extended layer | Standard lookahead preserved but not deflated (future gates aren't yet in commutation scope) |
+
+The fundamental novelty vs. the baseline: instead of weighting each gate independently by `dag_dependencies_count`, this function reasons about *collective independence* — the commutation structure — to reward globally efficient moves that serve multiple independent gate groups simultaneously.

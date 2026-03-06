@@ -1,0 +1,16 @@
+[
+  {
+    "iteration": 1,
+    "idea_name": "Global Circuit Co-execution Affinity Cost (GCCAC)",
+    "code": "def qlosure_poly_heuristic(self, swap_gate):\n    # Lazily precompute global affinity A(q1, q2) = total 2-qubit gates\n    # between logical qubit pair (q1, q2) across the ENTIRE circuit.\n    # Cached after first call to avoid recomputation overhead.\n    if not hasattr(self, '_global_affinity'):\n        affinity = {}\n        for qubits in self.access2q:\n            if qubits is not None and len(qubits) == 2:\n                q1, q2 = qubits[0], qubits[1]\n                key = (min(q1, q2), max(q1, q2))\n                affinity[key] = affinity.get(key, 0) + 1\n        self._global_affinity = affinity\n\n    affinity = self._global_affinity\n\n    front_layer_size = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    # Front layer: weight physical distance by global affinity of the pair.\n    # High-affinity pairs penalized more when physically far \u2014 drives proximity.\n    f_cost = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        aff = affinity.get((min(q1, q2), max(q1, q2)), 1)\n        f_cost += aff * self.distance_matrix[Q1][Q2]\n\n    f_cost /= front_layer_size\n\n    # Extended layer: same affinity-weighted distance, decayed by lookahead depth.\n    e_cost = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        aff = affinity.get((min(q1, q2), max(q1, q2)), 1)\n        depth_factor = self.extended_layer_index.get(g, 0) + 1\n        e_cost += aff * self.distance_matrix[Q1][Q2] / depth_factor\n\n    if extended_layer_size > 0:\n        e_cost /= extended_layer_size\n\n    # Apply qubit heat/noise penalty via decay parameter\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    return max_decay * (f_cost + e_cost)",
+    "stats": {
+      "mean_swaps": Infinity,
+      "error": "Timeout on multiplier_n75__1308CYC.json"
+    },
+    "status": "FAILED",
+    "error": "Timeout on multiplier_n75__1308CYC.json",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "timestamp": "20260227_095241"
+  }
+]

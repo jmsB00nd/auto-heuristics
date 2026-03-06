@@ -1,0 +1,129 @@
+Here is the complete implementation:
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    from collections import defaultdict, deque
+
+    # ---------------------------------------------------------------------- #
+    # Max-flow via Edmonds-Karp (BFS Ford-Fulkerson) on the hardware graph.  #
+    # Each undirected edge has unit capacity. max-flow(s,t) equals the       #
+    # number of edge-disjoint paths from s to t (Menger's theorem).          #
+    # Results are cached on self._mf_cache since the topology is static.     #
+    # ---------------------------------------------------------------------- #
+    if not hasattr(self, '_mf_cache'):
+        self._mf_cache = {}
+
+    def max_flow(source, sink):
+        if source == sink:
+            return float('inf')
+        cache_key = (min(source, sink), max(source, sink))
+        if cache_key in self._mf_cache:
+            return self._mf_cache[cache_key]
+
+        # Build a fresh residual graph (unit capacities on undirected edges)
+        residual = defaultdict(lambda: defaultdict(int))
+        for u, v in self.backend_connections:
+            residual[u][v] += 1
+            residual[v][u] += 1
+
+        flow = 0
+        while True:
+            # BFS: find shortest augmenting path in residual graph
+            parent = {source: -1}
+            queue = deque([source])
+            while queue and sink not in parent:
+                node = queue.popleft()
+                for nbr, cap in residual[node].items():
+                    if nbr not in parent and cap > 0:
+                        parent[nbr] = node
+                        queue.append(nbr)
+
+            if sink not in parent:
+                break  # no more augmenting paths
+
+            # Find bottleneck capacity along the found path
+            path_flow = float('inf')
+            node = sink
+            while node != source:
+                prev = parent[node]
+                path_flow = min(path_flow, residual[prev][node])
+                node = prev
+
+            # Update residual capacities along the path
+            node = sink
+            while node != source:
+                prev = parent[node]
+                residual[prev][node] -= path_flow
+                residual[node][prev] += path_flow
+                node = prev
+
+            flow += path_flow
+
+        result = max(flow, 1)  # guard: disconnected pairs → pressure stays finite
+        self._mf_cache[cache_key] = result
+        return result
+
+    # ---------------------------------------------------------------------- #
+    # Routing pressure = distance / max_flow                                 #
+    # Bottleneck pairs (max_flow ≈ 1) are amplified; well-connected pairs   #
+    # (high max_flow) are discounted. Weight by gate criticality and         #
+    # lookahead depth, then normalise by layer sizes.                        #
+    # ---------------------------------------------------------------------- #
+    W = 0.5
+    front_layer_size    = max(len(self.front_layer), 1)
+    extended_layer_size = len(self.extended_layer)
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    # Front-layer pressure: full weight, amplified by gate criticality
+    f_pressure = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+        if Q1 < 0 or Q2 < 0:
+            continue
+        dist = self.distance_matrix[Q1][Q2]
+        mf   = max_flow(Q1, Q2)
+        pressure = dist / mf
+        deps = self.dag_dependencies_count[g]
+        f_pressure += (deps + 1) * pressure
+
+    # Extended-layer pressure: discounted by lookahead depth
+    e_pressure = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+        if Q1 < 0 or Q2 < 0:
+            continue
+        dist = self.distance_matrix[Q1][Q2]
+        mf   = max_flow(Q1, Q2)
+        pressure = dist / mf
+        layer_factor = self.extended_layer_index.get(g, 0) + 1
+        deps = self.dag_dependencies_count[g]
+        e_pressure += (deps + 1) * pressure / layer_factor
+
+    H = max_decay * (
+        f_pressure / front_layer_size
+        + W * (e_pressure / extended_layer_size if extended_layer_size else 0.0)
+    )
+
+    return H
+```
+
+---
+
+### Design rationale
+
+| Component | Mechanism | Why it differs from baseline |
+|-----------|-----------|-------------------------------|
+| **`max_flow(Q1, Q2)`** | Edmonds-Karp BFS on unit-capacity hardware graph | Counts edge-disjoint paths (Menger) — purely combinatorial, not in baseline |
+| **`pressure = dist / mf`** | Bottleneck amplification | `dist=3, mf=1` → pressure 3; `dist=3, mf=3` → pressure 1. Baseline uses raw `dist` |
+| **`_mf_cache`** | Lazy-init dict keyed on `(min,max)` pair | Hardware topology is static — each pair computed once, O(1) on repeat calls |
+| **`(deps+1) * pressure`** | Criticality × pressure | Critical gates on bottleneck paths get maximum urgency |
+| **`/ layer_factor`** | Lookahead depth discount | Same lookahead discounting as baseline but applied to pressure, not raw distance |
+| **`max(flow, 1)`** | Disconnected pair guard | Prevents division by zero on unreachable qubit pairs |

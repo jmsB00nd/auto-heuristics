@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Interaction Frequency Lookahead Cost (IFLC)",
+    "status": "KEPT",
+    "description": "Precompute for each logical qubit pair (q1, q2) the total number of remaining gates between them in the circuit DAG: freq(q1, q2). Gates between high-frequency pairs are more urgent \u2014 keeping those pairs physically close prevents repeated routing overhead. The weight replaces the baseline's dependency-count weight with this global interaction frequency, providing a principled lookahead over the entire remaining circuit.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Geometric Layer Decay Cost (GLDC)",
+    "status": "KEPT",
+    "description": "Replace the baseline's harmonic layer discount 1/layer_factor (generating the series 1, 1/2, 1/3, ...) with a geometric (exponential) decay r^(layer_index) for r \u2208 (0,1). Geometric decay assigns weight 1 to layer 0, r to layer 1, r\u00b2 to layer 2, etc. This creates a steeper, always-positive discount that better models diminishing returns of distant lookahead and avoids the long tail of 1/k.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Successor Count Weighting Cost (SCWC)",
+    "status": "KEPT",
+    "description": "Replace the baseline's predecessor-count weight (deps+1) with a successor-count weight: the number of direct successors of each gate in the DAG. A gate with many successors is a high-value unlock \u2014 resolving it immediately enables many future parallel gates. This reorients urgency from \"how blocked am I\" (backward) to \"how much do I enable\" (forward).",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  }
+]

@@ -1,0 +1,87 @@
+Now I have enough context. Let me implement the RWSPC heuristic.
+
+**Key design decisions:**
+- Precompute a resistance-weighted all-pairs distance matrix once (lazy, cached on `self`) using Dijkstra with edge weights `r(e) = 1 / min(deg(u), deg(v))`
+- Substitute `rw_dist[Q1][Q2]` for `self.distance_matrix[Q1][Q2]` everywhere
+- Keep the same criticality (`deps+1`) and lookahead structure as the baseline
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    # --- Lazy precomputation of resistance-weighted distance matrix ---
+    # Topology is fixed during routing, so we compute once and cache.
+    # Edge resistance r(u,v) = 1 / min(deg(u), deg(v)):
+    #   low-degree nodes (bridges/leaves in heavy-hex) yield high resistance,
+    #   making paths through topological bottlenecks naturally more expensive.
+    if not hasattr(self, '_rwspc_rw_dist'):
+        import heapq
+
+        n = len(self.distance_matrix)
+        deg = [len(self.backend[v]) for v in range(n)]
+
+        rw_dist = [[float('inf')] * n for _ in range(n)]
+
+        for src in range(n):
+            rw_dist[src][src] = 0.0
+            pq = [(0.0, src)]
+            while pq:
+                d, u = heapq.heappop(pq)
+                if d > rw_dist[src][u]:
+                    continue
+                for v in self.backend[u]:
+                    # Resistance is inversely proportional to the
+                    # minimum degree of the two endpoints.
+                    # max(1, ...) guards against isolated nodes.
+                    r_uv = 1.0 / max(1, min(deg[u], deg[v]))
+                    nd = d + r_uv
+                    if nd < rw_dist[src][v]:
+                        rw_dist[src][v] = nd
+                        heapq.heappush(pq, (nd, v))
+
+        self._rwspc_rw_dist = rw_dist
+
+    rw_dist = self._rwspc_rw_dist
+
+    # --- Standard heuristic skeleton (resistance-weighted distance inside) ---
+    W = 1.0
+    front_layer_size  = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    f_distance = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2  = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps    = self.dag_dependencies_count[g]
+        f_distance += (deps + 1) * rw_dist[Q1][Q2]
+
+    e_distance = 0.0
+    for g in self.extended_layer:
+        q1, q2      = self.access2q[g]
+        Q1, Q2      = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_factor = self.extended_layer_index.get(g, 0) + 1
+        deps        = self.dag_dependencies_count[g]
+        e_distance  += (deps + 1) * rw_dist[Q1][Q2] / layer_factor
+
+    H = max_decay * (
+        f_distance / front_layer_size
+        + W * (e_distance / extended_layer_size if extended_layer_size else 0.0)
+    )
+    return H
+```
+
+---
+
+**How it differs from the baseline:**
+
+| Aspect | Baseline | RWSPC |
+|---|---|---|
+| Distance metric | `distance_matrix[Q1][Q2]` (BFS hop count) | `rw_dist[Q1][Q2]` (Dijkstra with resistance weights) |
+| Edge weight | 1 per hop (uniform) | `1 / min(deg(u), deg(v))` — topology-aware |
+| Bottleneck sensitivity | None | High — leaves/bridges in heavy-hex are penalized |
+| Precomputation | None | One Dijkstra per source node, cached on `self` |
+| Stability | Stable | Stable (no pseudoinverse, unlike ERCRC) |
+
+**Why this works:** In IBM heavy-hex topologies, degree-2 nodes (the "bridges") are the routing bottlenecks. A hop through a degree-2 node gets resistance `1/2 = 0.5`, while a hop through a degree-3 hub gets `1/3 ≈ 0.33`. Paths forced through many low-degree nodes accumulate higher `rw_dist`, so the heuristic naturally steers the router to prefer routing through high-connectivity hubs — reducing SWAP pressure on congested narrow passages.

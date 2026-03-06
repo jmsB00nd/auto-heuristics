@@ -1,0 +1,68 @@
+[
+  {
+    "name": "Cayley Graph Geodesic Cost (CGGC)",
+    "status": "eliminated",
+    "description": "Embed the routing problem in the Cayley graph of the symmetric group S_n with SWAP generators. The word metric in this Cayley graph gives the exact minimum SWAP count needed to reach any target permutation from the current mapping.",
+    "novelty_score": 10.0,
+    "probability_score": 4.0,
+    "effort_score": 2.0,
+    "average_score": 5.3,
+    "elimination_reason": "State space is n! \u2014 completely intractable for n > 10 physical qubits. No scalable approximation preserves the theoretical properties.",
+    "round": 1
+  },
+  {
+    "name": "Symplectic Qubit Trajectory Cost (SQTC)",
+    "status": "eliminated",
+    "description": "Model qubit swaps as trajectories in a symplectic phase space where position = qubit index, momentum = routing \"velocity.\" Compute symplectic area swept.",
+    "novelty_score": 9.0,
+    "probability_score": 4.0,
+    "effort_score": 3.0,
+    "average_score": 5.3,
+    "elimination_reason": "No natural symplectic structure on discrete graph; \"momentum\" of qubit has no clear physical meaning. Formulation does not yield a deterministic, computable cost function.",
+    "round": 1
+  },
+  {
+    "name": "Discrete Morse Theory Routing Cost (DMTRC)",
+    "status": "eliminated",
+    "description": "Apply discrete Morse theory to the coupling graph to identify \"gradient paths\" (ascending sequences in a Morse function). Routing along gradient paths avoids local minima. Cost = number of critical cells of the Morse function intersected by the routing path.",
+    "novelty_score": 9.0,
+    "probability_score": 4.0,
+    "effort_score": 3.0,
+    "average_score": 5.3,
+    "elimination_reason": "Critical cell structure is a static graph property that does not change with the mapping \u2014 the cost function would not differentiate between candidate SWAPs effectively. Low probability of outperforming SOTA.",
+    "round": 1
+  },
+  {
+    "name": "Topological Persistence Routing Cost (TPRC)",
+    "status": "eliminated",
+    "description": "Filter the coupling graph by distance from each qubit pair, compute persistence diagrams. Persistence intervals for gate pairs represent the \"topological difficulty\" of routing.",
+    "novelty_score": 9.0,
+    "probability_score": 4.0,
+    "effort_score": 3.0,
+    "average_score": 5.3,
+    "elimination_reason": "Computing persistence diagrams per SWAP candidate is O(n\u00b3) per gate \u2014 too slow for practical use. The topological information captured is subsumed by simpler graph metrics.",
+    "round": 1
+  },
+  {
+    "name": "Contraction Tree Complexity Cost (CTCC)",
+    "status": "eliminated",
+    "description": "Model the front-layer gates as a tensor network and use the optimal contraction tree width as the routing cost proxy.",
+    "novelty_score": 8.0,
+    "probability_score": 4.0,
+    "effort_score": 3.0,
+    "average_score": 5.0,
+    "elimination_reason": "Treewidth computation is NP-hard in general. Even approximations are too expensive per routing step. The connection to SWAP count is indirect and unlikely to outperform direct distance measures.",
+    "round": 1
+  },
+  {
+    "name": "Hyperbolicity \u03b4-Aware Routing Cost (HARC)",
+    "status": "eliminated",
+    "description": "Compute the Gromov \u03b4-hyperbolicity of local subgraphs around each gate's qubit pair. High \u03b4 (less hyperbolic) means the local topology is \"flat\" and routing is harder; low \u03b4 means tree-like topology with predictable routing.",
+    "novelty_score": 8.0,
+    "probability_score": 4.0,
+    "effort_score": 4.0,
+    "average_score": 5.3,
+    "elimination_reason": "\u03b4-hyperbolicity is a static graph property \u2014 constant for a fixed coupling graph. It cannot differentiate between different mapping states, making it useless as a routing cost function that varies with the current assignment.",
+    "round": 1
+  }
+]

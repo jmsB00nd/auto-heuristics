@@ -1,0 +1,96 @@
+{
+  "Harmonic Inverse Distance Priority Cost (HIDPC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Harmonic Inverse Distance Priority Cost (HIDPC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    W = 0.5\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # --- Front Layer: Weighted Harmonic Mean ---\n    # Weighted harmonic mean: H = \u03a3(w_i) / \u03a3(w_i / d_i)\n    # A single small distance dominates: creates urgency to finish near-executable gates.\n    f_weight_sum = 0.0\n    f_inv_sum = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        deps = self.dag_dependencies_count[g]\n        weight = deps + 1\n        d = self.distance_matrix[Q1][Q2] + 1  # +1 avoids div-by-zero; d=1 now pulls hardest\n        f_weight_sum += weight\n        f_inv_sum += weight / d\n\n    # H_front = total_weight / \u03a3(weight/d); lower is better (dominated by smallest d)\n    f_harmonic = f_weight_sum / f_inv_sum if f_inv_sum > 0.0 else 0.0\n\n    # --- Extended Layer: Weighted Harmonic Mean with Layer Decay ---\n    # Gates deeper in the lookahead receive lower weights (layer_factor discounts them).\n    e_weight_sum = 0.0\n    e_inv_sum = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        weight = (deps + 1) / layer_factor  # deeper gates contribute less\n        d = self.distance_matrix[Q1][Q2] + 1\n        e_weight_sum += weight\n        e_inv_sum += weight / d\n\n    e_harmonic = e_weight_sum / e_inv_sum if e_inv_sum > 0.0 else 0.0\n\n    # Combine: decay-weighted sum of front + lookahead harmonic costs\n    H = max_decay * (\n        f_harmonic\n        + W * (e_harmonic if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": 702.0909090909091,
+        "mean_depth": 1220.5454545454545,
+        "mean_runtime": 1.2004704800519077,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 702.0909090909091,
+      "mean_depth": 1220.5454545454545,
+      "timestamp": "20260227_093148"
+    }
+  ],
+  "Gate Chain Length Weighted Cost (GCLWC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Gate Chain Length Weighted Cost (GCLWC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    W = 1\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    # --- Step 1: Collect all gates reachable from front+extended via dag2q (2q-successors) ---\n    relevant_gates = set(self.front_layer) | set(self.extended_layer)\n    reachable = set()\n    stack = list(relevant_gates)\n    while stack:\n        g = stack.pop()\n        if g in reachable:\n            continue\n        reachable.add(g)\n        for s in self.dag2q.get(g, set()):\n            if s not in reachable:\n                stack.append(s)\n\n    # --- Step 2: Iterative post-order DFS \u2192 topological order (sinks first, sources last) ---\n    topo_order = []\n    visited = set()\n    for start in reachable:\n        if start in visited:\n            continue\n        dfs_stack = [(start, False)]\n        while dfs_stack:\n            node, processed = dfs_stack.pop()\n            if processed:\n                topo_order.append(node)\n                continue\n            if node in visited:\n                continue\n            visited.add(node)\n            dfs_stack.append((node, True))   # re-push to append after children\n            for succ in self.dag2q.get(node, set()):\n                if succ in reachable and succ not in visited:\n                    dfs_stack.append((succ, False))\n\n    # --- Step 3: Bottom-up chain computation (leaves first in topo_order) ---\n    # chain(g) = 1 + max(chain(s) for s in 2q-successors), leaf = 1\n    chain = {}\n    for g in topo_order:\n        succs = [s for s in self.dag2q.get(g, set()) if s in reachable]\n        if not succs:\n            chain[g] = 1\n        else:\n            chain[g] = 1 + max(chain.get(s, 1) for s in succs)\n\n    # --- Step 4: Front layer \u2014 weighted by forward chain length ---\n    f_distance = 0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        chain_weight = chain.get(g, 1)   # forward-looking: gates heading a long 2q-chain cost more\n        f_distance += chain_weight * self.distance_matrix[Q1][Q2]\n\n    # --- Step 5: Extended layer \u2014 chain weight discounted by lookahead depth ---\n    e_distance = 0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        chain_weight = chain.get(g, 1)\n        e_distance += chain_weight * self.distance_matrix[Q1][Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size +\n        W * ((e_distance / extended_layer_size) if extended_layer_size else 0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on multiplier_n75__1308CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on multiplier_n75__1308CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260227_093719"
+    }
+  ],
+  "Multiplicative Layer Interaction Cost (MLIC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Multiplicative Layer Interaction Cost (MLIC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    W = 1.0\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    # Normalized front layer cost F\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        deps = self.dag_dependencies_count[g]\n        f_distance += (deps + 1) * self.distance_matrix[Q1][Q2]\n\n    F = f_distance / front_layer_size  # normalized\n\n    # Normalized extended layer cost E\n    e_distance = 0.0\n    if extended_layer_size:\n        for g in self.extended_layer:\n            q1, q2 = self.access2q[g]\n            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n            layer_factor = self.extended_layer_index.get(g, 0) + 1\n            deps = self.dag_dependencies_count[g]\n            e_distance += (deps + 1) * self.distance_matrix[Q1][Q2] / layer_factor\n\n        E = e_distance / extended_layer_size  # normalized\n    else:\n        E = 0.0\n\n    # MLIC: multiplicative coupling \u2014 H = F \u00d7 (1 + W\u00d7E)\n    # When F \u2192 0 (front layer nearly resolved), extended noise vanishes naturally.\n    # When both F and E are large, difficulty compounds multiplicatively.\n    H = max_decay * F * (1.0 + W * E)\n\n    return H",
+      "stats": {
+        "mean_swaps": 715.1363636363636,
+        "mean_depth": 1010.2272727272727,
+        "mean_runtime": 4.1615774306384,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 715.1363636363636,
+      "mean_depth": 1010.2272727272727,
+      "timestamp": "20260227_094036"
+    }
+  ],
+  "Circuit Phase Adaptive Lookahead Cost (CPALC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Circuit Phase Adaptive Lookahead Cost (CPALC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    import math\n\n    W     = 1.0   # base lookahead weight\n    alpha = 2.0   # exponential decay rate\n\n    front_layer_size    = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    # \u2500\u2500 1. Circuit progress: count executed 2q-gates \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # BFS forward from front_layer to find ALL remaining (unexecuted) gates\n    T_total = len(self.access2q)\n\n    visited = set(self.front_layer)\n    queue   = list(self.front_layer)\n    while queue:\n        g = queue.pop()\n        for succ in self.dag2q.get(g, set()):\n            if succ not in visited:\n                visited.add(succ)\n                queue.append(succ)\n\n    t        = max(0, T_total - len(visited))   # gates already executed\n    progress = t / T_total if T_total > 0 else 0.0\n\n    # \u2500\u2500 2. Adaptive lookahead weight \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    # W_eff \u2192 W at start (t=0), W_eff \u2192 0 near end (t\u2248T_total)\n    W_eff = W * math.exp(-alpha * progress)\n\n    # \u2500\u2500 3. Hardware noise factor \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # \u2500\u2500 4. Front-layer cost: dependency-weighted distance \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        deps       = self.dag_dependencies_count[g]\n        f_distance += (deps + 1) * self.distance_matrix[Q1][Q2]\n\n    # \u2500\u2500 5. Extended-layer cost: depth-discounted, dependency-weighted \u2500\u2500\u2500\u2500\u2500\u2500\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps         = self.dag_dependencies_count[g]\n        e_distance  += (deps + 1) * self.distance_matrix[Q1][Q2] / layer_factor\n\n    # \u2500\u2500 6. Combine: adaptive W_eff smoothly silences lookahead over time \u2500\u2500\u2500\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W_eff * (e_distance / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on multiplier_n75__1308CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on multiplier_n75__1308CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260227_094646"
+    }
+  ],
+  "Global Circuit Co-execution Affinity Cost (GCCAC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Global Circuit Co-execution Affinity Cost (GCCAC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    # Lazily precompute global affinity A(q1, q2) = total 2-qubit gates\n    # between logical qubit pair (q1, q2) across the ENTIRE circuit.\n    # Cached after first call to avoid recomputation overhead.\n    if not hasattr(self, '_global_affinity'):\n        affinity = {}\n        for qubits in self.access2q:\n            if qubits is not None and len(qubits) == 2:\n                q1, q2 = qubits[0], qubits[1]\n                key = (min(q1, q2), max(q1, q2))\n                affinity[key] = affinity.get(key, 0) + 1\n        self._global_affinity = affinity\n\n    affinity = self._global_affinity\n\n    front_layer_size = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    # Front layer: weight physical distance by global affinity of the pair.\n    # High-affinity pairs penalized more when physically far \u2014 drives proximity.\n    f_cost = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        aff = affinity.get((min(q1, q2), max(q1, q2)), 1)\n        f_cost += aff * self.distance_matrix[Q1][Q2]\n\n    f_cost /= front_layer_size\n\n    # Extended layer: same affinity-weighted distance, decayed by lookahead depth.\n    e_cost = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 == -1 or Q2 == -1:\n            continue\n        aff = affinity.get((min(q1, q2), max(q1, q2)), 1)\n        depth_factor = self.extended_layer_index.get(g, 0) + 1\n        e_cost += aff * self.distance_matrix[Q1][Q2] / depth_factor\n\n    if extended_layer_size > 0:\n        e_cost /= extended_layer_size\n\n    # Apply qubit heat/noise penalty via decay parameter\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    return max_decay * (f_cost + e_cost)",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on multiplier_n75__1308CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on multiplier_n75__1308CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260227_095241"
+    }
+  ]
+}

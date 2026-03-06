@@ -1,0 +1,72 @@
+[
+  {
+    "name": "Differential Gate Priority Cost (DGPC)",
+    "status": "KEPT",
+    "description": "Standard cost functions apply the same penalty regardless of whether a candidate SWAP worsens some gates while improving others. DGPC introduces an asymmetric loss: for each candidate SWAP, compute \u0394D(g) = d_after(Q1,Q2) \u2212 d_before(Q1,Q2) for every gate in F\u222aE. Distance reductions contribute their normal weight; distance *increases* for any gate incur an amplified regressive penalty \u03b1 > 1. This creates a landscape that strongly disfavors SWAPs that sacrifice progress on any gate, even while helping another.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Gate-Coupling Resonance Cost (GCRC)",
+    "status": "KEPT",
+    "description": "In real quantum circuits (VQE, QFT, error-correction), the same logical qubit pair (q1, q2) appears in many repeated gates. If d(Q1,Q2)=3 today and (q1,q2) appears 8 times in the remaining circuit, resolving their distance NOW has 8\u00d7 the benefit. GCRC precomputes the global pair interaction frequency across the *entire* remaining unexecuted circuit (not just F\u222aE window) and uses it as a multiplicative resonance weight, transforming the local greedy heuristic into a globally-informed objective.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Interaction Chain Priority Cost (ICPC)",
+    "status": "KEPT",
+    "description": "When gate g1(q1,q2) is in F and gate g2(q2,q3) is in E \u2014 sharing qubit q2 \u2014 routing g1 displaces q2's physical location, directly impacting g2's future distance. ICPC explicitly models these cross-gate interaction chains: for each gate g in F, find all extended-layer gates that share a logical qubit, and weight g's routing priority by the depth of its successor chain. Completing a high-chain-depth gate unlocks a cascade of easier subsequent routing.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Progressive Distance Deflation Cost (PDDC)",
+    "status": "KEPT",
+    "description": "In the baseline, distance d=4 costs exactly twice as much as d=2. But routing difficulty is not linear: the first few hops have many path options (high flexibility), while the final hop is deterministic (only one valid SWAP). Using log(1+d) captures this deflation: nearly-executable gates (d=1,2) contribute minimally, focusing routing effort on distant pairs. The log also prevents extreme distances from dominating the objective.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Successor Fan-Out Urgency Cost (SFOUC)",
+    "status": "KEPT",
+    "description": "The urgency of a front-layer gate is determined not just by its DAG depth but by its *fan-out*: how many gates it directly unlocks upon completion. A gate with fan-out=5 is a bottleneck gate \u2014 completing it simultaneously makes 5 new gates eligible for routing. SFOUC weights routing distance by fan-out, prioritizing bottleneck-breaking gates.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Residual Gate Load Pressure Cost (RGLPC)",
+    "status": "KEPT",
+    "description": "Each physical qubit Q carries a \"routing pressure\": the total weighted routing burden imposed by all pending gates involving Q. When Q is involved in many nearby pending gates (high pressure), it is a routing bottleneck. RGLPC scales each gate's distance contribution by the geometric mean of its qubits' pressure values, amplifying cost for gates at congested physical nodes.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Harmonic Distance Priority Cost (HDPC)",
+    "status": "KEPT",
+    "description": "Arithmetic averaging of gate distances gives equal weight to all gates. Harmonic averaging fundamentally changes which gates dominate: the harmonic mean is controlled by the *smallest* values (gates closest to executable). By using a weighted harmonic mean, HDPC ensures the algorithm urgently resolves gates at d=1,2 before they fall off the executable horizon \u2014 the \"last-mile\" problem that arithmetic averages systematically under-prioritize.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Qubit Pair Future Frequency Cost (QPFWC)",
+    "status": "KEPT",
+    "description": "If logical qubit pair (q1,q2) appears together in 8 future gates but currently d(Q1,Q2)=3, resolving their distance NOW has 8\u00d7 the long-term benefit. QPFWC precomputes the global future interaction frequency for every qubit pair across the *entire* remaining circuit (not just F\u222aE window) and uses log-scaled frequency as a multiplicative weight. This transforms the local greedy cost into a globally-informed long-horizon objective without requiring expensive lookahead.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Predictive Displacement Vector Cost (PDVC)",
+    "status": "KEPT",
+    "description": "For each logical qubit q, compute its \"ideal physical target\": the node in the coupling graph that minimizes the total weighted distance to all of q's gate partners in F\u222aE. Rather than routing q toward its immediate gate partner, route it toward this globally-optimal position for all pending interactions. The routing cost of a gate is the distance from q's current mapping to its ideal target \u2014 a multi-task routing signal.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Normalized Interaction Pressure Cost (NIPC)",
+    "status": "KEPT",
+    "description": "Each qubit Q's \"interaction pressure\" is the count of concurrent pending gates involving it in F\u222aE. Qubits under high concurrent load are routing bottlenecks. NIPC weights each gate by the product of its qubits' concurrent loads, then normalizes the entire cost by total pressure \u2014 distributing routing effort proportional to actual multi-task load, not syntactic depth.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  }
+]

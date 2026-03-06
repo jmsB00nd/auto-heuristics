@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260226_235935
+
+## Idea: k-Step Random Walk Distance Cost (KRWDC)
+## Description: Replace hop-count distance with the **k-step random walk divergence** between two nodes. The k-step transition matrix P^k = (D⁻¹A)^k gives the probability of reaching node j from node i in exactly k steps. The L2 distance between row i and row j of P^k measures how differently the k-step neighborhood looks from i vs. j — a topology-aware distance. For k=2, captures 2-hop neighborhoods; for k=3, 3-hop. Captures qualitatively different information than hop count at very low computational overhead (one matrix power).
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: Timeout on adder_n28__42CYC.json
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

@@ -1,0 +1,374 @@
+Below are **18 novel cost function ideas**, evaluated and ranked. All formulations are deterministic and convergent.
+
+---
+
+## KEPT IDEAS (ranked by AVERAGE_SCORE descending)
+
+---
+
+IDEA_NAME: Anharmonic Potential Well Cost (APWC)
+DESCRIPTION: Replace linear/quadratic distance penalty with an anharmonic potential V(d) = d² + β·d⁴. The quartic term creates a steep "wall" for large distances, strongly penalizing qubits far apart while barely penalizing close pairs. This asymmetry better reflects the combinatorial hardness of routing: the cost of bridging 4 hops is disproportionately worse than 2 hops. The β parameter is tunable per hardware topology.
+MATHEMATICAL_FORMULATION:
+```
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} (deps_g+1) · [d(Q1,Q2)² + β·d(Q1,Q2)⁴]
++ W · (1/|E|) · Σ_{g∈E} (deps_g+1) · [d(Q1,Q2)² + β·d(Q1,Q2)⁴] / layer_g
+]
+```
+where β ∈ [0.1, 0.5] is a topology-specific constant, d is shortest-path distance.
+WHY_NOVEL: SABRE and similar methods use linear distance. Polynomial-quartic potentials from classical molecular dynamics have never been applied to qubit routing. The quartic term creates natural "attractive basins" that resist moving already-close qubits apart.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Concurrent Routing Interference Cost (CRIC)
+DESCRIPTION: When multiple gates in the front layer simultaneously need qubits routed, their shortest paths may share coupling graph edges, creating "traffic congestion." For each candidate SWAP, count how many gate-pairs' shortest paths share that SWAP edge, and penalize proportionally. This is the first method to model routing as a concurrent multi-agent path-finding problem at the cost-function level.
+MATHEMATICAL_FORMULATION:
+```
+For SWAP on edge e = (u,v):
+  overlap(g, e) = 1 if e ∈ SP(Q1_g, Q2_g) else 0
+
+  congestion(e) = Σ_{g∈F} overlap(g, e)
+
+H = max_decay · (1/|F|) · Σ_{g∈F} d(Q1_g, Q2_g) · (1 + γ · congestion(SP_edge_g))
+```
+where SP_edge_g is the first edge of the shortest path from Q1_g to Q2_g, γ ∈ [0.5, 2].
+WHY_NOVEL: SABRE ignores edge congestion entirely. CRIC models the coupling graph as a shared resource under contention — analogous to network congestion control in packet routing, never applied to quantum mapping.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Algebraic Commutator-Penalty Distance Cost (ACPDC)
+DESCRIPTION: Gates that do not commute with each other and share qubits impose a strict ordering constraint. Weight each gate's distance contribution by (1 + α · C_g) where C_g = number of non-commuting successors of g in the DAG that share at least one logical qubit with g. High C_g means moving g's qubits is "urgent" — delaying it creates a long serialized chain.
+MATHEMATICAL_FORMULATION:
+```
+C_g = |{g' ∈ successors(g) : shared_qubits(g,g') ≠ ∅ ∧ [g,g'] ≠ 0}|
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} (1 + α·C_g) · d(Q1_g, Q2_g)
++ W · (1/|E|) · Σ_{g∈E} (1 + α·C_g) · d(Q1_g, Q2_g) / layer_g
+]
+```
+where α ∈ [0.5, 2], and [g,g'] ≠ 0 is checked via gate type lookup table.
+WHY_NOVEL: No existing routing heuristic incorporates algebraic commutativity structure from the gate set into the per-gate distance weights. This adds gate-algebra awareness absent from all distance-based methods.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Minimum Spanning Tree Congestion Cost (MSTCC)
+DESCRIPTION: Build a virtual "demand graph" where nodes are physical qubits and edge weight = Σ distances of all gate pairs needing those qubits connected. Compute the MST of this demand graph. Assign each coupling graph edge a "load" = number of gate-pair shortest paths passing through it. The MST structure reveals which coupling edges are true bottlenecks; the SWAP cost is weighted by the load on the edge used.
+MATHEMATICAL_FORMULATION:
+```
+Demand graph D: w(i,j) = Σ_{g: Q1_g=i or Q2_g=j} d(Q1_g, Q2_g)
+MST_D = minimum spanning tree of D
+
+edge_load(e) = |{g∈F∪E : e ∈ SP(Q1_g, Q2_g)}|
+
+H = max_decay · (1/|F|) · Σ_{g∈F} d(Q1_g,Q2_g) · (1 + λ · edge_load(SP_first_g))
+```
+WHY_NOVEL: MST on the demand graph exposes global routing bottlenecks in a single pass. No existing method uses the MST of the gate-demand graph to inform per-SWAP cost.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Critical Path Slack-Weighted Distance Cost (CPSWDC)
+DESCRIPTION: Compute for each gate g its total slack = (latest executable timestep − earliest executable timestep) from a standard CPM (Critical Path Method) analysis of the DAG. Gates with slack = 0 are on the critical path and must be routed immediately; high-slack gates can wait. Weight each gate's distance by 1/(1 + slack_g), so critical-path gates dominate the cost function.
+MATHEMATICAL_FORMULATION:
+```
+ES_g = max(ES_{pred} + 1) for predecessors; LS_g from backward pass
+slack_g = LS_g - ES_g  (≥ 0 always)
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} [1/(1+slack_g)] · d(Q1_g, Q2_g)
++ W · (1/|E|) · Σ_{g∈E} [1/(1+slack_g)] · d(Q1_g, Q2_g) / layer_g
+]
+```
+WHY_NOVEL: CPM slack is standard in classical scheduling but has never been used as a per-gate weight in quantum routing cost functions. It provides DAG-global awareness without the non-convergence issues of probabilistic lookahead.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Tensor Product Neighborhood Alignment Cost (TPNAC)
+DESCRIPTION: For each gate (q1→Q1, q2→Q2), the neighborhoods N(Q1) and N(Q2) in the coupling graph represent the "routing options" available. If N(Q1) ∩ N(Q2) ≠ ∅, the qubits share a common neighbor, enabling 2-SWAP routing. Penalize gates by d(Q1,Q2) scaled inversely by |N(Q1) ∩ N(Q2)| + 1. This rewards situations where the coupling topology naturally facilitates the gate.
+MATHEMATICAL_FORMULATION:
+```
+align(Q1,Q2) = |N(Q1) ∩ N(Q2)| + 1  (always ≥ 1)
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} d(Q1_g,Q2_g) / align(Q1_g,Q2_g)
++ W · (1/|E|) · Σ_{g∈E} d(Q1_g,Q2_g) / (align(Q1_g,Q2_g) · layer_g)
+]
+```
+WHY_NOVEL: Neighborhood intersection is a local topological property that captures "routing flexibility" around each gate's qubit pair — completely absent from distance-only heuristics.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Gate Depth-Weighted Topological Distance Cost (GDWTDC)
+DESCRIPTION: Normalize each gate's depth position in the circuit: depth_ratio_g = depth_g / total_depth. Multiply the distance contribution by depth_ratio_g so that early-circuit gates (small ratio, must be resolved soon) are weighted higher, and late-circuit gates contribute less. This creates a "time-urgency gradient" over the circuit.
+MATHEMATICAL_FORMULATION:
+```
+depth_ratio_g = (topological_depth_g + 1) / (total_circuit_depth + 1)  ∈ (0,1]
+urgency_g = 1 / depth_ratio_g  (gates near start have high urgency)
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} urgency_g · d(Q1_g, Q2_g)
++ W · (1/|E|) · Σ_{g∈E} urgency_g · d(Q1_g, Q2_g) / layer_g
+]
+```
+WHY_NOVEL: Using normalized DAG depth as a per-gate urgency multiplier creates a global scheduling awareness. SABRE only uses layer position within the extended layer, not absolute DAG depth.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Cheeger Cut Bottleneck Cost (CCBC)
+DESCRIPTION: For each gate pair (Q1,Q2), compute the minimum edge cut h(Q1,Q2) separating them in the coupling graph (Menger's theorem: equals min-cut). A small min-cut means Q1 and Q2 are in different "lobes" of the graph connected by few edges — routing is topologically expensive. Weight distances by 1/h(Q1,Q2) to penalize cross-cut gates.
+MATHEMATICAL_FORMULATION:
+```
+h(Q1,Q2) = min-edge-cut between Q1 and Q2 in coupling graph G
+         (precomputed for all pairs via max-flow, O(n³))
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} d(Q1_g,Q2_g) / h(Q1_g,Q2_g)
++ W · (1/|E|) · Σ_{g∈E} d(Q1_g,Q2_g) / (h(Q1_g,Q2_g) · layer_g)
+]
+```
+WHY_NOVEL: Min-cut captures topological isolation between qubit positions — distance alone does not. Two pairs at distance 3 may have wildly different min-cuts (e.g., linear chain vs. fully connected cluster), but SABRE treats them identically.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Fourier Spectral Routing Cost (FSRC)
+DESCRIPTION: Apply the Graph Fourier Transform (GFT) to the "demand signal" over the coupling graph: define f(v) = number of gate-pair paths passing through physical qubit v. Transform f to spectral domain via GFT: f̂ = U^T f, where U is the eigenvector matrix of the graph Laplacian. The cost for a candidate SWAP is the energy in high-frequency components of the updated demand signal — high-frequency demand = poorly distributed, hard-to-route configuration.
+MATHEMATICAL_FORMULATION:
+```
+f(v) = Σ_{g∈F} [v ∈ SP(Q1_g, Q2_g)]  (demand at node v)
+GFT: f̂_k = Σ_v u_k(v) · f(v)
+
+Spectral Energy = Σ_k λ_k · f̂_k²   (weighted by eigenvalue λ_k)
+
+H = max_decay · [base_distance_term + μ · ΔSpectralEnergy(SWAP)]
+```
+where ΔSpectralEnergy is the change in spectral energy after applying the candidate SWAP.
+WHY_NOVEL: Applying graph signal processing (GFT) to the routing demand signal is fundamentally new — no existing routing method models the global distribution of gate demand in the spectral domain.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Heat Kernel Diffusion Routing Cost (HKDRC)
+DESCRIPTION: The heat kernel K_t(i,j) = [e^{-tL}]_{ij} measures how much "heat" placed at node i diffuses to node j in time t. It decays with distance but accounts for all paths and graph topology. For a gate pair (Q1,Q2), the routing difficulty is proportional to 1 - K_t(Q1,Q2): pairs that exchange heat easily (high K_t) are topologically close; pairs that don't (low K_t) need many SWAPs.
+MATHEMATICAL_FORMULATION:
+```
+K_t = e^{-tL} = U · diag(e^{-tλ_k}) · U^T   (precomputed, O(n²) per t)
+
+difficulty(Q1,Q2) = 1 - K_t(Q1,Q2)  ∈ [0,1]
+
+H = max_decay · [
+  (1/|F|) · Σ_{g∈F} (deps_g+1) · difficulty(Q1_g, Q2_g)
++ W · (1/|E|) · Σ_{g∈E} (deps_g+1) · difficulty(Q1_g, Q2_g) / layer_g
+]
+```
+WHY_NOVEL: Heat kernel distance accounts for graph topology beyond shortest path — two nodes 3 hops apart in a dense cluster have K_t >> two nodes 3 hops apart in a linear chain. Unlike effective resistance (excluded), K_t is bounded in [0,1] and trivially normalizes.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Multi-Commodity Flow Relaxation Cost (MCFRC)
+DESCRIPTION: Model all front-layer gate pairs as simultaneously demanding a unit of flow between their current physical qubit positions. Solve the LP relaxation of the unsplittable multi-commodity flow problem (allowing fractional flows). The LP optimal value lower-bounds the true SWAP count. Use the LP objective value as the routing cost for a given mapping state.
+MATHEMATICAL_FORMULATION:
+```
+For each gate g ∈ F: demand d_g = 1 unit from Q1_g to Q2_g
+
+LP: minimize Σ_{e∈E} c_e · x_e
+    s.t. flow conservation at each node for each commodity g
+         x_e ≥ 0  (relaxed integrality)
+
+H = LP_optimal_value(F, current_mapping) + W · Σ_{g∈E} d(Q1_g,Q2_g)/layer_g
+```
+WHY_NOVEL: Multi-commodity flow gives a provable lower bound on required SWAP count for the front layer simultaneously — no existing routing heuristic uses LP duality to obtain lower bounds on routing cost.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 4
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Wiring Complexity Steiner Tree Cost (WCSTC)
+DESCRIPTION: For each candidate SWAP, compute the minimum Steiner tree spanning all required qubit pairs' physical locations (approximated greedily). The Steiner tree length estimates the total "wiring" needed to connect all required pairs on the coupling graph simultaneously. A SWAP that reduces the Steiner tree length more is preferred.
+MATHEMATICAL_FORMULATION:
+```
+Terminals = {Q1_g, Q2_g : g ∈ F}
+S(mapping) = approx Steiner tree weight on coupling G spanning Terminals
+           ≈ MST weight of the terminal subgraph (2-approximation)
+
+H = max_decay · [S(mapping) / |F|
+    + W · (1/|E|) · Σ_{g∈E} d(Q1_g,Q2_g) / layer_g]
+```
+WHY_NOVEL: Steiner tree cost captures the collective, simultaneous routing difficulty of all front-layer gates as a single geometric object — not just a sum of independent pairwise distances.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Cayley Graph Geodesic Cost (CGGC)
+DESCRIPTION: Embed the routing problem in the Cayley graph of the symmetric group S_n with SWAP generators. The word metric in this Cayley graph gives the exact minimum SWAP count needed to reach any target permutation from the current mapping.
+MATHEMATICAL_FORMULATION: H = word_length_{Cay(S_n, SWAP_set)}(current_permutation → target_permutation)
+WHY_NOVEL: Exact combinatorial optimum in the symmetric group.
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 2
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: State space is n! — completely intractable for n > 10 physical qubits. No scalable approximation preserves the theoretical properties.
+
+---
+
+IDEA_NAME: Symplectic Qubit Trajectory Cost (SQTC)
+DESCRIPTION: Model qubit swaps as trajectories in a symplectic phase space where position = qubit index, momentum = routing "velocity." Compute symplectic area swept.
+MATHEMATICAL_FORMULATION: H = Σ_g ∮ p dq along routing trajectory of (Q1_g, Q2_g)
+WHY_NOVEL: Borrows symplectic geometry from Hamiltonian mechanics.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 3
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: No natural symplectic structure on discrete graph; "momentum" of qubit has no clear physical meaning. Formulation does not yield a deterministic, computable cost function.
+
+---
+
+IDEA_NAME: Discrete Morse Theory Routing Cost (DMTRC)
+DESCRIPTION: Apply discrete Morse theory to the coupling graph to identify "gradient paths" (ascending sequences in a Morse function). Routing along gradient paths avoids local minima. Cost = number of critical cells of the Morse function intersected by the routing path.
+MATHEMATICAL_FORMULATION: H = Σ_g #{critical cells on gradient path from Q1_g to Q2_g}
+WHY_NOVEL: Discrete Morse theory from algebraic topology applied to hardware routing.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 3
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Critical cell structure is a static graph property that does not change with the mapping — the cost function would not differentiate between candidate SWAPs effectively. Low probability of outperforming SOTA.
+
+---
+
+IDEA_NAME: Topological Persistence Routing Cost (TPRC)
+DESCRIPTION: Filter the coupling graph by distance from each qubit pair, compute persistence diagrams. Persistence intervals for gate pairs represent the "topological difficulty" of routing.
+MATHEMATICAL_FORMULATION: H = Σ_g Σ_{(b,d)∈PD_g} (d - b) for gate g's persistence diagram
+WHY_NOVEL: First use of persistent homology in quantum routing.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 3
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Computing persistence diagrams per SWAP candidate is O(n³) per gate — too slow for practical use. The topological information captured is subsumed by simpler graph metrics.
+
+---
+
+IDEA_NAME: Contraction Tree Complexity Cost (CTCC)
+DESCRIPTION: Model the front-layer gates as a tensor network and use the optimal contraction tree width as the routing cost proxy.
+MATHEMATICAL_FORMULATION: H = treewidth(TN(front_layer, current_mapping))
+WHY_NOVEL: Uses tensor network contraction theory to estimate SWAP cost.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 3
+AVERAGE_SCORE: 5.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Treewidth computation is NP-hard in general. Even approximations are too expensive per routing step. The connection to SWAP count is indirect and unlikely to outperform direct distance measures.
+
+---
+
+IDEA_NAME: Hyperbolicity δ-Aware Routing Cost (HARC)
+DESCRIPTION: Compute the Gromov δ-hyperbolicity of local subgraphs around each gate's qubit pair. High δ (less hyperbolic) means the local topology is "flat" and routing is harder; low δ means tree-like topology with predictable routing.
+MATHEMATICAL_FORMULATION: H = Σ_g d(Q1_g,Q2_g) · (1 + δ_local(Q1_g,Q2_g))
+WHY_NOVEL: Gromov hyperbolicity from geometric group theory applied to routing.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 4
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: δ-hyperbolicity is a static graph property — constant for a fixed coupling graph. It cannot differentiate between different mapping states, making it useless as a routing cost function that varies with the current assignment.
+
+---
+
+## SUMMARY TABLE
+
+| Rank | Idea | N | P | E | AVG | Status |
+|------|------|---|---|---|-----|--------|
+| 1 | APWC | 6 | 8 | 9 | **7.7** | KEPT |
+| 2 | CRIC | 8 | 7 | 7 | **7.3** | KEPT |
+| 3 | ACPDC | 7 | 8 | 7 | **7.3** | KEPT |
+| 4 | TPNAC | 7 | 7 | 8 | **7.3** | KEPT |
+| 5 | GDWTDC | 6 | 8 | 8 | **7.3** | KEPT |
+| 6 | CPSWDC | 7 | 7 | 7 | **7.0** | KEPT |
+| 7 | MSTCC | 7 | 7 | 7 | **7.0** | KEPT |
+| 8 | CCBC | 8 | 6 | 6 | **6.7** | KEPT |
+| 9 | FSRC | 9 | 6 | 5 | **6.7** | KEPT |
+| 10 | HKDRC | 8 | 6 | 6 | **6.7** | KEPT |
+| 11 | WCSTC | 7 | 7 | 6 | **6.7** | KEPT |
+| 12 | MCFRC | 9 | 6 | 4 | **6.3** | KEPT |
+| 13 | CGGC | 10 | 4 | 2 | 5.3 | ELIM |
+| 14 | SQTC | 9 | 4 | 3 | 5.3 | ELIM |
+| 15 | DMTRC | 9 | 4 | 3 | 5.3 | ELIM |
+| 16 | TPRC | 9 | 4 | 3 | 5.3 | ELIM |
+| 17 | HARC | 8 | 4 | 4 | 5.3 | ELIM |
+| 18 | CTCC | 8 | 4 | 3 | 5.0 | ELIM |
+
+**Top 3 recommended for implementation:** APWC (simplest, highest score), CRIC (novel congestion model), ACPDC (adds gate-algebra awareness). All three can be implemented as drop-in replacements for the baseline with <20 lines of modification.

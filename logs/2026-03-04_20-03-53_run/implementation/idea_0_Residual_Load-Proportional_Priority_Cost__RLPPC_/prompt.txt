@@ -1,0 +1,48 @@
+You are a Quantum Compiler Researcher. Your goal is to invent a NOVEL mathematical cost function to minimize SWAP counts in quantum mapping (at routing stage).
+
+TASK: Implement Cost Function.
+REQUIRED OUTPUT FORMAT :
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    # Your code here
+    return cost
+```
+
+You MUST follow this exact format.
+Idea: Residual Load-Proportional Priority Cost (RLPPC)
+Desc: For each gate g, weight its distance contribution by the geometric mean of its two qubits' total remaining gate loads — the number of unexecuted gates each qubit still participates in. A qubit appearing in 20 future gates needs routing priority now because its placement affects all future routing decisions; a qubit with 1 future gate is nearly retired. This creates a dynamic, load-aware prioritization that updates naturally as gates are executed.
+Baseline Cost Function (for reference, your solution must be fundamentally different, not just a tweak)
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+        W = 1
+        front_layer_size = len(self.front_layer)
+        extended_layer_size = len(self.extended_layer)
+
+        max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+        f_distance = 0
+
+        for g in self.front_layer:
+            q1, q2 = self.access2q[g]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            deps = self.dag_dependencies_count[g]
+
+            f_distance += (deps+1) * self.distance_matrix[Q1][Q2]
+
+        e_distance = 0
+        for g in self.extended_layer:
+            q1, q2 = self.access2q[g]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            layer_factor = self.extended_layer_index.get(g, 0) + 1
+
+            deps = self.dag_dependencies_count[g]
+            e_distance += (deps+1) * \
+                self.distance_matrix[Q1][Q2] * 1/layer_factor
+
+        H = max_decay * (f_distance / front_layer_size + W *
+                        ((e_distance / extended_layer_size) if extended_layer_size else 0))
+
+        return H
+```

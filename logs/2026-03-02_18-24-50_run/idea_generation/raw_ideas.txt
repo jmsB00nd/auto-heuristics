@@ -1,0 +1,208 @@
+Continuing from GEPC's formulation:
+
+---
+
+IDEA_NAME: Gate Execution Proximity Cost (GEPC)
+DESCRIPTION: In the extended layer, gates are weighted by their layer depth (structural position). But a better proxy for "how soon will this gate become executable?" is how many of its immediate predecessors are currently in the front layer. If 3 of a gate's 4 direct predecessors are in F, it will become executable very soon — much sooner than its layer depth implies. exec_proximity(g) measures this DAG nearness to executability as a continuous signal.
+MATHEMATICAL_FORMULATION:
+exec_proximity(g) = |{p ∈ direct_predecessors(g) : p ∈ F}| / max(1, |direct_predecessors(g)|)
+For g ∈ F: exec_proximity = 1 by definition
+H = max_decay × [ (Σ_{g∈F} w_g × d(Q1,Q2)) / |F| + W × (Σ_{g∈E} exec_proximity(g) × w_g × d(Q1,Q2)) / (|E| × l_g) ]
+Convergence: exec_proximity ∈ [0,1], bounded weight. As predecessors execute and move to F, exec_proximity increases naturally. Front-layer term provides monotone convergence.
+WHY_NOVEL: Distinct from CPGUC (critical path length from gate to output), SCWC (successor fan-out), DRWC (fraction of ALL predecessors done), and from layer depth. This specifically captures the DAG proximity of an extended-layer gate to the CURRENT front layer — a dynamic, execution-state-aware readiness signal that changes as routing proceeds.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Progress-Responsive Decay Cost (PRDC)
+DESCRIPTION: The baseline decay mechanism increases uniformly for every SWAP involving a qubit, making the algorithm progressively conservative. But not all routing phases are equal: when routing is stuck (small or zero distance improvement per SWAP), the decay should increase FASTER to escape local minima; when routing makes strong progress, the decay should increase SLOWER to allow continued productive movement. This creates a feedback loop: good routing decisions are "rewarded" with softer decay, poor/repetitive ones are penalized harder.
+MATHEMATICAL_FORMULATION:
+progress_ratio = Δd_total / max(1, d_total_before)
+where Δd_total = sum of front-layer distance reductions from last SWAP
+decay_rate_modifier = 1 + γ × (1 − progress_ratio)   [∈ [1, 1+γ]]
+For SWAP on qubits (u,v):
+  decay[u] += base_increment × decay_rate_modifier
+  decay[v] += base_increment × decay_rate_modifier
+max_decay = max(decay[u_swap], decay[v_swap])
+H = max_decay × [ f_term/|F| + W × e_term/(|E| × l_g) ]
+Convergence: decay is non-decreasing (modifier ≥ 1), which matches the baseline's convergence guarantee. The modifier only accelerates decay increase, never reduces it, so the algorithm becomes MORE conservative over time, not less.
+WHY_NOVEL: No existing cost function adapts the decay update rate based on routing progress. The baseline uses a fixed increment; this uses a progress-sensitive increment. This creates a feedback control mechanism absent from all prior approaches — the routing algorithm actively diagnoses whether it is making progress and self-regulates.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Normalized Interaction Pressure Cost (NIPC)
+DESCRIPTION: Two competing notions of urgency exist: (1) how MANY future gates involve a qubit (frequency), and (2) how SOON the first future gate involving a qubit arrives (imminence). Most frequency-based methods (GCIFC, RCIFC) capture (1) only. This cost function captures BOTH by defining interaction pressure = remaining_gates(q) / max(1, first_interaction_depth(q)). A qubit with many interactions arriving soon has high pressure. A qubit with many interactions but all far in the future has lower pressure. Routing urgency is weighted by the pressure of BOTH qubits in each gate.
+MATHEMATICAL_FORMULATION:
+remaining(q) = number of remaining (unexecuted) gates involving qubit q
+depth_to_first(q) = circuit depth until q's next gate from current state
+pressure(q) = remaining(q) / max(1, depth_to_first(q))
+gate_pressure(g) = (pressure(q1) + pressure(q2)) / 2
+H = max_decay × [ (Σ_{g∈F} gate_pressure(g) × d(Q1,Q2)) / |F| + W × (Σ_{g∈E} gate_pressure(g) × d(Q1,Q2)) / (|E| × l_g) ]
+Convergence: pressure is a bounded, positive scalar per qubit. Recomputed periodically (every K steps). Front-layer distances drive convergence; pressure weights are bounded multipliers.
+WHY_NOVEL: GCIFC/RCIFC use only frequency (remaining gate count). CPGUC uses critical path. This formulation is unique in combining frequency AND imminence as a RATIO — capturing the urgency of HIGH-FREQUENCY, SOON-TO-ARRIVE interactions, which is the most dangerous routing situation.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Degree-Normalized Routing Cost (DNRC)
+DESCRIPTION: Not all physical qubit positions are equally convenient for routing. A qubit at a high-degree node (hub, e.g., degree 4 in heavy-hex) has many routing options, while a qubit at a leaf node (degree 1) is topologically constrained. When two gate qubits are currently mapped to low-degree nodes, routing is harder (fewer path options, less SWAP flexibility). Dividing the distance by the geometric mean of the two nodes' degrees amplifies the cost for low-degree placements, incentivizing the algorithm to prefer mappings where active qubits sit on high-degree nodes.
+MATHEMATICAL_FORMULATION:
+degree(Q) = degree of node Q in coupling graph (precomputed)
+degree_factor(Q1,Q2) = sqrt(degree(Q1) × degree(Q2))
+H = max_decay × [ (Σ_{g∈F} w_g × d(Q1,Q2) / degree_factor(Q1,Q2)) / |F| + W × (Σ_{g∈E} w_g × d(Q1,Q2) / (degree_factor(Q1,Q2) × l_g)) / |E| ]
+Convergence: degree_factor > 0 always (no degree-0 nodes in a valid coupling graph). Dividing by a positive constant doesn't break convergence. As d(Q1,Q2)→0, term→0.
+WHY_NOVEL: No prior cost function uses physical node degree to modulate routing cost. Degree-awareness is distinct from centrality-based approaches and from GBAC/ERCRC (which use global topological metrics). This is purely local, computationally trivial (one precomputed value per node pair), and directly models the intuition that leaf-node routing is harder.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Minimum Bottleneck Path Degree Cost (MBPDC)
+DESCRIPTION: The hop-count distance d(Q1,Q2) tells us how many steps are needed but not how constrained those steps are. A 3-hop path through three degree-4 nodes is far easier to route than a 3-hop path through a degree-1 bottleneck node: the degree-1 node must be available exclusively. Define the "bottleneck degree" of a path as the minimum node degree along the shortest path. Paths through high-minimum-degree corridors get lower cost; paths through narrow topological bottlenecks get amplified cost.
+MATHEMATICAL_FORMULATION:
+min_path_degree(Q1,Q2) = min_{v on any shortest path from Q1 to Q2} degree(v)  (precomputed)
+bottleneck_cost(Q1,Q2) = d(Q1,Q2) / min_path_degree(Q1,Q2)
+H = max_decay × [ (Σ_{g∈F} w_g × bottleneck_cost(Q1,Q2)) / |F| + W × (Σ_{g∈E} w_g × bottleneck_cost(Q1,Q2)) / (|E| × l_g) ]
+Convergence: min_path_degree ≥ 1 always. As d→0, bottleneck_cost→0. Bounded scaling factor, standard convergence.
+WHY_NOVEL: GBAC uses minimum vertex CUT (how many nodes to remove to disconnect paths) — a global flow quantity. DNRC uses endpoint degrees. MBPDC uses the minimum degree ALONG the routing path — a local structural bottleneck measure that directly captures which hops are most constrained during SWAP execution. These are distinct topological measures.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Temporal Exponential Decay Cost (TEDC)
+DESCRIPTION: Replace the harmonic decay 1/layer_factor with exponential decay γ^{layer_index} (γ ∈ (0,1)) for extended layer gates. Provides smoother, theoretically-motivated discounting from reinforcement learning theory.
+MATHEMATICAL_FORMULATION: H = max_decay × [ f_term/|F| + W × Σ_{g∈E} γ^{l_g} × w_g × d(Q1,Q2) / |E| ]
+WHY_NOVEL: Exponential vs. harmonic decay; minimal structural change to baseline.
+NOVELTY_SCORE: 4
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 6.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Insufficient novelty — changing 1/l to γ^l is a minor parametric variation of the baseline decay function, not a fundamentally different cost structure. Does not address any known failure mode of the baseline.
+
+---
+
+IDEA_NAME: Three-Horizon Lookahead Cost (THLC)
+DESCRIPTION: Extend the standard F + E two-horizon lookahead to three horizons F + E + E2, where E2 is the next "wave" of gates beyond E, weighted by W² and 1/l².
+MATHEMATICAL_FORMULATION: H = max_decay × [ f_term/|F| + W × e_term/(|E|×l_g) + W² × e2_term/(|E2|×l_g²) ]
+WHY_NOVEL: Adds a third lookahead horizon; incremental extension of two-horizon baseline.
+NOVELTY_SCORE: 5
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Incremental extension — simply adding another lookahead layer follows directly from the baseline's design. Diminishing returns from deeper lookahead are well-known; without a novel weighting mechanism, this provides minimal additional signal.
+
+---
+
+IDEA_NAME: Topological Sort Urgency Cost (TSUC)
+DESCRIPTION: Assign each gate an urgency weight inversely proportional to its topological sort rank in the remaining DAG. Earlier topological positions → higher weight.
+MATHEMATICAL_FORMULATION: urgency(g) = 1/(topo_rank(g)+1); H = max_decay × [Σ_{g∈F∪E} urgency(g) × d / normalization]
+WHY_NOVEL: Uses topological rank as a continuous urgency signal.
+NOVELTY_SCORE: 5
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 5.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Redundant with the layer-based weighting already in the baseline. Topological rank approximates layer depth in practice; this does not provide meaningfully different routing signal from 1/layer_factor. Also overlaps conceptually with CPGUC.
+
+---
+
+IDEA_NAME: Qubit Longevity Priority Cost (QLPC)
+DESCRIPTION: Weight routing cost by each qubit's "longevity" (number of remaining gates it participates in). Long-lived qubits should be centrally positioned; weight by peripheral cost × longevity.
+MATHEMATICAL_FORMULATION: longevity(q) = remaining_gates(q); peripheral_cost(Q) = max_d − min_{center} d(Q,center); H += λ × Σ_q longevity(q) × peripheral_cost(Q_q) / N
+WHY_NOVEL: Combines qubit lifespan with physical centrality.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 5.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Conceptually similar to SCWC (Successor Count Weighting Cost) which was already implemented and tested. The longevity measure (remaining gate count) is essentially the successor count metric from a different angle. The peripheral cost term also risks conflicting with the primary distance objective.
+
+---
+
+IDEA_NAME: Qubit Traffic Load Cost (QTLC)
+DESCRIPTION: For each gate's routing path, count how many other active qubits lie on that path ("traffic load"). Gates routing through congested paths get higher cost.
+MATHEMATICAL_FORMULATION: traffic(Q1,Q2) = |{active qubit positions v : v on shortest path(Q1,Q2)}|; H = max_decay × [Σ_{g∈F} (1 + β × traffic(Q1,Q2)) × d / |F| + ...]
+WHY_NOVEL: Congestion measured by qubit co-location on paths rather than edge counts.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Conceptually overlaps with ECAC (Edge Congestion Anticipation Cost) and CRIC (Concurrent Routing Interference Cost), both of which model routing congestion and are already in the "don't test" list. The path-based traffic measure is a variation of those approaches; insufficient differentiation to justify implementation.
+
+---
+
+IDEA_NAME: Circuit Motif Matching Cost (CMMC)
+DESCRIPTION: Identify recurring gate patterns (motifs) in the remaining circuit. For each motif requiring a specific qubit arrangement, compute the "arrangement distance" — how far current mapping is from the ideal arrangement for that motif. Weight routing cost by motif frequency × arrangement distance.
+MATHEMATICAL_FORMULATION: motif_score = Σ_{m ∈ motifs} freq(m) × min_arrangement_distance(m, current_mapping); H = max_decay × [base_cost + λ × motif_score]
+WHY_NOVEL: Treats recurring circuit substructures as optimization targets.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 4
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: While novel, the probability of outperforming SOTA is low: motif detection and arrangement distance computation are expensive (subgraph isomorphism is NP-hard in general), and the benefit of motif-level routing over gate-level routing is unclear for arbitrary circuits with few recurring patterns. Implementation complexity is prohibitive.
+
+---
+
+IDEA_NAME: Circuit Block Locality Cost (CBLC)
+DESCRIPTION: Group remaining gates into interaction clusters (connected components of the gate interaction graph). For each cluster, compute the spatial diameter of current physical positions. Minimize total cluster diameter as an auxiliary objective.
+MATHEMATICAL_FORMULATION: clusters = connected_components(interaction_graph(F∪E)); block_diam(c) = max_{q1,q2 ∈ c} d(Q_{q1}, Q_{q2}); H = base_cost + γ × Σ_c block_diam(c) / |clusters|
+WHY_NOVEL: Cluster-aware spatial coherence objective.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: The cluster diameter term can conflict with the primary distance objective (reducing cluster diameter may require SWAPs that increase a specific gate's distance). The definition of "interaction clusters" is ambiguous for densely connected circuits and can produce unstable optimization landscapes. Low probability of convergence improvement.
+
+---
+
+## Summary Table (KEPT ideas)
+
+| Rank | Name | N | P | E | AVG |
+|------|------|---|---|---|-----|
+| 1 | PALWC — Phase-Adaptive Lookahead Weight | 8 | 7 | 9 | **8.0** |
+| 2 | DRCWC — DAG Readiness Completion Weight | 7 | 7 | 8 | **7.3** |
+| 3 | SGPOC — Successive Gate Pre-Positioning | 8 | 6 | 7 | **7.0** |
+| 4 | MBHC — Max-Bottleneck Hybrid | 6 | 6 | 9 | **7.0** |
+| 5 | VPDC — Variance-Penalized Distance | 8 | 5 | 7 | **6.7** |
+| 6 | PRWC — Path Richness Weighted | 7 | 6 | 7 | **6.7** |
+| 7 | GEPC — Gate Execution Proximity | 7 | 6 | 7 | **6.7** |
+| 8 | PRDC — Progress-Responsive Decay | 8 | 6 | 6 | **6.7** |
+| 9 | NIPC — Normalized Interaction Pressure | 7 | 6 | 7 | **6.7** |
+| 10 | DNRC — Degree-Normalized Routing | 6 | 5 | 9 | **6.7** |
+| 11 | MBPDC — Min Bottleneck Path Degree | 7 | 6 | 6 | **6.3** |
+
+**Top 3 recommendations for implementation**: **PALWC** (highest score, trivial to implement, strong theoretical motivation), **DRCWC** (novel DAG readiness signal, naturally self-updating), **PRDC** (feedback control mechanism for escaping local minima, distinct from all prior approaches).

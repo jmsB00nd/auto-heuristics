@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Qubit Pair Future Proximity Score Cost (QPFPS)",
+    "status": "KEPT",
+    "description": "Beyond the current gate, examine when qubit pair (q1,q2) interact NEXT after their current gate. If they interact again soon, they should be kept physically close after routing the current gate \u2014 pre-positioning for reuse. Precompute next_int(q1,q2) = next circuit layer index where q1 and q2 interact after their current gate. Gates with an imminent re-interaction receive an amplified urgency weight, driving the algorithm to minimize the total cost of the current AND next interaction simultaneously, without expensive multi-step simulation.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Qubit Mobility-Adjusted Distance Cost (QMADC)",
+    "status": "KEPT",
+    "description": "In the coupling graph, high-degree physical qubits have many routing alternatives and can reach distant targets more flexibly than low-degree (peripheral) qubits. Replace the raw hop-count distance d(Q1,Q2) with a topology-adjusted distance that discounts costs for high-mobility qubit pairs and amplifies costs for low-mobility (bottleneck-trapped) pairs. The adjustment factor is the ratio of average degree to the geometric mean of the two qubits' degrees \u2014 preserving units and leaving average-degree pairs unchanged.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Qubit Traffic Light Cost (QTLC)",
+    "status": "KEPT",
+    "description": "Inspired by process scheduling fairness: a qubit that has been \"idle\" (not involved in any executed gate) for many routing steps is being chronically neglected. Over time, idle qubits accumulate unresolved routing debt. Track idle_time(Q) = number of routing steps since the logical qubit at Q last participated in a completed gate. Inject this starvation counter as an urgency multiplier into the distance cost: qubits that have been waiting longest get priority, preventing starvation of peripheral circuit regions.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Routing Path Mutual Benefit Cost (RPMBC)",
+    "status": "KEPT",
+    "description": "For each gate g in F\u222aE, compute the set of coupling edges on its shortest routing path P(g) from Q1 to Q2. A candidate SWAP on edge (a,b) that lies on many high-weight gates' shortest paths is simultaneously serving multiple routing needs \u2014 it is a \"multi-gate routing investment.\" Compute a benefit score equal to the sum of urgency weights of all gates whose paths pass through (a,b), and subtract a normalized version from the baseline cost. SWAPs at routing path intersections are strongly preferred.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Distance Velocity Cost (DVC)",
+    "status": "KEPT",
+    "description": "Track for each front-layer gate the temporal derivative of its physical distance: velocity(g) = d_t(g) - d_{t-1}(g). A gate with positive velocity is diverging (its qubits are being moved apart by recent SWAPs) \u2014 a sign of bad routing momentum. Adding a divergence penalty to the base cost creates a second-order signal: the routing algorithm is penalized not only for large distances but for distances that are growing, steering it away from choices that make the situation worse over time.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  }
+]

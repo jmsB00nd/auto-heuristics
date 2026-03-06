@@ -1,0 +1,346 @@
+## Quantum Circuit Routing Cost Functions: Generation, Evaluation, and Ranking
+
+---
+
+## PART 1 & 2: IDEAS — KEPT (Ranked by Average Score)
+
+---
+
+IDEA_NAME: Qubit Pair Future Proximity Score Cost (QPFPS)
+DESCRIPTION: Beyond the current gate, examine when qubit pair (q1,q2) interact NEXT after their current gate. If they interact again soon, they should be kept physically close after routing the current gate — pre-positioning for reuse. Precompute next_int(q1,q2) = next circuit layer index where q1 and q2 interact after their current gate. Gates with an imminent re-interaction receive an amplified urgency weight, driving the algorithm to minimize the total cost of the current AND next interaction simultaneously, without expensive multi-step simulation.
+MATHEMATICAL_FORMULATION:
+```
+reuse_weight(g) = 1 / (next_int(q1_g, q2_g) - current_layer + 1)   if q1,q2 interact again
+                = 0                                                    otherwise
+
+w_g = (deps_g + 1) + α * reuse_weight(g)
+
+H = max_decay * [ Σ_{g∈F} w_g * d(Q1,Q2) / |F|
+               + W * Σ_{g∈E} w_g * d(Q1,Q2) / (layer_idx(g) * |E|) ]
+```
+WHY_NOVEL: Every existing method (baseline, SABRE, RCIFC) weights gates by past interaction count or DAG depth — none by *when the next re-interaction occurs*. This is the first cost function to exploit future co-location opportunity as a routing signal, encoding temporal locality of qubit reuse.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 8.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Routing Path Mutual Benefit Cost (RPMBC)
+DESCRIPTION: For each gate g in F∪E, compute the set of coupling edges on its shortest routing path P(g) from Q1 to Q2. A candidate SWAP on edge (a,b) that lies on many high-weight gates' shortest paths is simultaneously serving multiple routing needs — it is a "multi-gate routing investment." Compute a benefit score equal to the sum of urgency weights of all gates whose paths pass through (a,b), and subtract a normalized version from the baseline cost. SWAPs at routing path intersections are strongly preferred.
+MATHEMATICAL_FORMULATION:
+```
+P(g) = set of edges on shortest path from mapping(q1_g) to mapping(q2_g)
+
+benefit(a,b) = Σ_{g∈F∪E} w_g * 𝟙[(a,b) ∈ P(g)] / Σ_{g} w_g
+
+w_g = (deps_g + 1) / (layer_idx(g) + 1)
+
+H = max_decay * [F_dist/|F| + W * E_dist/|E|] - α * benefit(a,b)
+
+where F_dist, E_dist are the same weighted sums as baseline, α ∈ [0.5, 1.5]
+```
+WHY_NOVEL: No existing cost function treats the candidate SWAP itself as a shared resource serving multiple routing tasks simultaneously. This is the first method to frame routing as multi-commodity flow allocation at the cost-function level — fundamentally different from all per-gate distance aggregations.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Qubit Mobility-Adjusted Distance Cost (QMADC)
+DESCRIPTION: In the coupling graph, high-degree physical qubits have many routing alternatives and can reach distant targets more flexibly than low-degree (peripheral) qubits. Replace the raw hop-count distance d(Q1,Q2) with a topology-adjusted distance that discounts costs for high-mobility qubit pairs and amplifies costs for low-mobility (bottleneck-trapped) pairs. The adjustment factor is the ratio of average degree to the geometric mean of the two qubits' degrees — preserving units and leaving average-degree pairs unchanged.
+MATHEMATICAL_FORMULATION:
+```
+mob_factor(Q1,Q2) = avg_degree / sqrt(deg(Q1) * deg(Q2))
+
+d_mob(Q1,Q2) = d(Q1,Q2) * mob_factor(Q1,Q2)
+
+H = max_decay * [ Σ_{g∈F} (deps_g+1) * d_mob(Q1,Q2) / |F|
+               + W * Σ_{g∈E} (deps_g+1) * d_mob(Q1,Q2) / (layer_idx(g) * |E|) ]
+
+avg_degree = 2*|E_coupling| / |V_coupling|  (precomputed once)
+```
+WHY_NOVEL: All existing methods (SABRE baseline, SABRE+, Qiskit) use raw or weighted hop count as if the coupling graph were uniform. This is the first formulation to correct for degree heterogeneity at the cost level — qubits at bottleneck positions (degree 2 in heavy-hex) carry dramatically higher real routing cost than hub qubits at the same hop distance.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 8.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Qubit Traffic Light Cost (QTLC)
+DESCRIPTION: Inspired by process scheduling fairness: a qubit that has been "idle" (not involved in any executed gate) for many routing steps is being chronically neglected. Over time, idle qubits accumulate unresolved routing debt. Track idle_time(Q) = number of routing steps since the logical qubit at Q last participated in a completed gate. Inject this starvation counter as an urgency multiplier into the distance cost: qubits that have been waiting longest get priority, preventing starvation of peripheral circuit regions.
+MATHEMATICAL_FORMULATION:
+```
+idle_time(Q) ← incremented each routing step when Q not in executed gates; reset to 0 on gate execution
+
+H = max_decay * [ Σ_{g∈F} (1 + α*(idle_time(Q1)+idle_time(Q2))) * d(Q1,Q2) / |F|
+               + W * Σ_{g∈E} (1 + α*(idle_time(Q1)+idle_time(Q2))) * d(Q1,Q2) / (layer_idx(g) * |E|) ]
+
+α ∈ [0.05, 0.2]  (tunable; keeps base distance dominant)
+```
+WHY_NOVEL: Borrows the concept of process starvation prevention from OS scheduling theory — entirely absent from quantum routing literature. No existing routing cost function tracks per-qubit routing starvation or applies fairness-based urgency escalation. This is a fundamentally different motivation and mechanism from dependency-count weights.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 8.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Interference-Free Routing Layers Cost (IFRLC)
+DESCRIPTION: Multiple front-layer gates being routed simultaneously may compete for intermediate qubits on their shortest routing paths. If two gates' routing paths share intermediate qubits, they cannot be parallelized — one must wait, effectively increasing SWAP count. For each gate g, count how many other front-layer gates have routing paths that share intermediate qubits with g's path (vertex-level interference, distinct from CRIC's edge-level interference). Gates with high interference counts are in "routing conflict clusters" and need higher priority to be resolved first.
+MATHEMATICAL_FORMULATION:
+```
+path_nodes(g) = all intermediate physical qubits on shortest path Q1→Q2 (excluding endpoints)
+
+interference(g) = Σ_{g'∈F, g'≠g} 𝟙[path_nodes(g) ∩ path_nodes(g') ≠ ∅]
+
+H = max_decay * [ Σ_{g∈F} (deps_g+1) * (1 + β*interference(g)) * d(Q1,Q2) / |F|
+               + W * Σ_{g∈E} (deps_g+1) * d(Q1,Q2) / (layer_idx(g) * |E|) ]
+
+β ∈ [0.1, 0.5]
+```
+WHY_NOVEL: CRIC (excluded, non-converging) penalized edge-sharing of routing paths. IFRLC uses vertex-sharing of intermediate routing nodes — distinct and cheaper to compute. More importantly, IFRLC integrates the conflict count as a weight modifier in the standard cost rather than a separate signal, enabling stable convergence. No existing method penalizes vertex-level routing path conflicts.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Distance Velocity Cost (DVC)
+DESCRIPTION: Track for each front-layer gate the temporal derivative of its physical distance: velocity(g) = d_t(g) - d_{t-1}(g). A gate with positive velocity is diverging (its qubits are being moved apart by recent SWAPs) — a sign of bad routing momentum. Adding a divergence penalty to the base cost creates a second-order signal: the routing algorithm is penalized not only for large distances but for distances that are growing, steering it away from choices that make the situation worse over time.
+MATHEMATICAL_FORMULATION:
+```
+velocity(g) ← d_t(Q1,Q2) - d_{t-1}(Q1,Q2)  (updated after each routing step)
+velocity(g) = 0 initially
+
+divergence_penalty(g) = max(0, velocity(g))  // only penalize divergence, not reward convergence
+
+H = max_decay * [ Σ_{g∈F} [(deps_g+1)*d(Q1,Q2) + β*divergence_penalty(g)] / |F|
+               + W * Σ_{g∈E} (deps_g+1)*d(Q1,Q2) / (layer_idx(g) * |E|) ]
+
+β ∈ [0.5, 2.0]
+```
+WHY_NOVEL: Every existing cost function is purely instantaneous (position-based), ignoring temporal dynamics. DVC is the first to incorporate the *derivative* of gate-distance into the routing cost — borrowing from control theory (PD controllers). The divergence penalty specifically prevents oscillatory routing behavior where qubits repeatedly swap toward and away from targets.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Two-Gate Lookahead Synergy Cost (TGLSC)
+DESCRIPTION: A SWAP (a,b) benefits not just the single nearest front-layer gate but potentially several simultaneously. After simulating the SWAP, count how many front-layer gates see a strict distance reduction. Call this the synergy count S(swap). Rather than adding this as an offset, divide the baseline cost by (1 + α·S(swap)) — creating a multiplicative discount for high-synergy SWAPs. This non-linearly amplifies preference for SWAPs that serve multiple gates at once, which is a hallmark of efficient routing.
+MATHEMATICAL_FORMULATION:
+```
+d_after(g, swap) = distance after applying SWAP (a,b) to current mapping
+
+S(swap) = |{g ∈ F : d_after(g,swap) < d_before(g)}|
+
+H_base = max_decay * [F_dist/|F| + W * E_dist/|E|]   (standard weighted sum)
+
+H = H_base / (1 + α * S(swap))
+
+α ∈ [0.1, 0.5]  (ensures denominator ≥ 1; cost remains positive and bounded)
+```
+WHY_NOVEL: Existing methods (including SABRE and all variants) add or subtract terms linearly. The multiplicative discount for synergy creates a qualitatively different cost landscape — high-synergy SWAPs are exponentially preferred over medium-synergy ones when S is large. No existing method applies multiplicative scaling based on gate-liberation synergy count.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Normalized Lookahead Compaction Rate Cost (NLCRC)
+DESCRIPTION: Distinguish between SWAPs that reduce distance (progress) and SWAPs that make a gate directly executable (d → 1, gate can fire next step). The latter are disproportionately valuable: each "compacting" SWAP directly reduces the front-layer size and triggers cascade liberation. Compute the compaction rate: fraction of front-layer gates that transition to executable distance (d=1) after applying the candidate SWAP. Subtract a normalized compaction bonus from the baseline cost, biasing strongly toward SWAPs that unlock immediate execution.
+MATHEMATICAL_FORMULATION:
+```
+compacted(g, swap) = 𝟙[d_after(g, swap) == 1] and d_before(g) > 1
+
+C(swap) = |{g ∈ F : compacted(g, swap)}| / |F|
+
+H = max_decay * [F_dist/|F| + W*E_dist/|E|] - γ * C(swap)
+
+γ ∈ [1.0, 3.0]  (scale matched to typical distance sum range)
+```
+WHY_NOVEL: Unlike SABRE's distance reduction and unlike gate liberation counts, this targets the strict threshold d=1 (gate becomes immediately executable) rather than any distance decrease. The d=1 threshold is the precise executability boundary in swap-based routing — crossing it is fundamentally different from reducing distance from 5 to 4. No existing cost function uses this binary executability transition as its compaction signal.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Marginal Distance Gain Cost (MDGC)
+DESCRIPTION: The ideal SWAP minimizes total weighted distance after the move. Rather than evaluating just the single gate that triggered SWAP selection, compute the total change in weighted distance across ALL front+extended layer gates induced by the candidate SWAP. This marginal gain Δd(swap) is the gradient of the total distance objective w.r.t. the mapping state. Cost = negative of this gain, scaled by the same decay and normalization as baseline. This is the most direct gradient-descent formulation of routing optimization.
+MATHEMATICAL_FORMULATION:
+```
+Δd(swap) = Σ_{g∈F} (deps_g+1) * [d_before(Q1,Q2) - d_after(Q1,Q2)] / |F|
+          + W * Σ_{g∈E} (deps_g+1) * [d_before(Q1,Q2) - d_after(Q1,Q2)] / (layer_idx(g) * |E|)
+
+H = max_decay * (F_dist/|F| + W*E_dist/|E|) - λ * Δd(swap)
+
+λ ∈ [0.5, 2.0]  (prevents cost inversion; the baseline term dominates when Δd ≈ 0)
+```
+WHY_NOVEL: While SABRE evaluates expected distance, it does not compute the true marginal gain across the full weighted gate set. MDGC is the first formulation to compute the signed first-order derivative of the total routing objective w.r.t. a SWAP choice — making it the principled gradient-descent analogue of all heuristic distance minimizations.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Asymmetric Qubit Role Cost (AQRC)
+DESCRIPTION: In a gate (q1,q2), one qubit typically has more future interactions (the "anchor") and one has fewer (the "mover"). The anchor should stay in place while the mover travels. When the routing algorithm inadvertently moves the anchor, it introduces compounding displacement costs for all future gates. Define an asymmetry factor measuring how skewed the load is between the two qubits. High asymmetry (one qubit dominates) → standard distance weight. Low asymmetry (balanced load) → reduce weight (either qubit can move). This guides routing to respect qubit roles.
+MATHEMATICAL_FORMULATION:
+```
+load(q) = number of unexecuted 2-qubit gates involving logical qubit q
+
+asymmetry(q1,q2) = |load(q1) - load(q2)| / (load(q1) + load(q2) + 1)  ∈ [0,1]
+
+anchor_penalty(q1,q2) = 1 + α * asymmetry(q1,q2)
+
+H = max_decay * [ Σ_{g∈F} (deps_g+1) * anchor_penalty(q1,q2) * d(Q1,Q2) / |F|
+               + W * Σ_{g∈E} ... / (layer_idx*|E|) ]
+
+α ∈ [0.5, 2.0]
+```
+WHY_NOVEL: All existing methods treat both qubits in a gate symmetrically (same weight). AQRC is the first cost function to encode the directional routing asymmetry — when one qubit is a highly connected hub in the logical interaction graph, disturbing it incurs cascading costs. This is inspired by asymmetric TSP and multi-commodity flow routing, where nodes with high centrality should not be displaced.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Circuit Depth Compression Cost (CDCC)
+DESCRIPTION: The routing goal is not just fewer SWAPs but shorter final circuit depth. For each logical qubit q, compute its depth_load(q) = number of unexecuted 2-qubit gates involving q (a proxy for remaining critical qubit depth). For gate g = (q1,q2), the gate's weight is proportional to the maximum depth load of its two qubits: gates on the busiest qubit chains must be routed first to prevent depth accumulation. This creates a depth-aware urgency signal independent of DAG topology weighting.
+MATHEMATICAL_FORMULATION:
+```
+depth_load(q) = |{g unexecuted : q ∈ {q1_g, q2_g}}|  (updated dynamically)
+
+max_load = max over all qubits of depth_load(q)
+
+depth_weight(g) = max(depth_load(q1_g), depth_load(q2_g)) / (max_load + 1)
+
+H = max_decay * [ Σ_{g∈F} depth_weight(g) * d(Q1,Q2) / |F|
+               + W * Σ_{g∈E} depth_weight(g) * d(Q1,Q2) / (layer_idx(g) * |E|) ]
+```
+WHY_NOVEL: Existing methods use DAG dependency count (baseline), critical path length (CPGUC, excluded), or layer index as weights. CDCC uses a qubit-centric remaining gate load — a different quantity that captures how "overloaded" each qubit is in the remaining circuit. This directly approximates remaining qubit-level circuit depth, which is what hardware execution time depends on.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Bipartite Matching Quality Cost (BMQC)
+DESCRIPTION: Model the assignment of logical qubits to physical qubits as a bipartite matching. For each front-layer gate, compute the minimum-cost perfect matching between logical qubit interaction pairs and physical adjacency pairs using the Hungarian algorithm. The matching defect (sum of unmatched distances) is the routing cost.
+MATHEMATICAL_FORMULATION: H = HungarianMatch(logical_interaction_pairs, physical_adjacency_pairs) matching cost
+WHY_NOVEL: Treats routing as a bipartite assignment optimization, not just distance aggregation.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 4
+AVERAGE_SCORE: 5.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Hungarian algorithm is O(n³) per SWAP candidate evaluation — prohibitively expensive for large circuits (n=100+ qubits) and must be re-run at every routing step. Does not scale.
+
+---
+
+IDEA_NAME: Exponential Urgency Layer Cost (EULC)
+DESCRIPTION: Replace the 1/layer_index decay in the extended layer with an exponential decay e^{-λ*(layer-1)}, providing stronger differentiation between near and far layers.
+MATHEMATICAL_FORMULATION: H = max_decay * [F_dist/|F| + W * Σ_{g∈E} d(g)*e^{-λ*(layer-1)} / |E|]
+WHY_NOVEL: Geometric vs. harmonic decay in extended layer weighting.
+NOVELTY_SCORE: 4
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 6.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Incrementally tweaks only the extended layer decay function. Not fundamentally different from baseline — same structure, same signals, just a different decay schedule. Low novelty relative to stronger alternatives.
+
+---
+
+IDEA_NAME: Sub-Circuit Completion Rate Cost (SCCRC)
+DESCRIPTION: Partition remaining gates into connected components of the logical interaction graph. Weight gates by the completion fraction of their sub-circuit — near-complete sub-circuits get bonus urgency to finish cleanly.
+MATHEMATICAL_FORMULATION: completion(SC) = executed_in_SC/total_in_SC; H = Σ_{g∈F} (1+α*completion(SC(g)))*d(Q1,Q2)/|F|
+WHY_NOVEL: Sub-circuit completion state as routing urgency signal.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Connected component analysis must be recomputed after every gate execution (O(V+E) per step). The completion signal is noisy — sub-circuits vary greatly in size and structure. Low probability of outperforming approaches with cleaner signals.
+
+---
+
+IDEA_NAME: Directional Alignment Cost (DAC)
+DESCRIPTION: For each gate pair (Q1→target T1, Q2→target T2), compute the cosine alignment between the candidate SWAP direction vector and the qubit-to-target pull direction in an embedded 2D layout of the coupling graph.
+MATHEMATICAL_FORMULATION: H = -Σ_{g∈F} w_g * cos(angle(swap_vector, pull_vector(Q1→T1))) * d(Q1,T1)
+WHY_NOVEL: Vector field alignment between SWAP and pull directions.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 5.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Requires 2D layout embedding of the coupling graph (not always meaningful for irregular topologies like heavy-hex). Cosine alignment in graph-embedded space is geometrically meaningful only for near-planar graphs. Too topology-specific and computationally fragile.
+
+---
+
+IDEA_NAME: Qubit Pair Scheduling Pressure Cost (QPSPC)
+DESCRIPTION: Compute scheduling pressure = (total remaining interactions between q1,q2) / (current distance + 1). Gates under high pressure (many interactions, currently far apart) receive amplified distance weights.
+MATHEMATICAL_FORMULATION: pressure(q1,q2) = total_remaining_int(q1,q2)/(d(Q1,Q2)+1); H = max_decay * Σ pressure(g)*d(Q1,Q2)/|F|
+WHY_NOVEL: Combines interaction frequency with current distance into a pressure metric.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: The pressure metric total_remaining_int(q1,q2)/(d+1) conflates interaction count and distance in a way that can create oscillatory signals — high pressure qubits that are already adjacent get low pressure (d=1), causing the signal to flip. Redundant relative to QPFPS which captures the same intuition more stably via next-interaction timing.
+
+---
+
+## Summary Table — KEPT IDEAS
+
+| Rank | Name | N | P | E | AVG |
+|------|------|---|---|---|-----|
+| 1 | QPFPS — Qubit Pair Future Proximity Score | 8 | 8 | 8 | **8.0** |
+| 2 | QMADC — Qubit Mobility-Adjusted Distance | 7 | 8 | 9 | **8.0** |
+| 3 | QTLC — Qubit Traffic Light Cost | 8 | 7 | 9 | **8.0** |
+| 4 | RPMBC — Routing Path Mutual Benefit | 8 | 8 | 7 | **7.7** |
+| 5 | DVC — Distance Velocity Cost | 8 | 7 | 8 | **7.7** |
+| 6 | TGLSC — Two-Gate Lookahead Synergy | 8 | 7 | 8 | **7.7** |
+| 7 | NLCRC — Normalized Lookahead Compaction Rate | 7 | 8 | 8 | **7.7** |
+| 8 | AQRC — Asymmetric Qubit Role | 7 | 7 | 9 | **7.7** |
+| 9 | CDCC — Circuit Depth Compression | 7 | 7 | 9 | **7.7** |
+| 10 | MDGC — Marginal Distance Gain | 6 | 8 | 8 | **7.3** |
+| 11 | IFRLC — Interference-Free Routing Layers | 7 | 7 | 8 | **7.3** |
+
+**Top recommended for implementation:** QPFPS, QMADC, QTLC (all 8.0) — high novelty, strong probability of outperforming SOTA, straightforward implementation within the existing `qlosure_poly_heuristic` framework.

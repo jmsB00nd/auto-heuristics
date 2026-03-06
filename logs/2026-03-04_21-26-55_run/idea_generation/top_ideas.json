@@ -1,0 +1,51 @@
+[
+  {
+    "name": "Two-Hop Neighborhood Overlap Distance Cost (NODC)",
+    "status": "KEPT",
+    "description": "Two physical qubits that share many 2-hop neighbors are *topologically close* even if their hop-distance is 2 or 3. The Jaccard similarity of their 2-hop neighborhoods captures this structural proximity: high overlap means many common routing intermediaries exist, making routing cheap. Low overlap means the pair is topologically isolated. Scale gate distances by (1 \u2212 Jaccard), so topologically proximate pairs receive reduced cost even before their hop-count drops.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Successor Fan-Out Urgency Cost (SFOUC)",
+    "status": "KEPT",
+    "description": "A gate with many immediate successors in the circuit DAG is a *multiplier*: routing it frees up many downstream gates simultaneously. A gate with no successors (terminal) only frees itself. Weight each gate's distance by its normalized fan-out count so that gates that unlock many future operations are routed preferentially. This captures one-step downstream impact without the convergence risks of full critical-path analysis.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Inverse Eccentricity Distance Scaling Cost (IEDSC)",
+    "status": "KEPT",
+    "description": "A qubit's *eccentricity* = maximum hop-distance to any other qubit in the coupling graph. Low eccentricity = central qubit, reachable from everywhere quickly. High eccentricity = peripheral qubit, far from the graph core, requiring more SWAPs on average to reach distant partners. Scale each gate's routing cost by the average eccentricity of its physical qubit pair, normalized by the graph diameter. Peripheral qubit pairs get amplified cost, incentivizing the optimizer to bring them to better positions early.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Circuit Progress-Adaptive Decay Cost (CPADC)",
+    "status": "KEPT",
+    "description": "Early in routing, extended lookahead is crucial \u2014 the optimizer must plan for complex future interactions. Late in routing (most gates executed), the remaining circuit is small; extended layer gates are nearly irrelevant since the front layer dominates. Modulate the extended layer weight W by a decay function of circuit completion fraction p, reducing lookahead weight quadratically as the circuit completes. This concentrates routing effort where it matters most at each circuit phase.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Shortest Path Diversity Cost (SPDC)",
+    "status": "KEPT",
+    "description": "Two qubits separated by d hops may have 1 or many distinct shortest paths of that length. A pair with only 1 shortest path is *routing-brittle*: any disruption (another gate needing the same intermediate qubit) forces a costly detour. A pair with 10 shortest paths has high routing flexibility. Divide each gate's distance by a log-dampened count of distinct shortest paths, so brittle pairs receive amplified cost and flexible pairs are discounted.",
+    "average_score": 6.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Gate Dependency Pressure Diffusion Cost (GDPDC)",
+    "status": "KEPT",
+    "description": "A gate g that is far from executable (large d) AND has many immediate successors that are also far from executable exerts compounded routing pressure on the optimizer. Model this via a one-level diffusion: each gate's \"pressure\" = its own distance + a dampened sum of its successors' distances. Gates with large d AND large-d successors are doubly penalized, capturing cascade routing difficulty that a flat distance measure misses.",
+    "average_score": 6.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Free Qubit Opportunity Cost (FQOC)",
+    "status": "KEPT",
+    "description": "Physical qubits not involved in any front/extended layer gate are *routing resources* \u2014 they can serve as free intermediaries without competing with other gates' routing needs. For each gate (Q1,Q2) at distance d, count the number of *free* (unoccupied) intermediate qubits on a shortest path. Paths with many free intermediaries are cheap (no routing conflicts); paths with all-busy intermediaries are expensive. Divide distance by this opportunity count.",
+    "average_score": 6.3,
+    "elimination_reason": "N/A"
+  }
+]

@@ -1,0 +1,282 @@
+# Quantum Circuit Routing: Novel Cost Function Ideas
+
+---
+
+## PART 1 & 2: ALL IDEAS (KEPT first, ranked by AVERAGE_SCORE)
+
+---
+
+IDEA_NAME: Qubit Interaction Co-location Amortization Cost (QICAC)
+DESCRIPTION: Precompute for every logical qubit pair (q1, q2) the total number of gates in the *entire remaining* circuit where both q1 and q2 appear together. If a pair must interact k times in the future, the routing cost of closing their current distance is amortized over k future gains. This drives the algorithm to co-locate high-frequency interaction pairs early, preventing repeated routing of the same pair.
+MATHEMATICAL_FORMULATION: Let freq(q1, q2) = |{g ∈ remaining_DAG : {q1,q2} ⊆ qubits(g)}|. Then:
+H = max_decay · [ Σ_{g∈F} (d(Q1,Q2) / (1 + freq(q1,q2))) / |F|  +  W · Σ_{g∈E} (d(Q1,Q2) / ((layer_idx+1)(1 + freq(q1,q2)))) / |E| ]
+WHY_NOVEL: All existing cost functions (SABRE, QLOSURE) treat gates independently. QICAC introduces a global amortization signal: the cost of routing a pair is inversely proportional to the long-term benefit of co-locating them. No prior work divides distance by future interaction count.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 8.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Scheduling Slack Urgency Cost (SSUC)
+DESCRIPTION: Precompute ASAP(g) (as-soon-as-possible depth) and ALAP(g) (as-late-as-possible depth) for every gate in the DAG. The scheduling slack slack(g) = ALAP(g) − ASAP(g) measures how much freedom exists for scheduling g. Gates on the critical path have slack = 0; routing them late directly extends total circuit depth. Replace the raw dependency-count weight with an urgency weight inversely proportional to slack.
+MATHEMATICAL_FORMULATION: w_g = 1 / (1 + slack(g)) = 1 / (1 + ALAP(g) − ASAP(g))
+H = max_decay · [ Σ_{g∈F} w_g · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} w_g · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: Dependency count (baseline) is a crude proxy for urgency. ASAP/ALAP slack is the standard schedulability metric in classical EDA and captures both forward and backward dependencies simultaneously. This is the first routing cost function to incorporate proper slack-based urgency from scheduling theory.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Path Length Variance Penalization Cost (PLVPC)
+DESCRIPTION: The standard cost aggregates distances via mean, ignoring *spread*. When some front-layer gates have distance 0 while others have distance 6, the algorithm must still resolve the far ones sequentially — the bottleneck is the maximum, not the mean. PLVPC penalizes high variance in front-layer distances, forcing the routing toward a balanced state where all gates are approximately equally close to execution.
+MATHEMATICAL_FORMULATION: Let d_g = d(Q1,Q2) for gate g. Define μ_F = mean({d_g : g∈F}), σ²_F = variance({d_g : g∈F}).
+H = max_decay · [ (μ_F + λ · √σ²_F) / 1  +  W · μ_E / |E| ]
+where λ ∈ [0.3, 1.0] is a balance hyperparameter (tunable per topology).
+WHY_NOVEL: No existing cost function penalizes variance in gate distances. This is motivated by the observation that min-max routing is NP-hard but variance minimization acts as a convex proxy that drives the algorithm toward uniformly-close gate configurations.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Coupling Graph Degree-Ratio Peripheral Penalty Cost (CGDRPPC)
+DESCRIPTION: Physical qubits in low-degree positions of the coupling graph (e.g., endpoints in heavy-hex chains) are harder to route through: they have fewer available SWAPs and act as routing dead-ends. When a front/extended layer gate's qubits are assigned to peripheral physical qubits, the routing cost is disproportionately higher. Penalize distances by the "peripheral weight" of involved physical qubits.
+MATHEMATICAL_FORMULATION: Let avg_degree = (2 · |edges|) / |V|, degree(Q) = degree of physical qubit Q in coupling graph.
+peripheral_weight(Q) = (avg_degree / degree(Q))^γ,  γ ∈ [0.5, 1.5]
+H = max_decay · [ Σ_{g∈F} max(pw(Q1), pw(Q2)) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} max(pw(Q1), pw(Q2)) · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: Existing methods are topology-blind regarding node degree asymmetry. CGDRPPC directly encodes hardware routing difficulty arising from topological peripherality, which varies dramatically between IBM heavy-hex (degree 2–3) and Google grid (degree 4) architectures.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Cascade Gate Unlock Potential Cost (CGUPC)
+DESCRIPTION: When gate g is executed, it may unblock several successor gates. CGUPC precomputes for each gate g the number of immediate DAG successors that would become executable once g is routed (i.e., all of their other predecessors are already resolved). Gates with high unlock potential are prioritized: routing them first triggers a cascade of free gate executions.
+MATHEMATICAL_FORMULATION: unlock(g) = |{ s ∈ direct_successors(g) : all predecessors of s except g are already executed }|
+w_g = 1 + unlock(g)
+H = max_decay · [ Σ_{g∈F} w_g · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} w_g · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: The baseline weights by cumulative upstream dependency count (how many gates preceded g). CGUPC weights by *downstream unlock count* — how many gates become immediately executable after g. This is the causal complement of the baseline's backward-looking weight.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Remaining Circuit Interaction Pressure Cost (RCIPC)
+DESCRIPTION: For each logical qubit q, define its "interaction pressure" as the fraction of remaining gates in the full circuit that involve q. High-pressure qubits must participate in many future interactions and need favorable physical positions. Their current routing distances are amplified to incentivize proactive repositioning.
+MATHEMATICAL_FORMULATION: total_remaining = |remaining_DAG|
+pressure(q) = |{g ∈ remaining_DAG : q ∈ qubits(g)}| / (total_remaining + 1)
+combined_pressure(g) = pressure(q1) + pressure(q2)
+H = max_decay · [ Σ_{g∈F} (1 + combined_pressure(g)) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} (1 + combined_pressure(g)) · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: The baseline's dependency count reflects only local DAG topology near g. Interaction pressure reflects the *global circuit demand* on each qubit, creating a dynamic weight that shifts as the circuit executes.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Gate Parallelism Isolation Urgency Cost (GPIUC)
+DESCRIPTION: Some front-layer gates share no qubits with any other front-layer gate — they are "isolated" and can only execute sequentially after routing. Gates with many parallelism partners (gates that share no qubits with them and can run concurrently once routed) are less urgent because progress happens simultaneously. Isolated gates are highest urgency since no other gate benefits from their SWAP.
+MATHEMATICAL_FORMULATION: parallel_partners(g) = |{ g' ∈ F, g' ≠ g : qubits(g) ∩ qubits(g') = ∅ }|
+urgency(g) = 1 / (1 + parallel_partners(g))
+H = max_decay · [ Σ_{g∈F} urgency(g) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: No existing cost function models the parallelism structure of the front layer. GPIUC explicitly identifies isolated serial bottlenecks and elevates their routing priority, directly minimizing the number of sequential SWAP rounds.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Betweenness-Weighted Bottleneck Avoidance Cost (BWBAC)
+DESCRIPTION: Betweenness centrality BC(v) measures the fraction of all-pairs shortest paths in the coupling graph that pass through node v. High-BC physical qubits are routing bottlenecks: many circuits must route through them, causing congestion. When current qubit assignments force gates to route through high-BC nodes, the cost is amplified, incentivizing assignments that avoid topological bottlenecks.
+MATHEMATICAL_FORMULATION: BC(Q) = Σ_{s≠t≠Q} σ_{st}(Q) / σ_{st}, normalized to [0,1]
+For gate g routed via shortest path passing through intermediate nodes V_path(g):
+bottleneck_factor(g) = 1 + max_{v ∈ V_path(g)} BC(v)
+H = max_decay · [ Σ_{g∈F} bottleneck_factor(g) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} bottleneck_factor(g) · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: Previous congestion-aware methods (ECAC, excluded) look at edge load from concurrent gates. BWBAC uses graph-theoretic betweenness centrality of intermediate *nodes*, precomputed once offline, making it O(1) per cost evaluation while capturing structural bottleneck topology.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Exponential Extended Layer Decay Cost (EELDC)
+DESCRIPTION: The baseline uses 1/layer_index as the extended-layer weight, creating a hyperbolic decay. Replace this with an exponential decay exp(−α · layer_index). Exponential decay creates a sharper "relevance boundary" between near and far lookahead, and the tunable temperature α allows topology-specific calibration. At high α the cost is purely front-layer; at low α, deep extended layers still matter.
+MATHEMATICAL_FORMULATION: H = max_decay · [ Σ_{g∈F} (deps_g+1) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} (deps_g+1) · d(Q1,Q2) · exp(−α · layer_idx(g)) / |E| ]
+where α is calibrated per hardware (e.g., α = ln(2)/2 for half-life at depth 2).
+WHY_NOVEL: The switch from polynomial to exponential decay is not merely cosmetic: exponential decay has a principled interpretation as a thermal Boltzmann weight with temperature 1/α, creating a variational free-energy framework for routing cost evaluation. The tunable temperature enables hardware-specific calibration absent from all prior methods.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Progressive Contraction Deadline Cost (PCDC)
+DESCRIPTION: Assign each gate g a "deadline" = ALAP_depth(g), the latest circuit depth at which it can be executed without extending the critical path. As the current circuit depth advances toward deadline(g), the routing urgency increases. Gates past their deadline critically extend circuit depth; their distance cost is amplified by a deadline-pressure factor.
+MATHEMATICAL_FORMULATION: deadline_pressure(g) = 1 / max(1, deadline(g) − current_depth + 1)
+H = max_decay · [ Σ_{g∈F} deadline_pressure(g) · d(Q1,Q2) / |F|  +  W · Σ_{g∈E} deadline_pressure(g) · d(Q1,Q2) / ((layer_idx+1) · |E|) ]
+WHY_NOVEL: SSUC uses static slack computed once. PCDC uses a *dynamic* urgency that increases as the execution progresses — a gate's pressure grows over time as its deadline approaches, creating time-varying routing priorities absent from all prior methods.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Interaction Graph Minimum Spanning Tree Cost (IGMSTC)
+DESCRIPTION: Build a weighted interaction graph G_I = (V_logical, E_I) where there is an edge (q1,q2) with weight d(Q1,Q2) for every gate in the front+extended layer involving that pair. The total weight of the Minimum Spanning Tree of G_I is a lower bound on the sum of distances needed to "connect" all active qubit interactions. Use this MST weight as the routing cost, evaluated after applying a candidate SWAP.
+MATHEMATICAL_FORMULATION: G_I(F) = interaction multigraph of F with edge weights d(Q1,Q2)
+G_I(E) = interaction multigraph of E with edge weights d(Q1,Q2) / (layer_idx+1)
+H = max_decay · [ MST_weight(G_I(F)) / |V(G_I(F))|  +  W · MST_weight(G_I(E)) / |V(G_I(E))| ]
+WHY_NOVEL: No existing routing cost uses MST of the interaction graph. The MST weight provides a global lower bound on routing complexity that considers *all* gate interactions jointly, unlike sum-of-distances which ignores coupling between the routing tasks.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Lookahead Subgraph Satisfiability Cost (LSSC)
+DESCRIPTION: For each gate g, define it as "satisfied" if d(Q1,Q2) = 1 (qubits already adjacent, can execute immediately). The cost is the number of unsatisfied gates, weighted by layer position and gate urgency. This binary satisfiability view naturally converges to 0 when all front-layer gates are executable.
+MATHEMATICAL_FORMULATION: sat(g) = 1 if d(Q1,Q2) = 1 else 0
+unsatisfied_cost(g) = (1 − sat(g)) · (1 + deps_g)
+H = max_decay · [ Σ_{g∈F} unsatisfied_cost(g) / |F|  +  W · Σ_{g∈E} unsatisfied_cost(g) / ((layer_idx+1) · |E|) ]
+Note: When d(Q1,Q2) > 1, the contribution is (1 − 0) = 1 scaled by weight. When d = 1, contribution is 0.
+WHY_NOVEL: Rather than treating d=1 and d=2 as only slightly different (as all distance-based methods do), LSSC treats the d=1 threshold as a phase boundary. This binary signal avoids over-penalizing gates that are "almost routed" vs those that need several SWAPs, creating a sharp incentive to push gates to adjacency.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Future Qubit Demand Hotspot Cost (FQDHC)
+DESCRIPTION: For each physical qubit Q, compute its "demand hotspot score": the number of pending gates in the next K DAG levels (K=5) that involve the logical qubit currently mapped to Q or any of Q's physical neighbors. High-demand hotspots mean routing into/through Q is currently high-value. Weight gate distances inversely by the combined hotspot score of their physical qubit positions.
+MATHEMATICAL_FORMULATION: hotspot_K(Q) = |{g ∈ DAG_levels(1..K) : logical_qubit_at(Q) ∈ qubits(g) or ∃ Q' ∈ N(Q) s.t. logical_qubit_at(Q') ∈ qubits(g)}|
+H = max_decay · Σ_{g∈F} d(Q1,Q2) / (1 + hotspot_K(Q1) + hotspot_K(Q2)) / |F| + ...
+WHY_NOVEL: All existing cost functions push qubits toward their current targets. FQDHC introduces a "pull" from future demand hotspots — physical regions about to receive high gate traffic are worth routing toward even at slight extra current cost.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Directional Topology Alignment Cost (DTAC)
+DESCRIPTION: In hardware topologies with geometric embedding (heavy-hex, Sycamore grid), each coupling edge has a direction vector in 2D layout space. For each gate, define a "desired direction" from Q1 toward Q2's target or from Q2 toward Q1's target. A candidate SWAP is rewarded if its coupling edge direction aligns with the desired directions of many front-layer gates.
+MATHEMATICAL_FORMULATION: Let embed(Q) = 2D layout coordinates of physical qubit Q (from hardware spec).
+desire_vec(g) = embed(Q2) − embed(Q1) (normalized)
+swap_vec(SWAP) = embed(SWAP[1]) − embed(SWAP[0]) (normalized)
+alignment(g, SWAP) = |cos θ| = |desire_vec(g) · swap_vec(SWAP)|
+H = max_decay · Σ_{g∈F} d(Q1,Q2) · (1 − alignment(g, SWAP)) / |F| + W · Σ_{g∈E} d(Q1,Q2) · (1 − alignment(g, SWAP)) / ((layer_idx+1) · |E|)
+WHY_NOVEL: No existing method exploits the geometric embedding of hardware layouts. DTAC uses real Euclidean coordinates from hardware specifications, making it the first routing cost with directional spatial awareness.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Qubit Traffic Load Balancing Cost (QTLBC)
+DESCRIPTION: Track the cumulative SWAP count per physical qubit during routing. Penalize candidate SWAPs that further increase the load on already heavily-used qubits.
+MATHEMATICAL_FORMULATION: H = max_decay · Σ_{g∈F} (1 + max(load(Q1), load(Q2))) · d(Q1,Q2) / |F|
+WHY_NOVEL: Spreads routing load across hardware.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 6.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Functionally redundant with the decay_parameter mechanism already in the baseline. The baseline's per-qubit decay penalty already discourages overusing recently-SWAPped qubits. QTLBC duplicates this signal without fundamentally new information.
+
+---
+
+IDEA_NAME: Interaction Entropy Centralization Cost (IECC)
+DESCRIPTION: Compute Shannon entropy of each qubit's interaction partner distribution. High-entropy qubits (many diverse partners) should be placed on central, high-degree physical nodes. Penalize mismatches.
+MATHEMATICAL_FORMULATION: H_ent(q) = −Σ_{q'} p(q,q') log p(q,q'); Cost penalizes H_ent(q) · (max_degree − degree(Q)) for each qubit.
+WHY_NOVEL: Entropy-based placement signal.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Shannon entropy of interaction partners does not monotonically decrease as routing progresses — it fluctuates as gates execute and the remaining partner distribution changes. This introduces non-convergent oscillations in the cost signal.
+
+---
+
+IDEA_NAME: Layer-Normalized Interaction Frequency Cost (LNIFC)
+DESCRIPTION: Normalize the gate weight by the total number of gates at the same DAG depth level, making weights relative rather than absolute and avoiding dominance by deep dependency chains.
+MATHEMATICAL_FORMULATION: w_g = (deps_g + 1) / |{g' : depth(g') = depth(g)}|
+H = max_decay · Σ_{g∈F} w_g · d(Q1,Q2) / |F| + W · Σ_{g∈E} w_g · d(Q1,Q2) / ((layer_idx+1)|E|)
+WHY_NOVEL: Relative normalization prevents depth-layer dominance.
+NOVELTY_SCORE: 5
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 6.3
+STATUS: ELIMINATED
+ELIMINATION_REASON: Insufficiently novel — this is a minor normalization tweak on the baseline's dependency weight. The signal conveyed (relative urgency within a depth layer) does not introduce qualitatively new information about routing difficulty. Eliminated in favor of SSUC which delivers a strictly more principled urgency metric.
+
+---
+
+## Summary Table (KEPT ideas, ranked)
+
+| Rank | Name | N | P | E | AVG |
+|------|------|---|---|---|-----|
+| 1 | QICAC | 8 | 8 | 8 | **8.0** |
+| 2 | SSUC | 8 | 8 | 7 | **7.7** |
+| 3 | PLVPC | 7 | 7 | 9 | **7.7** |
+| 4 | CGDRPPC | 7 | 7 | 9 | **7.7** |
+| 5 | CGUPC | 8 | 7 | 7 | **7.3** |
+| 6 | RCIPC | 7 | 7 | 8 | **7.3** |
+| 7 | GPIUC | 8 | 7 | 7 | **7.3** |
+| 8 | BWBAC | 7 | 7 | 8 | **7.3** |
+| 9 | EELDC | 6 | 7 | 9 | **7.3** |
+| 10 | PCDC | 7 | 7 | 7 | **7.0** |
+| 11 | IGMSTC | 8 | 7 | 6 | **7.0** |
+| 12 | LSSC | 7 | 6 | 8 | **7.0** |
+| 13 | FQDHC | 8 | 6 | 6 | **6.7** |
+| 14 | DTAC | 7 | 6 | 6 | **6.3** |
+
+**Top recommendation for immediate implementation:** **QICAC** (8.0) — requires only one precomputed dict of pairwise future interaction counts, plugs directly into the baseline formula, and introduces a fundamentally new amortization signal. **SSUC** (7.7) is equally compelling using classical EDA scheduling theory.

@@ -1,0 +1,89 @@
+{
+  "Critical Path Gate Urgency Cost (CPGUC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Critical Path Gate Urgency Cost (CPGUC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    # --- Step 1: Precompute critical path lengths via iterative post-order DFS ---\n    # CP(g) = length of longest directed path from g to any sink in dag2q\n    cp_cache = {}\n\n    def compute_cp(start):\n        \"\"\"Iterative post-order DFS: ensures all successors are resolved before parent.\"\"\"\n        stack = [(start, False)]\n        while stack:\n            node, processed = stack.pop()\n            if node in cp_cache:\n                continue\n            if processed:\n                successors = self.dag2q.get(node, set())\n                if not successors:\n                    cp_cache[node] = 1\n                else:\n                    cp_cache[node] = 1 + max(cp_cache.get(s, 1) for s in successors)\n            else:\n                stack.append((node, True))\n                for s in self.dag2q.get(node, set()):\n                    if s not in cp_cache:\n                        stack.append((s, False))\n\n    all_gates = list(self.front_layer) + list(self.extended_layer)\n    if not all_gates:\n        return 0.0\n\n    for g in all_gates:\n        compute_cp(g)\n\n    # --- Step 2: Normalize by the maximum CP among all relevant gates ---\n    max_cp = max(cp_cache.get(g, 1) for g in all_gates)\n    if max_cp == 0:\n        max_cp = 1\n\n    # --- Step 3: Accumulate weighted distances ---\n    W = 1\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        # Critical-path urgency weight: gates deeper in the dependency chain score higher\n        w_g = cp_cache.get(g, 1) / max_cp\n        f_distance += w_g * self.distance_matrix[Q1][Q2]\n\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        w_g = cp_cache.get(g, 1) / max_cp\n        e_distance += w_g * self.distance_matrix[Q1][Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W * ((e_distance / extended_layer_size) if extended_layer_size else 0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on multiplier_n75__1308CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on multiplier_n75__1308CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_234006"
+    }
+  ],
+  "Commutation-Aware SWAP Reuse Cost (CASRC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Commutation-Aware SWAP Reuse Cost (CASRC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    front_layer = list(self.front_layer)\n    front_layer_size = len(front_layer)\n\n    if front_layer_size == 0:\n        return 0.0\n\n    # --- Step 1: Build commutation classes via Union-Find ---\n    # Gates sharing a logical qubit are in the same conflict chain (don't commute freely).\n    # Gates in DIFFERENT connected components commute freely and can be reordered.\n    parent = {g: g for g in front_layer}\n\n    def find(x):\n        root = x\n        while parent[root] != root:\n            root = parent[root]\n        while parent[x] != root:          # path compression\n            parent[x], x = root, parent[x]\n        return root\n\n    def union(a, b):\n        ra, rb = find(a), find(b)\n        if ra != rb:\n            parent[ra] = rb\n\n    qubit_to_gate = {}\n    for g in front_layer:\n        q1, q2 = self.access2q[g]\n        for q in (q1, q2):\n            if q in qubit_to_gate:\n                union(g, qubit_to_gate[q])\n            qubit_to_gate[q] = g\n\n    # --- Step 2: Accumulate per-class distance and improvement signal ---\n    class_dist = {}   # commutation-class root \u2192 total distance after swap\n    class_impr = {}   # commutation-class root \u2192 any gate improved?\n\n    for g in front_layer:\n        q1, q2 = self.access2q[g]\n        Q1_b = self.mapping_dict[q1]\n        Q2_b = self.mapping_dict[q2]\n        Q1_a = self.temp_mapping_dict[q1]\n        Q2_a = self.temp_mapping_dict[q2]\n\n        d_before = self.distance_matrix[Q1_b][Q2_b]\n        d_after  = self.distance_matrix[Q1_a][Q2_a]\n\n        cls = find(g)\n        class_dist[cls] = class_dist.get(cls, 0.0) + d_after\n        class_impr[cls] = class_impr.get(cls, False) or (d_after < d_before)\n\n    # --- Step 3: Reuse factor = # independent gate groups that benefit ---\n    # A SWAP helping N commuting groups is N\u00d7 more globally efficient \u2192 deflate cost\n    benefiting_classes = sum(1 for cls, improved in class_impr.items() if improved)\n    reuse_factor = max(1, benefiting_classes)\n\n    # --- Step 4: Front-layer cost deflated by commutation reuse ---\n    total_front_dist = sum(class_dist.values())\n    front_cost = (total_front_dist / front_layer_size) / reuse_factor\n\n    # --- Step 5: Extended lookahead (decay by layer depth) ---\n    extended_layer_size = len(self.extended_layer)\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_idx = self.extended_layer_index.get(g, 0) + 1\n        e_distance += self.distance_matrix[Q1][Q2] / layer_idx\n\n    e_cost = (e_distance / extended_layer_size) if extended_layer_size else 0.0\n\n    # --- Step 6: Qubit noise/heat penalty ---\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    # --- CASRC Final Cost ---\n    # Globally efficient SWAPs (high reuse_factor) are strongly incentivised\n    W = 0.5\n    H = max_decay * (front_cost + W * e_cost)\n\n    return H",
+      "stats": {
+        "mean_swaps": 650.2727272727273,
+        "mean_depth": 1044.3636363636363,
+        "mean_runtime": 3.217342268336903,
+        "total_circuits": 22,
+        "successful_runs": 22,
+        "failed_runs": 0,
+        "error": null,
+        "first_failure_error": null,
+        "first_failure_traceback": null
+      },
+      "status": "SUCCESS",
+      "error": null,
+      "mean_swaps": 650.2727272727273,
+      "mean_depth": 1044.3636363636363,
+      "timestamp": "20260226_234447"
+    }
+  ],
+  "Heat Kernel Diffusion Distance Cost (HKDDC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Heat Kernel Diffusion Distance Cost (HKDDC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    import numpy as np\n    from scipy.linalg import expm\n\n    # --- Precompute heat kernel diffusion distance matrix (cached on self) ---\n    if not hasattr(self, '_hkddc_cache'):\n        n = self.num_qubits\n        t = 1.0  # diffusion time scale; t=1 balances local vs. global topology\n\n        # Build graph Laplacian L = D - A from hardware adjacency\n        L = np.zeros((n, n), dtype=np.float64)\n        for u in range(n):\n            neighbors = self.backend[u]\n            L[u, u] = float(len(neighbors))\n            for v in neighbors:\n                L[u, v] = -1.0\n\n        # Heat kernel K_t = exp(-t * L)\n        # K_t[i, j] encodes how heat \"seeping\" from i reaches j at time t.\n        # Rows K_t[i, :] act as topological fingerprints of node i.\n        K = expm(-t * L)  # shape: (n, n)\n\n        # Diffusion distance: h_t(i, j) = || K_t[i,:] - K_t[j,:] ||_2\n        # Small when i, j share many well-connected paths; large near bottlenecks.\n        # Broadcasting: (n, 1, n) - (1, n, n) \u2192 (n, n, n), then norm over axis=2\n        diff = K[:, np.newaxis, :] - K[np.newaxis, :, :]   # (n, n, n)\n        diff_dist = np.linalg.norm(diff, axis=2)            # (n, n)\n\n        # Normalise so diffusion distances are on a comparable scale to hop counts.\n        # We map [0, max] \u2192 [0, max_hop], preserving relative topology.\n        max_hop = float(np.max(self.distance_matrix))\n        d_max = diff_dist.max()\n        if d_max > 1e-12:\n            diff_dist = diff_dist * (max_hop / d_max)\n\n        self._hkddc_cache = diff_dist\n\n    diff_dist = self._hkddc_cache\n\n    # --- Cost computation (same structure as baseline; distance metric replaced) ---\n    W = 1.0\n    front_layer_size  = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # Front layer: weight by criticality, use diffusion distance\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2  = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        deps    = self.dag_dependencies_count[g]\n        f_distance += (deps + 1) * diff_dist[Q1][Q2]\n\n    # Extended (lookahead) layer: depth-discounted diffusion distance\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2       = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps         = self.dag_dependencies_count[g]\n        e_distance  += (deps + 1) * diff_dist[Q1][Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W * (e_distance / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on adder_n28__42CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on adder_n28__42CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_234857"
+    }
+  ],
+  "Maximum Flow Routing Pressure Cost (MFRPC)": [
+    {
+      "iteration": 1,
+      "idea_name": "Maximum Flow Routing Pressure Cost (MFRPC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    from collections import defaultdict, deque\n\n    # ---------------------------------------------------------------------- #\n    # Max-flow via Edmonds-Karp (BFS Ford-Fulkerson) on the hardware graph.  #\n    # Each undirected edge has unit capacity. max-flow(s,t) equals the       #\n    # number of edge-disjoint paths from s to t (Menger's theorem).          #\n    # Results are cached on self._mf_cache since the topology is static.     #\n    # ---------------------------------------------------------------------- #\n    if not hasattr(self, '_mf_cache'):\n        self._mf_cache = {}\n\n    def max_flow(source, sink):\n        if source == sink:\n            return float('inf')\n        cache_key = (min(source, sink), max(source, sink))\n        if cache_key in self._mf_cache:\n            return self._mf_cache[cache_key]\n\n        # Build a fresh residual graph (unit capacities on undirected edges)\n        residual = defaultdict(lambda: defaultdict(int))\n        for u, v in self.backend_connections:\n            residual[u][v] += 1\n            residual[v][u] += 1\n\n        flow = 0\n        while True:\n            # BFS: find shortest augmenting path in residual graph\n            parent = {source: -1}\n            queue = deque([source])\n            while queue and sink not in parent:\n                node = queue.popleft()\n                for nbr, cap in residual[node].items():\n                    if nbr not in parent and cap > 0:\n                        parent[nbr] = node\n                        queue.append(nbr)\n\n            if sink not in parent:\n                break  # no more augmenting paths\n\n            # Find bottleneck capacity along the found path\n            path_flow = float('inf')\n            node = sink\n            while node != source:\n                prev = parent[node]\n                path_flow = min(path_flow, residual[prev][node])\n                node = prev\n\n            # Update residual capacities along the path\n            node = sink\n            while node != source:\n                prev = parent[node]\n                residual[prev][node] -= path_flow\n                residual[node][prev] += path_flow\n                node = prev\n\n            flow += path_flow\n\n        result = max(flow, 1)  # guard: disconnected pairs \u2192 pressure stays finite\n        self._mf_cache[cache_key] = result\n        return result\n\n    # ---------------------------------------------------------------------- #\n    # Routing pressure = distance / max_flow                                 #\n    # Bottleneck pairs (max_flow \u2248 1) are amplified; well-connected pairs   #\n    # (high max_flow) are discounted. Weight by gate criticality and         #\n    # lookahead depth, then normalise by layer sizes.                        #\n    # ---------------------------------------------------------------------- #\n    W = 0.5\n    front_layer_size    = max(len(self.front_layer), 1)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # Front-layer pressure: full weight, amplified by gate criticality\n    f_pressure = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        dist = self.distance_matrix[Q1][Q2]\n        mf   = max_flow(Q1, Q2)\n        pressure = dist / mf\n        deps = self.dag_dependencies_count[g]\n        f_pressure += (deps + 1) * pressure\n\n    # Extended-layer pressure: discounted by lookahead depth\n    e_pressure = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1 = self.temp_mapping_dict[q1]\n        Q2 = self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        dist = self.distance_matrix[Q1][Q2]\n        mf   = max_flow(Q1, Q2)\n        pressure = dist / mf\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        e_pressure += (deps + 1) * pressure / layer_factor\n\n    H = max_decay * (\n        f_pressure / front_layer_size\n        + W * (e_pressure / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on qft_n29__222CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on qft_n29__222CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_235526"
+    }
+  ],
+  "k-Step Random Walk Distance Cost (KRWDC)": [
+    {
+      "iteration": 1,
+      "idea_name": "k-Step Random Walk Distance Cost (KRWDC)",
+      "code": "def qlosure_poly_heuristic(self, swap_gate):\n    import numpy as np\n\n    K = 2  # k-step random walk parameter\n\n    # Build and cache the k-step random walk L2 distance matrix once per topology\n    if not hasattr(self, '_krw_dist_matrix'):\n        n = self.num_qubits\n\n        # Build adjacency matrix from hardware graph\n        A = np.zeros((n, n), dtype=float)\n        for u in range(n):\n            for v in self.backend[u]:\n                A[u][v] = 1.0\n\n        # Row-stochastic transition matrix: P = D^{-1} A\n        degrees = A.sum(axis=1)\n        D_inv = np.where(degrees > 0, 1.0 / degrees, 0.0)\n        P = A * D_inv[:, np.newaxis]\n\n        # k-step transition matrix P^k\n        Pk = np.linalg.matrix_power(P, K)\n\n        # Pairwise L2 distance between rows of P^k\n        # ||P^k[i] - P^k[j]||_2 measures divergence of k-hop neighborhoods\n        # Broadcasting: (n,1,n) - (1,n,n) -> (n,n,n), then norm over last axis\n        diff = Pk[:, np.newaxis, :] - Pk[np.newaxis, :, :]  # (n, n, n)\n        self._krw_dist_matrix = np.sqrt((diff ** 2).sum(axis=-1))  # (n, n)\n\n    krw_dist = self._krw_dist_matrix\n\n    W = 1.0\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(\n        self.decay_parameter[swap_gate[0]],\n        self.decay_parameter[swap_gate[1]]\n    )\n\n    # Front layer: weighted sum of k-step RW distances with criticality\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        deps = self.dag_dependencies_count[g]\n        f_distance += (deps + 1) * krw_dist[Q1, Q2]\n\n    # Extended layer: discounted by lookahead depth and criticality\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        if Q1 < 0 or Q2 < 0:\n            continue\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        deps = self.dag_dependencies_count[g]\n        e_distance += (deps + 1) * krw_dist[Q1, Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W * (e_distance / extended_layer_size if extended_layer_size else 0.0)\n    )\n\n    return H",
+      "stats": {
+        "mean_swaps": Infinity,
+        "error": "Timeout on adder_n28__42CYC.json"
+      },
+      "status": "FAILED",
+      "error": "Timeout on adder_n28__42CYC.json",
+      "mean_swaps": Infinity,
+      "mean_depth": 0,
+      "timestamp": "20260226_235935"
+    }
+  ]
+}

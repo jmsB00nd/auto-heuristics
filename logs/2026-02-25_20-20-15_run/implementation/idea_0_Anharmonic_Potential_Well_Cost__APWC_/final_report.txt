@@ -1,0 +1,21 @@
+
+# Implementation Report
+# Generated: 20260226_203338
+
+## Idea: Anharmonic Potential Well Cost (APWC)
+## Description: Replace linear/quadratic distance penalty with an anharmonic potential V(d) = d² + β·d⁴. The quartic term creates a steep "wall" for large distances, strongly penalizing qubits far apart while barely penalizing close pairs. This asymmetry better reflects the combinatorial hardness of routing: the cost of bridging 4 hops is disproportionately worse than 2 hops. The β parameter is tunable per hardware topology.
+
+## Iteration Summary
+
+### Iteration 1
+- Status: FAILED
+- Mean Swaps: inf
+- Mean Depth: 0
+- Error: All circuits failed
+
+## No successful iterations.
+
+## Overall Statistics
+- Total iterations: 1
+- Successful: 0
+- Failed: 1

@@ -1,0 +1,16 @@
+[
+  {
+    "iteration": 1,
+    "idea_name": "Critical Path Gate Urgency Cost (CPGUC)",
+    "code": "def qlosure_poly_heuristic(self, swap_gate):\n    # --- Step 1: Precompute critical path lengths via iterative post-order DFS ---\n    # CP(g) = length of longest directed path from g to any sink in dag2q\n    cp_cache = {}\n\n    def compute_cp(start):\n        \"\"\"Iterative post-order DFS: ensures all successors are resolved before parent.\"\"\"\n        stack = [(start, False)]\n        while stack:\n            node, processed = stack.pop()\n            if node in cp_cache:\n                continue\n            if processed:\n                successors = self.dag2q.get(node, set())\n                if not successors:\n                    cp_cache[node] = 1\n                else:\n                    cp_cache[node] = 1 + max(cp_cache.get(s, 1) for s in successors)\n            else:\n                stack.append((node, True))\n                for s in self.dag2q.get(node, set()):\n                    if s not in cp_cache:\n                        stack.append((s, False))\n\n    all_gates = list(self.front_layer) + list(self.extended_layer)\n    if not all_gates:\n        return 0.0\n\n    for g in all_gates:\n        compute_cp(g)\n\n    # --- Step 2: Normalize by the maximum CP among all relevant gates ---\n    max_cp = max(cp_cache.get(g, 1) for g in all_gates)\n    if max_cp == 0:\n        max_cp = 1\n\n    # --- Step 3: Accumulate weighted distances ---\n    W = 1\n    front_layer_size = len(self.front_layer)\n    extended_layer_size = len(self.extended_layer)\n\n    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])\n\n    f_distance = 0.0\n    for g in self.front_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        # Critical-path urgency weight: gates deeper in the dependency chain score higher\n        w_g = cp_cache.get(g, 1) / max_cp\n        f_distance += w_g * self.distance_matrix[Q1][Q2]\n\n    e_distance = 0.0\n    for g in self.extended_layer:\n        q1, q2 = self.access2q[g]\n        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]\n        layer_factor = self.extended_layer_index.get(g, 0) + 1\n        w_g = cp_cache.get(g, 1) / max_cp\n        e_distance += w_g * self.distance_matrix[Q1][Q2] / layer_factor\n\n    H = max_decay * (\n        f_distance / front_layer_size\n        + W * ((e_distance / extended_layer_size) if extended_layer_size else 0)\n    )\n\n    return H",
+    "stats": {
+      "mean_swaps": Infinity,
+      "error": "Timeout on multiplier_n75__1308CYC.json"
+    },
+    "status": "FAILED",
+    "error": "Timeout on multiplier_n75__1308CYC.json",
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "timestamp": "20260226_234006"
+  }
+]

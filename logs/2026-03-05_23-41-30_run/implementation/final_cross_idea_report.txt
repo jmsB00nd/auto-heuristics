@@ -1,0 +1,61 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-05 00:40:14
+Ideas Tested: 10
+
+## Global Metrics
+- **Generation Success Rate:** 50.00%
+- **Average Score (Mean Swaps):** 689.28
+- **Best Score:** 676.73
+- **Worst Score:** 702.00
+- **Total Number of Tokens:** 14,513
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 4m 29s
+- **Implementation:** 54m 14s
+- **Total Pipeline:** 58m 43s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔ Gate Parallelism Isolation Urgency Cost (GPIUC)
+- Mean Swaps: 676.7272727272727
+- Mean Depth: 1051.5454545454545
+
+### 2. ✔ Path Length Variance Penalization Cost (PLVPC)
+- Mean Swaps: 678.0
+- Mean Depth: 991.0
+
+### 3. ✔ Remaining Circuit Interaction Pressure Cost (RCIPC)
+- Mean Swaps: 694.3181818181819
+- Mean Depth: 1024.0
+
+### 4. ✔ Betweenness-Weighted Bottleneck Avoidance Cost (BWBAC)
+- Mean Swaps: 695.3636363636364
+- Mean Depth: 1020.5909090909091
+
+### 5. ✔ Exponential Extended Layer Decay Cost (EELDC)
+- Mean Swaps: 702.0
+- Mean Depth: 1033.2272727272727
+
+### 6. ✘ Qubit Interaction Co-location Amortization Cost (QICAC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 7. ✘ Scheduling Slack Urgency Cost (SSUC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 8. ✘ Coupling Graph Degree-Ratio Peripheral Penalty Cost (CGDRPPC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 9. ✘ Cascade Gate Unlock Potential Cost (CGUPC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 10. ✘ Progressive Contraction Deadline Cost (PCDC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner: Gate Parallelism Isolation Urgency Cost (GPIUC) (Mean Swaps: 676.73)

@@ -1,0 +1,14 @@
+{
+  "Geometric Layer Decay Cost (GLDC)": {
+    "mean_swaps": 662.0,
+    "mean_depth": 1006.6818181818181,
+    "error": null,
+    "failures": []
+  },
+  "Successor Count Weighting Cost (SCWC)": {
+    "mean_swaps": 712.6363636363636,
+    "mean_depth": 1110.3636363636363,
+    "error": null,
+    "failures": []
+  }
+}

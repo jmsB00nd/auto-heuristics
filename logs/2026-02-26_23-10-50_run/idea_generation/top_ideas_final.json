@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Critical Path Gate Urgency Cost (CPGUC)",
+    "status": "kept",
+    "description": "Weights each gate's routing cost by its position on the circuit's **critical path** \u2014 the longest dependency chain from that gate to the circuit output. Gates on the critical path are the bottleneck for total circuit depth; routing them late directly extends depth. Precompute CP(g) = length of longest directed path from g to circuit output in the gate DAG. Normalize: w_g = CP(g) / max_{g'} CP(g'). Replace the uniform or dependency-count weight in the baseline with this critical-path urgency weight.",
+    "novelty_score": 7.0,
+    "probability_score": 8.0,
+    "effort_score": 8.0,
+    "average_score": 7.7,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Commutation-Aware SWAP Reuse Cost (CASRC)",
+    "status": "kept",
+    "description": "When multiple front-layer gates **commute** (share no qubit and act on commuting operator algebras), a single SWAP can simultaneously progress routing for several of them. Define a commutation class partition of F: gates in the same class can be freely reordered. For each candidate SWAP, count how many gates across commutation classes benefit from it. A SWAP that reduces distance for N commuting gates is N\u00d7 more efficient than a SWAP that only helps one. The cost is deflated by this reuse factor, incentivizing globally efficient moves.",
+    "novelty_score": 8.0,
+    "probability_score": 8.0,
+    "effort_score": 7.0,
+    "average_score": 7.7,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Heat Kernel Diffusion Distance Cost (HKDDC)",
+    "status": "kept",
+    "description": "Replace the hop-count distance d(i,j) with the **diffusion distance** derived from the graph heat kernel K_t = e^{-tL} (matrix exponential of \u2212t \u00d7 graph Laplacian L). The diffusion distance h_t(i,j) = ||K_t(i,\u00b7) \u2212 K_t(j,\u00b7)||\u2082 measures how differently heat diffuses from i vs. j \u2014 it is small when the two nodes are well-connected via multiple short paths, and large when separated by bottlenecks. Unlike hop count, it captures the **full topological structure** at scale t. Precomputed offline; plug into standard cost formula.",
+    "novelty_score": 8.0,
+    "probability_score": 7.0,
+    "effort_score": 7.0,
+    "average_score": 7.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "Maximum Flow Routing Pressure Cost (MFRPC)",
+    "status": "kept",
+    "description": "Gate pairs separated by the same hop count may have vastly different routing difficulty depending on how many **parallel paths** exist between them. A pair on a graph bottleneck with max-flow = 1 requires exclusive use of one edge; a pair with max-flow = 4 has flexible alternatives. Define routing pressure as distance divided by max-flow: gates near bottlenecks get disproportionately high cost, driving the algorithm to resolve them first and avoid congestion.",
+    "novelty_score": 8.0,
+    "probability_score": 7.0,
+    "effort_score": 7.0,
+    "average_score": 7.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  },
+  {
+    "name": "k-Step Random Walk Distance Cost (KRWDC)",
+    "status": "kept",
+    "description": "Replace hop-count distance with the **k-step random walk divergence** between two nodes. The k-step transition matrix P^k = (D\u207b\u00b9A)^k gives the probability of reaching node j from node i in exactly k steps. The L2 distance between row i and row j of P^k measures how differently the k-step neighborhood looks from i vs. j \u2014 a topology-aware distance. For k=2, captures 2-hop neighborhoods; for k=3, 3-hop. Captures qualitatively different information than hop count at very low computational overhead (one matrix power).",
+    "novelty_score": 7.0,
+    "probability_score": 7.0,
+    "effort_score": 8.0,
+    "average_score": 7.3,
+    "elimination_reason": "N/A",
+    "round": 1
+  }
+]

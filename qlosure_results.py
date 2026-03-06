@@ -9,9 +9,9 @@ import csv
 import os
 
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-16qbt"
+BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-81qbt"
 OUTPUT_DIR = "/home/jmsb00nd/Documents/auto-heuristics/autoheuristics_results"
-OUTPUT_CSV = os.path.join(OUTPUT_DIR, "queko-bss-16qbt_ibm_sherbrooke_trivial.csv")
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, "llm_queko81_ibm_sherbrooke_trivial.csv")
 
 edges = load_backend_edges(BACKEND)
 circuit_files = list(Path(BENCHMARK_DIR).glob("*.json"))

@@ -1,0 +1,9 @@
+[
+  {
+    "name": "Residual Load-Proportional Priority Cost (RLPPC)",
+    "status": "KEPT",
+    "description": "For each gate g, weight its distance contribution by the geometric mean of its two qubits' total remaining gate loads \u2014 the number of unexecuted gates each qubit still participates in. A qubit appearing in 20 future gates needs routing priority now because its placement affects all future routing decisions; a qubit with 1 future gate is nearly retired. This creates a dynamic, load-aware prioritization that updates naturally as gates are executed.",
+    "average_score": 6.7,
+    "elimination_reason": "N/A"
+  }
+]

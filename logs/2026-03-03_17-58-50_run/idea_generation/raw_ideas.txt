@@ -1,0 +1,446 @@
+# Quantum Circuit Routing Cost Functions: Novel Ideas Report
+
+---
+
+## PART 1 & 2: KEPT IDEAS (ranked by AVERAGE_SCORE descending)
+
+---
+
+IDEA_NAME: Interaction Frequency Lookahead Cost (IFLC)
+DESCRIPTION: Precompute for each logical qubit pair (q1, q2) the total number of remaining gates between them in the circuit DAG: freq(q1, q2). Gates between high-frequency pairs are more urgent — keeping those pairs physically close prevents repeated routing overhead. The weight replaces the baseline's dependency-count weight with this global interaction frequency, providing a principled lookahead over the entire remaining circuit.
+MATHEMATICAL_FORMULATION:
+```
+freq(q1,q2) = |{g ∈ remaining_DAG : g involves q1 and q2}|
+freq_norm(q1,q2) = freq(q1,q2) / max_{(a,b)} freq(a,b)
+
+w_IFLC(g: q1,q2) = 1 + freq_norm(q1,q2)
+
+f_distance = Σ_{g∈F} w_IFLC(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} w_IFLC(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E|))
+```
+WHY_NOVEL: The baseline weights by *upstream* dependency complexity. IFLC weights by *global downstream interaction density* — a gate between qubits that interact 20 more times in the circuit is more costly to leave far apart than a gate between qubits that interact only once. This is a fundamentally different urgency signal. Precomputed once; decrements dynamically as gates execute.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Geometric Layer Decay Cost (GLDC)
+DESCRIPTION: Replace the baseline's harmonic layer discount 1/layer_factor (generating the series 1, 1/2, 1/3, ...) with a geometric (exponential) decay r^(layer_index) for r ∈ (0,1). Geometric decay assigns weight 1 to layer 0, r to layer 1, r² to layer 2, etc. This creates a steeper, always-positive discount that better models diminishing returns of distant lookahead and avoids the long tail of 1/k.
+MATHEMATICAL_FORMULATION:
+```
+r ∈ (0, 1),  e.g. r = 0.5
+
+e_distance = Σ_{g∈E} (deps(g)+1) · d(Q1,Q2) · r^{layer_index(g)}
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline uses harmonic decay 1/k, which decays slowly and gives non-negligible weight even to very distant layers. Geometric decay r^k creates a proper exponential horizon with tunable parameter r. It is well-known in temporal difference learning and dynamic programming that geometric discounting guarantees convergence and bounded total influence, properties the harmonic series lacks. The parameter r also provides a principled knob for balancing local vs. global lookahead.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Extended Layer Readiness Cost (ELRC)
+DESCRIPTION: Instead of weighting extended-layer gates by their layer position (a static proxy for urgency), weight them by their *dynamic readiness ratio*: the fraction of their direct predecessors that have already been executed. A gate with 8 predecessors, 7 of which are done, is nearly executable and deserves high urgency — regardless of its layer index. This creates a weight that monotonically increases toward 1 as the gate approaches the front layer.
+MATHEMATICAL_FORMULATION:
+```
+resolved(g) = |{p ∈ direct_predecessors(g) : p is executed}|
+total_preds(g) = |direct_predecessors(g)|
+readiness(g) = resolved(g) / (total_preds(g) + ε),   ε = 1e-6
+
+e_distance = Σ_{g∈E} (1 + readiness(g)) · d(Q1,Q2)
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline uses a static layer index to proxy urgency in the extended layer. ELRC uses a *dynamic* urgency score that increases as predecessor gates complete. A gate in extended layer 3 but with 95% of predecessors done gets higher urgency than a gate in layer 1 with 0% resolved. This is a fundamentally different signal that adapts during routing and better models which future gates are actually about to become executable.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Successor Count Weighting Cost (SCWC)
+DESCRIPTION: Replace the baseline's predecessor-count weight (deps+1) with a successor-count weight: the number of direct successors of each gate in the DAG. A gate with many successors is a high-value unlock — resolving it immediately enables many future parallel gates. This reorients urgency from "how blocked am I" (backward) to "how much do I enable" (forward).
+MATHEMATICAL_FORMULATION:
+```
+fanout(g) = |{s ∈ DAG : g → s directly}|  (out-degree in gate DAG)
+
+w_SCWC(g) = 1 + fanout(g)
+
+f_distance = Σ_{g∈F} w_SCWC(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} w_SCWC(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline weights by in-degree (how many predecessors = how "hard won" the gate was). SCWC weights by out-degree (how many successors = how much future parallelism is unlocked). These are orthogonal signals: a gate can have many predecessors but few successors (deep chain) or few predecessors but many successors (fan-out junction). SCWC specifically targets fan-out junctions — the highest-leverage gates to resolve early.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Qubit Demand Saturation Cost (QDSC)
+DESCRIPTION: For each physical qubit Q, compute its current demand: the number of front-layer gates that currently involve Q. High-demand physical qubits are "hot" routing hubs — routing through them creates scheduling conflicts. Penalize gates whose physical qubit assignment maps them to high-demand physical qubits, incentivizing load-balanced routing.
+MATHEMATICAL_FORMULATION:
+```
+demand(Q) = |{g ∈ F : Q ∈ {Q1(g), Q2(g)}}|
+demand_norm(Q) = demand(Q) / max_Q demand(Q)  (or / |F| if |F|>0)
+
+sat(g: Q1,Q2) = 1 + β · (demand_norm(Q1) + demand_norm(Q2))
+
+f_distance = Σ_{g∈F} (deps(g)+1) · sat(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · sat(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline treats all physical qubits as interchangeable routing intermediaries. QDSC introduces a dynamic load-awareness term: routing through a qubit already serving 3 front-layer gates costs more than routing through a qubit serving 0. This prevents "hot-qubit" bottlenecks that are common in sparse topologies like IBM heavy-hex, and creates implicit load balancing across the hardware.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Two-Hop Neighborhood Intersection Cost (TNIC)
+DESCRIPTION: For a gate pair (Q1, Q2), if they share a common neighbor in the coupling graph, the gate can be resolved in at most 2 SWAPs via that neighbor — regardless of hop count. The number of such shared neighbors measures routing efficiency: more shared neighbors = more parallel SWAP options. Discount the routing cost proportionally to this 1-hop intersection size.
+MATHEMATICAL_FORMULATION:
+```
+N1(Q) = {v : (Q,v) ∈ coupling_graph}  (1-hop neighborhood)
+NI(Q1,Q2) = |N1(Q1) ∩ N1(Q2)|        (shared neighbors; precomputed ∀ pairs)
+
+d'(Q1,Q2) = d(Q1,Q2) / (1 + NI(Q1,Q2))
+
+f_distance = Σ_{g∈F} (deps(g)+1) · d'(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · d'(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: Hop-count distance treats all qubit pairs at distance 2 as equivalent. TNIC distinguishes them: two qubits at distance 2 with 3 common neighbors have 3 alternative 2-SWAP paths, while two qubits at distance 2 with 0 common neighbors have only 1 path. The shared-neighbor count is a topology-aware routing flexibility measure that is O(1) to look up after O(V²) precomputation.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Inverse Degree Product Distance Cost (IDPDC)
+DESCRIPTION: Discount the routing distance between two physical qubits by the product of their degrees. High-degree physical qubits offer more routing paths and are more flexible in accepting SWAPs. Mapping gates to high-degree qubits should be rewarded with a lower effective routing cost, guiding the algorithm to leverage hub qubits in the coupling graph.
+MATHEMATICAL_FORMULATION:
+```
+deg(Q) = degree of physical qubit Q in coupling graph (precomputed)
+deg_norm(Q) = deg(Q) / max_Q deg(Q)
+
+d'(Q1,Q2) = d(Q1,Q2) / (deg_norm(Q1) · deg_norm(Q2) + ε)^α,   α ∈ (0.5, 1), ε = 0.1
+
+f_distance = Σ_{g∈F} (deps(g)+1) · d'(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · d'(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline's hop-count distance treats all adjacencies as equal. IDPDC introduces a degree-product correction: a gate pair at distance 3 where both endpoints have degree 4 (heavy-hex cross qubits) gets lower cost than a degree-1 pair at the same distance. This is strictly precomputable, topology-specific, and encodes the hardware's inherent routing advantage of hub qubits — information completely absent from hop count alone.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 9
+AVERAGE_SCORE: 7.0
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Transitive Successor Urgency Cost (TSUC)
+DESCRIPTION: For each gate g, precompute |Succ*(g)|: the size of its transitive closure in the DAG (total number of downstream gates reachable from g). Gates with large transitive closures are "pivotal" — they block large portions of the circuit from executing. Weighting by this measure prioritizes resolving high-leverage gates first.
+MATHEMATICAL_FORMULATION:
+```
+Succ*(g) = {h ∈ DAG : ∃ directed path g → h}  (precomputed via DFS)
+w_TSUC(g) = |Succ*(g)| / |total_circuit_gates|
+
+f_distance = Σ_{g∈F} w_TSUC(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} w_TSUC(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: The baseline uses direct predecessor count (backward-looking complexity). The Critical Path variant (CPGUC, excluded as non-convergent) uses depth-to-output, which is a forward scalar. TSUC uses the *volume* of the transitive successor cone — a single gate in a deep fan-out tree may block 80% of all remaining circuit gates. This volume measure is a strictly stronger urgency signal than depth alone, and is precomputed offline so it does not change during routing (convergence guaranteed).
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Path Multiplicity Discount Cost (PMDC)
+DESCRIPTION: For each physical qubit pair (Q1, Q2), precompute the number of distinct shortest paths N_sp(Q1, Q2) in the coupling graph. Pairs with many shortest paths have high routing flexibility — any of those paths can be used. Discount the effective distance by the square root of this path count, reducing urgency for pairs that are easy to route.
+MATHEMATICAL_FORMULATION:
+```
+N_sp(Q1,Q2) = number of distinct shortest paths from Q1 to Q2 in coupling graph
+             (computed via BFS counting layers; precomputed ∀ pairs)
+
+d'(Q1,Q2) = d(Q1,Q2) / sqrt(N_sp(Q1,Q2))
+
+f_distance = Σ_{g∈F} (deps(g)+1) · d'(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · d'(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: Hop count d(Q1,Q2) measures how far qubits are but not how flexibly they can be brought together. Two qubit pairs at distance 3: one on a linear chain (N_sp=1, no alternatives) and one on a grid (N_sp=6, many alternatives). The linear chain pair is dramatically harder to route. PMDC encodes this distinction using a numerically stable, precomputed, purely topological metric. The sqrt dampens the discount to avoid over-rewarding trivially high-multiplicity pairs.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Degree-Harmonic Path Cost (DHPC)
+DESCRIPTION: Replace uniform hop count with a degree-weighted path distance. Each hop along the shortest path Q1=v0→v1→...→vk=Q2 is weighted by the inverse degree of the node being departed: a hop from a degree-4 node to any neighbor costs 1/4, while a hop from a degree-2 node costs 1/2. Low-degree nodes are "bottleneck traversals" — expensive. High-degree nodes are routing hubs — cheap.
+MATHEMATICAL_FORMULATION:
+```
+SP(Q1,Q2) = shortest path Q1 = v0, v1, ..., vk = Q2 in coupling graph
+
+d_H(Q1,Q2) = Σ_{i=0}^{k-1} 1 / deg(v_i)
+
+f_distance = Σ_{g∈F} (deps(g)+1) · d_H(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · d_H(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: Uniform hop count is a purely combinatorial metric blind to topology quality. d_H encodes the *routing capacity* of intermediate nodes on the path: traversing a 2-degree node in a heavy-hex backbone is far more constraining (cost 0.5) than passing through a 4-degree cross coupler (cost 0.25). This is a topology-sensitive distance that does not require any global matrix computations — just degree lookup along the BFS shortest path.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Betweenness Bottleneck Penalty Cost (BBPC)
+DESCRIPTION: Precompute edge betweenness centrality B(e) for all edges in the coupling graph. For each gate pair (Q1, Q2), identify the maximum-betweenness edge on their shortest path. Penalize the routing distance proportionally: pairs whose shortest path must cross a high-betweenness edge (a global routing bottleneck) are more expensive.
+MATHEMATICAL_FORMULATION:
+```
+B(e) = edge betweenness centrality of edge e (precomputed offline)
+B_max = max_e B(e)
+
+B_path(Q1,Q2) = max_{e ∈ SP(Q1,Q2)} B(e)   (bottleneck edge on shortest path)
+B_norm(Q1,Q2) = B_path(Q1,Q2) / B_max
+
+d'(Q1,Q2) = d(Q1,Q2) · (1 + α · B_norm(Q1,Q2)),   α ∈ [0.5, 2]
+
+f_distance = Σ_{g∈F} (deps(g)+1) · d'(Q1,Q2)
+e_distance = Σ_{g∈E} (deps(g)+1) · d'(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: Standard routing only sees hop count. BBPC identifies which gate pairs, if routed simultaneously, would contend for the same bottleneck edges in the coupling graph. By precomputing static betweenness and penalizing paths through high-betweenness edges, the cost function implicitly solves a relaxed version of the concurrent routing problem without the expensive dynamic computation of ECAC (which doesn't converge).
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.7
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Remaining Interaction Density Weight Cost (RIDWC)
+DESCRIPTION: For each physical qubit Q (currently assigned logical qubit q), compute its remaining interaction degree: the number of distinct logical qubits that q must still interact with in the remaining circuit. This "remaining degree" measures how many future partners Q needs to be near. Gates involving high-remaining-degree qubits deserve higher routing urgency.
+MATHEMATICAL_FORMULATION:
+```
+remain_partners(q) = |{q' ≠ q : ∃ remaining gate between q and q' in DAG}|
+max_rp = max_q remain_partners(q)
+
+rp_norm(Q) = remain_partners(current_logical(Q)) / (max_rp + ε)
+
+w_RIDWC(g: Q1,Q2) = (deps(g)+1) · (1 + rp_norm(Q1) + rp_norm(Q2))
+
+f_distance = Σ_{g∈F} w_RIDWC(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} w_RIDWC(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: IFLC weights by the frequency of a specific pair's interaction. RIDWC weights by the *total future degree* of each qubit: a qubit that still needs to interact with 12 different partners should be placed centrally in the topology, not stranded at a leaf. This captures a qualitatively different signal — not pair-wise urgency but per-qubit routing centrality need. Dynamically decrements as gates execute, ensuring convergence.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Dependency Horizon Discount Cost (DHDC)
+DESCRIPTION: For each gate g, precompute horizon(g) = the length of the longest directed path from g to any terminal gate in the DAG. Gates with small horizon are near the end of their dependency chain and must be resolved soon to prevent cascading delays. Weight gates by 1/(1 + horizon(g)) — an inverse urgency that peaks for nearly-terminal gates.
+MATHEMATICAL_FORMULATION:
+```
+horizon(g) = longest directed path length from g to any DAG terminal
+             (computed via reverse topological sort; precomputed offline)
+
+w_DHDC(g) = 1 / (1 + horizon(g))
+
+f_distance = Σ_{g∈F} w_DHDC(g) · d(Q1,Q2)
+e_distance = Σ_{g∈E} w_DHDC(g) · d(Q1,Q2) / layer_factor
+
+H = max_decay · (f_distance / |F| + W · (e_distance / |E| if |E|>0 else 0))
+```
+WHY_NOVEL: TSUC uses volume (how many gates are downstream). DHDC uses *length* (how long is the remaining chain). These are distinct: a gate might have a small transitive closure (few downstream gates) but a long horizon (they form a deep chain), or vice versa. Horizon-based urgency naturally concentrates effort on gates that determine the circuit's total depth. Unlike CPGUC (excluded), DHDC computes from each gate to terminals (not from gate to output), which is well-defined and static.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Directed Qubit Momentum Cost (DQMC)
+DESCRIPTION: For each logical qubit q, compute the centroid of the physical positions of all its remaining interaction partners (weighted by gate urgency). Define the momentum vector as the direction from q's current physical position to this weighted centroid. A SWAP is rewarded if it moves q toward its centroid (aligned momentum) and penalized if it moves q away (opposing momentum). This creates a smooth vector field guiding qubits to their interaction centers.
+MATHEMATICAL_FORMULATION:
+```
+For logical qubit q at physical position pos(Q):
+  centroid(q) = Σ_{g: q∈g, g∈remaining} w(g) · pos(partner_physical(q,g))
+              / Σ_{g: q∈g, g∈remaining} w(g)
+  where w(g) = (deps(g)+1) · r^{layer(g)}
+
+Δ(q) = centroid(q) - pos(Q)          (displacement vector)
+|Δ(q)| = Euclidean norm of displacement
+
+For SWAP(Q1,Q2), define move_q1 = pos(Q2) - pos(Q1):
+  momentum_score = Δ(q1)·move_q1 / (|Δ(q1)|·|move_q1| + ε)
+                 + Δ(q2)·(-move_q1) / (|Δ(q2)|·|move_q1| + ε)
+                 ∈ [-2, 2]
+
+H = standard_cost / (1 + γ · max(0, momentum_score)),   γ > 0
+```
+WHY_NOVEL: All existing cost functions are scalar distance sums. DQMC introduces a *vector field* over the qubit layout, where each qubit has a preferred direction of motion toward its interaction centroid. The cost function modulates routing scores by alignment with this field. This is inspired by potential-based reward shaping in reinforcement learning and captures routing intention in a geometrically meaningful way that scalar distances cannot.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 5
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+IDEA_NAME: Geometric Mean Layer Aggregation Cost (GMLAC)
+DESCRIPTION: Replace the baseline's arithmetic aggregation of front and extended layer costs with a geometric mean. The geometric mean is dominated by the minimum of the two terms, rather than their sum — it penalizes extreme imbalance between the front and extended layer costs and rewards configurations where both are simultaneously low.
+MATHEMATICAL_FORMULATION:
+```
+f_cost = Σ_{g∈F} (deps(g)+1) · d(Q1,Q2) / |F|
+
+e_cost = Σ_{g∈E} (deps(g)+1) · d(Q1,Q2) / (layer_factor · |E|)   if |E| > 0
+       = 0   otherwise
+
+α ∈ (0, 1),  e.g. α = 0.5
+
+H = max_decay · f_cost^α · (W · e_cost + ε)^(1-α)
+
+(When |E| = 0: H = max_decay · f_cost^α · ε^(1-α) → effectively f_cost^α · constant)
+```
+WHY_NOVEL: The baseline uses f + W·e (arithmetic), which allows a very small e_cost to compensate for a large f_cost. The geometric mean f^α · e^(1-α) enforces that *both* layers must be well-resolved: AM-GM inequality guarantees the geometric mean ≤ arithmetic mean, but the geometric form creates a strictly different optimization surface. It prevents degenerate solutions where one layer is ignored entirely, a known failure mode in SABRE-like heuristics on unbalanced circuits.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 8
+AVERAGE_SCORE: 6.3
+STATUS: KEPT
+ELIMINATION_REASON: N/A
+
+---
+
+## ELIMINATED IDEAS
+
+---
+
+IDEA_NAME: Topological Qubit Centrality Cost (TQCC)
+DESCRIPTION: Weight the routing distance of each gate by the harmonic centrality (1/avg_distance_to_all_nodes) of the physical qubits involved. High-centrality qubits are well-connected and routing-friendly; low-centrality qubits (leaves, dead ends) are expensive.
+MATHEMATICAL_FORMULATION: d'(Q1,Q2) = d(Q1,Q2) / (HC(Q1) + HC(Q2) + ε) where HC(Q) = (n-1)/Σ_v d(Q,v)
+WHY_NOVEL: Topology-aware distance modification using centrality.
+NOVELTY_SCORE: 5
+PROBABILITY_SCORE: 5
+EFFORT_SCORE: 7
+AVERAGE_SCORE: 5.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Fundamentally subsumed by BBPC (betweenness captures the same bottleneck information more precisely) and IDPDC (degree product captures endpoint flexibility). Harmonic centrality is a weaker global measure than either of these. Redundant relative to stronger kept ideas.
+
+---
+
+IDEA_NAME: Persistent Homology Routing Cost (PHRC)
+DESCRIPTION: Compute the persistent homology of the coupling graph filtered by qubit distance values. Use the bottleneck distance between persistence diagrams of the current and ideal mapping as the routing cost signal.
+MATHEMATICAL_FORMULATION: H = d_B(PD(current_mapping), PD(ideal_mapping)) via Vietoris-Rips filtration on coupling graph
+WHY_NOVEL: First application of topological data analysis to quantum circuit routing cost functions.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 3
+EFFORT_SCORE: 2
+AVERAGE_SCORE: 4.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: Computation of persistent homology is O(n³) per evaluation step, making it completely infeasible for real-time routing decisions. The persistence diagram of the coupling graph also does not clearly differentiate between candidate SWAPs — it is a global topological summary insensitive to local qubit movements. Very low probability of providing a useful routing signal.
+
+---
+
+IDEA_NAME: KL Divergence Mapping Cost (KLMC)
+DESCRIPTION: Model the desired mapping as a target probability distribution over physical positions for each logical qubit. Compute the KL divergence between the current mapping distribution and the ideal mapping distribution. Minimize KL divergence via SWAP selection.
+MATHEMATICAL_FORMULATION: H = Σ_q KL(P_current(q) || P_ideal(q)) = Σ_q Σ_Q P_c(Q) log(P_c(Q)/P_i(Q))
+WHY_NOVEL: Information-theoretic framing of quantum mapping as distribution matching.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 3
+EFFORT_SCORE: 3
+AVERAGE_SCORE: 4.7
+STATUS: ELIMINATED
+ELIMINATION_REASON: The "target distribution" P_ideal cannot be defined without already solving the routing problem — it is circular. In practice, each logical qubit has a single deterministic current physical assignment (not a distribution), making KL divergence undefined or trivially 0/∞. The information-theoretic framing is novel but does not translate into a well-defined, convergent cost function for the routing setting.
+
+---
+
+IDEA_NAME: Commutation Reachability Window Cost (CRWC)
+DESCRIPTION: For each gate g in the extended layer, find all gates that can be commuted past g through algebraic commutativity rules (e.g., two diagonal gates commute). The set of commutable orderings defines a "reachability window." Gates with larger windows need less urgent routing since they can be deferred without extending circuit depth.
+MATHEMATICAL_FORMULATION: window(g) = |{orderings reachable by commuting g with adjacent gates}|; w(g) = 1/(1 + window(g))
+WHY_NOVEL: First commutativity-aware urgency weighting in a routing cost function.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 4
+EFFORT_SCORE: 4
+AVERAGE_SCORE: 5.0
+STATUS: ELIMINATED
+ELIMINATION_REASON: Computing commutativity reachability windows requires gate-type information that is not available in pure routing context (routing operates on the DAG structure, not gate algebra). Commutativity analysis at the routing stage conflicts with already-compiled gate dependencies. Window size computation can be exponential in the worst case. Low probability of outperforming simpler cost functions given implementation complexity.
+
+---
+
+## Summary Table (KEPT IDEAS)
+
+| Rank | Idea | N | P | E | Avg |
+|------|------|---|---|---|-----|
+| 1 | IFLC — Interaction Frequency Lookahead | 8 | 7 | 7 | **7.3** |
+| 2 | GLDC — Geometric Layer Decay | 6 | 7 | 9 | **7.3** |
+| 3 | SCWC — Successor Count Weighting | 6 | 7 | 9 | **7.3** |
+| 4 | ELRC — Extended Layer Readiness | 8 | 6 | 7 | **7.0** |
+| 5 | QDSC — Qubit Demand Saturation | 7 | 6 | 8 | **7.0** |
+| 6 | TNIC — Two-Hop Neighborhood Intersection | 8 | 5 | 8 | **7.0** |
+| 7 | IDPDC — Inverse Degree Product Distance | 6 | 6 | 9 | **7.0** |
+| 8 | TSUC — Transitive Successor Urgency | 8 | 6 | 6 | **6.7** |
+| 9 | PMDC — Path Multiplicity Discount | 7 | 6 | 7 | **6.7** |
+| 10 | DHPC — Degree-Harmonic Path | 7 | 6 | 7 | **6.7** |
+| 11 | BBPC — Betweenness Bottleneck Penalty | 7 | 6 | 7 | **6.7** |
+| 12 | RIDWC — Remaining Interaction Density Weight | 7 | 6 | 6 | **6.3** |
+| 13 | DHDC — Dependency Horizon Discount | 7 | 5 | 7 | **6.3** |
+| 14 | DQMC — Directed Qubit Momentum | 9 | 5 | 5 | **6.3** |
+| 15 | GMLAC — Geometric Mean Layer Aggregation | 6 | 5 | 8 | **6.3** |
+
+**Top recommendations to implement first:** IFLC, GLDC, SCWC (highest scores, all easily implementable as drop-in replacements to the baseline formula with minor changes to gate weighting or layer discount strategy).

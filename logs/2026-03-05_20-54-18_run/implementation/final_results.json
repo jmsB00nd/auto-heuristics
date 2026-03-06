@@ -1,0 +1,45 @@
+{
+  "Qubit Pair Future Proximity Score Cost (QPFPS)": {
+    "mean_swaps": 703.2272727272727,
+    "mean_depth": 1094.090909090909,
+    "error": null,
+    "failures": []
+  },
+  "Qubit Mobility-Adjusted Distance Cost (QMADC)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  },
+  "Qubit Traffic Light Cost (QTLC)": {
+    "mean_swaps": 683.1363636363636,
+    "mean_depth": 1078.4545454545455,
+    "error": null,
+    "failures": []
+  },
+  "Routing Path Mutual Benefit Cost (RPMBC)": {
+    "mean_swaps": 685.1818181818181,
+    "mean_depth": 996.5909090909091,
+    "error": null,
+    "failures": []
+  },
+  "Distance Velocity Cost (DVC)": {
+    "mean_swaps": 711.5,
+    "mean_depth": 1022.3181818181819,
+    "error": null,
+    "failures": []
+  }
+}
