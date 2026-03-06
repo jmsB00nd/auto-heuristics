@@ -1,0 +1,86 @@
+Now I have the full picture. Key findings:
+- `self.dag2q[g]` gives DAG successors
+- GCIFC and RCIFC **timed out** because they do BFS on every single swap candidate call
+- The fix: **cache** the pair frequencies per routing step (invalidate when `front_layer` changes)
+- IGDLC's novelty: sum the closeness cost over **all remaining pairs** (not just F∪E), weighted by **quadratic interaction frequency** — a global Coulomb-like potential
+
+Here's the implementation:
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    from collections import deque
+
+    # --- Step 1: Build/cache global remaining-circuit interaction frequencies ---
+    # The cache is invalidated whenever front_layer changes (i.e. a gate was scheduled).
+    # This makes the expensive BFS O(N) per routing step, not per swap candidate.
+    cache_key = frozenset(self.front_layer)
+
+    if (not hasattr(self, '_igdlc_pair_freq')
+            or self._igdlc_cache_key != cache_key):
+
+        pair_freq = {}
+        visited = set(self.front_layer)
+        queue = deque(self.front_layer)
+
+        while queue:
+            g = queue.popleft()
+            q1, q2 = self.access2q[g]
+            pair = (min(q1, q2), max(q1, q2))
+            pair_freq[pair] = pair_freq.get(pair, 0) + 1
+            for succ in self.dag2q.get(g, set()):
+                if succ not in visited:
+                    visited.add(succ)
+                    queue.append(succ)
+
+        self._igdlc_pair_freq = pair_freq
+        self._igdlc_cache_key = cache_key
+
+    pair_freq = self._igdlc_pair_freq
+
+    if not pair_freq:
+        return 0.0
+
+    # --- Step 2: Global density-weighted closeness potential ---
+    # Novel term: sum over ALL remaining qubit pairs (not just F∪E window).
+    # Weight each pair's physical distance by freq², making highly-recurring
+    # interactions contribute quadratically — pairs that meet many times in the
+    # future must be kept close at all times, not just when they enter F or E.
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    weighted_dist = 0.0
+    total_weight = 0.0
+
+    for (q1, q2), freq in pair_freq.items():
+        Q1 = self.temp_mapping_dict[q1]
+        Q2 = self.temp_mapping_dict[q2]
+        dist = self.distance_matrix[Q1][Q2]
+        # Quadratic frequency weight: a pair that interacts k times in the
+        # remaining circuit contributes k² times as much to the cost.
+        # This amplifies the signal for high-density interaction pairs while
+        # naturally suppressing noise from low-frequency one-off interactions.
+        w = freq * freq
+        weighted_dist += w * dist
+        total_weight += w
+
+    # Normalize to mean freq²-weighted distance over all remaining pairs.
+    H = max_decay * (weighted_dist / total_weight)
+
+    return H
+```
+
+---
+
+**Why this is fundamentally different from the baseline:**
+
+| Dimension | Baseline (SABRE-style) | IGDLC |
+|---|---|---|
+| **Scope** | F ∪ E window (local) | All remaining gates (global) |
+| **Weighting** | `(deps+1)` per gate | `freq²` per qubit pair |
+| **Summation domain** | Gates in F, E | Unique qubit pairs across entire tail |
+| **Normalization** | `/ front_layer_size`, `/ extended_layer_size` | `/ Σ freq²` (density-normalized) |
+| **Depth factor** | `1/layer_factor` discounts distant E gates | No depth discount — global signal |
+
+**Why the caching is critical:** GCIFC and RCIFC used identical BFS but timed out because they reran the BFS for every swap candidate on every step. Here the result is memoized with `cache_key = frozenset(self.front_layer)`, invalidating only when the front layer advances — reducing BFS calls from `O(|candidates| × N)` to `O(N)` per routing step.

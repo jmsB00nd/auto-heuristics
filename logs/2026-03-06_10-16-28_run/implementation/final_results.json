@@ -1,0 +1,30 @@
+{
+  "Interaction Graph Density Lookahead Cost (IGDLC)": {
+    "mean_swaps": Infinity,
+    "error": "Timeout on adder_n28__42CYC.json"
+  },
+  "Minimum Spanning Tree Alignment Cost (MSTAC)": {
+    "mean_swaps": 667.2272727272727,
+    "mean_depth": 998.0,
+    "error": null,
+    "failures": []
+  },
+  "Marginal Distance Reduction Cost (MDRC)": {
+    "mean_swaps": 688.1818181818181,
+    "mean_depth": 1008.8636363636364,
+    "error": null,
+    "failures": []
+  },
+  "Adaptive Window Lookahead Cost (AWLC)": {
+    "mean_swaps": 658.0,
+    "mean_depth": 1057.8181818181818,
+    "error": null,
+    "failures": []
+  },
+  "Causal Unlock Width Cost (CUWC)": {
+    "mean_swaps": 684.0909090909091,
+    "mean_depth": 1070.9545454545455,
+    "error": null,
+    "failures": []
+  }
+}

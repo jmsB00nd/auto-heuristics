@@ -1,0 +1,41 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-06 10:51:57
+Ideas Tested: 5
+
+## Global Metrics
+- **Generation Success Rate:** 80.00%
+- **Average Score (Mean Swaps):** 674.38
+- **Best Score:** 658.00
+- **Worst Score:** 688.18
+- **Total Number of Tokens:** 9,429
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 8m 1s
+- **Implementation:** 27m 27s
+- **Total Pipeline:** 35m 28s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔ Adaptive Window Lookahead Cost (AWLC)
+- Mean Swaps: 658.0
+- Mean Depth: 1057.8181818181818
+
+### 2. ✔ Minimum Spanning Tree Alignment Cost (MSTAC)
+- Mean Swaps: 667.2272727272727
+- Mean Depth: 998.0
+
+### 3. ✔ Causal Unlock Width Cost (CUWC)
+- Mean Swaps: 684.0909090909091
+- Mean Depth: 1070.9545454545455
+
+### 4. ✔ Marginal Distance Reduction Cost (MDRC)
+- Mean Swaps: 688.1818181818181
+- Mean Depth: 1008.8636363636364
+
+### 5. ✘ Interaction Graph Density Lookahead Cost (IGDLC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner: Adaptive Window Lookahead Cost (AWLC) (Mean Swaps: 658.00)

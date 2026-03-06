@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Interaction Graph Density Lookahead Cost (IGDLC)",
+    "status": "KEPT",
+    "description": "Precompute for every logical qubit pair (q1,q2) the total number of 2-qubit gates between them in the **entire remaining circuit** (not just F\u222aE). Use this global interaction frequency as a gate weight \u2014 pairs that interact frequently throughout the circuit should be physically close at all times, not just when they next appear in the extended layer window. This is a full-circuit density signal, unlike the local-window lookahead of SABRE.",
+    "average_score": 7.7,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Minimum Spanning Tree Alignment Cost (MSTAC)",
+    "status": "KEPT",
+    "description": "Build the weighted **interaction graph** G_I from the remaining circuit: nodes = logical qubits, edge weight(q1,q2) = total remaining interactions between q1 and q2. Compute the MST of G_I. The MST captures the global interaction skeleton \u2014 the minimum-cost subgraph that spans all interacting qubits. The cost function measures how well the current physical mapping stretches this MST onto the coupling graph. A mapping that embeds the MST with low total physical distance is globally efficient.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Marginal Distance Reduction Cost (MDRC)",
+    "status": "KEPT",
+    "description": "Instead of measuring the **cost of the current state**, directly measure the **benefit of each SWAP action** \u2014 how much total weighted distance it actually reduces across F\u222aE. The SWAP with maximum distance reduction (most negative MDRC) is selected. This inverts the standard framework: we optimize over actions, not states. The cost is the algebraic change in total weighted distance, not the total distance itself.",
+    "average_score": 7.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Adaptive Window Lookahead Cost (AWLC)",
+    "status": "KEPT",
+    "description": "Dynamically adjust the extended layer weight W based on real-time routing progress. If many front-layer gates are being resolved quickly (high progress rate), the extended layer weight shrinks \u2014 we trust the front layer to guide efficiently. If routing is stalling (few front-layer gates resolving), the extended layer weight grows to provide stronger global lookahead. This is a feedback-controlled lookahead mechanism.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Causal Unlock Width Cost (CUWC)",
+    "status": "KEPT",
+    "description": "For each gate g, compute its **unlock width**: the number of gate successors in the DAG that have g as their LAST unresolved predecessor. These are gates that will IMMEDIATELY become executable once g is executed. Gates with high unlock width are \"activation keys\" \u2014 resolving them triggers a cascade of newly executable gates. They deserve higher routing urgency.",
+    "average_score": 7.0,
+    "elimination_reason": "N/A"
+  }
+]
