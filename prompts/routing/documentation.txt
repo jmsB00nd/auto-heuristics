@@ -1,0 +1,35 @@
+ACCESSIBLE DATA (self)
+
+1. TOPOLOGY & DISTANCE
+- self.distance_matrix: List[List[int]]
+  All-pairs shortest-path distances on the hardware graph. Use this to measure topological distance.
+- self.num_qubits: int
+  Total number of physical qubits.
+- self.backend: DefaultDict[int, Set[int]]
+  Hardware adjacency list.
+- self.backend_connections: Set[Tuple[int, int]]
+  Set of hardware edges for O(1) adjacency checks.
+
+2. MAPPING STATE & LOOP PREVENTION
+- self.temp_mapping_dict: List[int]
+  Logical → physical mapping *AFTER* the candidate swap is applied. Use this to measure the future distance of the proposed state. -1 indicates unmapped.
+- self.decay_parameter: List[float]
+  CRITICAL FOR CONVERGENCE. Noise/heat metric per physical qubit. Every time a physical qubit is involved in a SWAP, its decay increases. You MUST use `self.decay_parameter[swap_gate[0]]` and `self.decay_parameter[swap_gate[1]]` as heavy multipliers/penalties to prevent infinite loops and ping-ponging.
+- self.mapping_dict: List[int]
+  Logical → physical mapping *before* the swap.
+- self.reverse_mapping_dict: List[int]
+  Physical → logical mapping (*before* swap).
+- self.access2q: List[List[int]]
+  Maps a gate ID to its two logical qubits [q1, q2].
+
+3. DEPENDENCY GRAPH (DAG)
+- self.front_layer: Set[int]
+  Gate IDs ready for execution. This MUST dictate the primary routing direction.
+- self.extended_layer: List[int]
+  Lookahead gates (future successors). Should only be used as a tie-breaker or with a strong discount factor.
+- self.extended_layer_index: Dict[int, int]
+  Gate ID → lookahead depth.
+- self.dag_dependencies_count: List[int]
+  Criticality score per gate. Useful as a weight multiplier.
+- self.dag2q: Dict[int, Set[int]]
+  Successors in the 2-qubit DAG.

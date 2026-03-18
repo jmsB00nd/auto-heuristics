@@ -1,0 +1,54 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-12 22:41:35
+Ideas Tested: 8
+
+## Global Metrics
+- **Generation Success Rate:** 75.00%
+- **Average Score (Mean Swaps):** 461.02
+- **Best Score:** 419.38
+- **Worst Score:** 548.38
+- **Total Number of Tokens:** 15,739
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 8m 43s
+- **Implementation:** 25m 42s
+- **Iterative Refinement:** 22m 19s
+- **Total Pipeline:** 56m 45s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔  Multi-Scale Geometric Telescope Cost (MSGTC)
+- Mean Swaps: 419.3809523809524
+- Mean Depth: 532.8571428571429
+
+### 2. ✔ Refined_Idea_Round_2
+- Mean Swaps: 427.0
+- Mean Depth: 561.0
+
+### 3. ✔ Refined_Idea_Round_3
+- Mean Swaps: 440.9047619047619
+- Mean Depth: 586.8095238095239
+
+### 4. ✔  Critical Path Slack Inversion Cost (CPSIC)
+- Mean Swaps: 447.0952380952381
+- Mean Depth: 592.3333333333334
+
+### 5. ✔ Refined_Idea_Round_1
+- Mean Swaps: 483.3333333333333
+- Mean Depth: 541.6190476190476
+
+### 6. ✔  Interaction Homomorphism Profit Cost (IHPC)
+- Mean Swaps: 548.3809523809524
+- Mean Depth: 584.1428571428571
+
+### 7. ✘  Edge Traffic Quadratic Congestion Cost (ETQCC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 8. ✘  UCB-Regret Swap Aversion Cost (URSAC)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner:  Multi-Scale Geometric Telescope Cost (MSGTC) (Mean Swaps: 419.38)

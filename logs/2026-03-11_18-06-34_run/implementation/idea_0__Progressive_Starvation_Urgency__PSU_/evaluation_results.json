@@ -1,0 +1,19 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: 'Qlosure' object has no attribute 'starvation'",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "'Qlosure' object has no attribute 'starvation'"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "'Qlosure' object has no attribute 'starvation'"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "'Qlosure' object has no attribute 'starvation'"
+    }
+  ]
+}

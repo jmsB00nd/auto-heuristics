@@ -1,0 +1,41 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-11 17:57:02
+Ideas Tested: 5
+
+## Global Metrics
+- **Generation Success Rate:** 60.00%
+- **Average Score (Mean Swaps):** 682.50
+- **Best Score:** 678.59
+- **Worst Score:** 686.18
+- **Total Number of Tokens:** 11,706
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 7m 28s
+- **Implementation:** 31m 22s
+- **Total Pipeline:** 38m 50s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔ Thermal EMA Qubit Heat Cost (TEQH)
+- Mean Swaps: 678.5909090909091
+- Mean Depth: 988.5909090909091
+
+### 2. ✔ Oscillation Signature Hash-Barrier (OSHB)
+- Mean Swaps: 682.7272727272727
+- Mean Depth: 999.5
+
+### 3. ✔ Qubit Momentum Reversal Penalty (QMRP)
+- Mean Swaps: 686.1818181818181
+- Mean Depth: 985.6818181818181
+
+### 4. ✘ Asymmetric Directional Decay (ADD)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 5. ✘ Adaptive Stagnation-Escape Amplifier (ASEA)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner: Thermal EMA Qubit Heat Cost (TEQH) (Mean Swaps: 678.59)

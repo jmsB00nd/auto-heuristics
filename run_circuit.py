@@ -17,7 +17,7 @@ from qpu.src.load_backend import load_backend_edges
 parser = argparse.ArgumentParser(
     description="Run Qlosure with optional parameters")
 parser.add_argument("--circuit", type=str,
-                    default="/home/jmsb00nd/Documents/auto-heuristics/benchmarks/qasmbench-large/multiplier_n75__1308CYC.json", help="Path to circuit JSON file")
+                    default="/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-54qbt/54QBT_600CYC_QSE_6.json", help="Path to circuit JSON file")
 parser.add_argument("--backend", type=str,
                     default="ibm_sherbrooke", help="Name of the backend")
 parser.add_argument("--initial", type=str, default="trivial",

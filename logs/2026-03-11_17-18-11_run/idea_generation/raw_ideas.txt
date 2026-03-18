@@ -1,0 +1,524 @@
+# Novel Quantum Routing Cost Functions: Generation, Evaluation & Filtering
+
+---
+
+## Preamble: Notation & Baseline Summary
+
+**Notation used throughout:**
+- `D(g)` = `distance_matrix[Q1][Q2]` for gate `g` after applying the candidate SWAP
+- `FL` / `EL` = front / extended layer sets; `|FL|`, `|EL|` their sizes
+- `decay(q)` = decay parameter for physical qubit `q`
+- `max_decay` = `max(decay(swap[0]), decay(swap[1]))`
+- `deps(g)` = `dag_dependencies_count[g]`
+- `layer_factor(g)` = `extended_layer_index.get(g, 0) + 1`
+
+**Baseline failure modes identified:**
+1. Symmetric sum-of-distances creates tie scores → ping-pong oscillation
+2. Decay is a step increment, not directionally aware
+3. Extended layer can "pull" routing against front layer progress
+4. No stagnation detection → algorithm can cycle without breaking out
+
+---
+
+## PART 1 & 2: Ideas — Evaluated, Scored & Sorted by Average
+
+---
+
+IDEA_NAME: **Oscillation Signature Hash-Barrier (OSHB)**
+
+DESCRIPTION: Maintains a fixed-size deque of recent committed SWAP pairs `swap_history[k]` as frozensets. Before scoring, checks if the candidate SWAP `{q1, q2}` matches any entry in the deque. If it matches the entry at recency depth `k` (1 = most recent), multiplies the base cost by `β^(1/k)` — an exponentially large penalty for reversing the most recent swap, decaying smoothly for older matches. This is conceptually a soft state-hash barrier: the algorithm is explicitly forbidden from revisiting recent exchange states.
+
+MATHEMATICAL_FORMULATION:
+```
+osc_depth = min{k : swap_history[-k] == {q1, q2}}, or ∞ if no match
+
+osc_penalty = β / osc_depth  if osc_depth < ∞,  else 0   (β >> 1, e.g. β = 5)
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = (max_decay + osc_penalty) · (f_dist/|FL| + W · e_dist/max(|EL|,1))
+```
+
+LOOP_PREVENTION_STRATEGY: Directly detects and penalizes re-use of the exact same physical SWAP pair seen recently. The penalty `β/k` is largest (= β) for the immediate reverse and decreases for older matches — guaranteeing the most dangerous (depth-1) reversal is maximally penalized. This addresses the root cause of ping-ponging rather than just decaying usage.
+
+WHY_NOVEL: The baseline uses only `max_decay` (an increment counter) which is symmetric and decays too slowly. OSHB performs explicit sequence-matching against a history buffer: it is the only formulation that detects the *pattern* of reversal rather than just the *frequency* of qubit use. No published SABRE-family heuristic maintains an explicit swap-sequence hash.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 9
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+---
+
+IDEA_NAME: **Asymmetric Directional Decay (ADD)**
+
+DESCRIPTION: Replaces `max_decay` with a direction-conditional penalty. For each qubit `q` in the candidate SWAP, computes whether the SWAP moves `q` *toward* or *away from* its nearest FL target. Qubits moving away get their decay multiplied by a penalty factor `δ > 1`; qubits moving toward their target retain their base decay. The effective decay is the maximum over both qubits. This makes the cost function *asymmetric by construction*: a SWAP that was just applied cannot be reversed cheaply because the reversing qubit would be moving away from the target it was just moved toward.
+
+MATHEMATICAL_FORMULATION:
+```
+For q ∈ {swap[0], swap[1]}:
+  targets_q = {phys_partner(g) : g ∈ FL, q ∈ g}
+  nearest_target_q = argmin_{t ∈ targets_q} dist_committed(q, t)
+  
+  Δ(q) = D_after(q, nearest_target_q) - D_committed(q, nearest_target_q)
+  dir_factor(q) = δ  if Δ(q) > 0  else 1     (δ ≥ 2.0)
+
+asymmetric_decay = max(decay(q) · dir_factor(q)  for q in swap)
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = asymmetric_decay · (f_dist/|FL| + W · e_dist/max(|EL|,1))
+```
+
+LOOP_PREVENTION_STRATEGY: A SWAP that reverses the previous one necessarily moves at least one qubit away from the target it just approached, triggering `dir_factor = δ`. This *multiplies the decay penalty* (not adds), so the cost of reversing grows superlinearly with `δ`. No symmetric tie can persist because the direction of movement is determined by the circuit structure, not the graph topology.
+
+WHY_NOVEL: The baseline applies `max_decay` identically regardless of whether a SWAP helps or hurts the current gate. ADD introduces asymmetry at the decay level: the *same physical SWAP* has a different cost depending on whether it is progress or regression. This is the routing analogue of a directional gradient penalty.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+CONVERGENCE_SCORE: 9
+AVERAGE_SCORE: 8.25
+
+---
+
+IDEA_NAME: **Qubit Momentum Reversal Penalty (QMRP)**
+
+DESCRIPTION: Maintains a per-physical-qubit "committed distance" history: after each round's SWAP is chosen, records `prev_dist[q]` = distance from `q` to its nearest FL target in the committed mapping. When evaluating a candidate SWAP, checks whether the candidate would reverse the qubit's established movement direction from the previous round. A reversal is detected when a qubit was previously approaching its target (`prev_dist[q] > current_dist[q]`) but the candidate SWAP would move it further away. The reversal penalty is proportional to the magnitude of the reversal.
+
+MATHEMATICAL_FORMULATION:
+```
+# Precomputed once per round from committed mapping:
+prev_dist[q] = min_{g∈FL : q∈g} dist_committed(q, phys_partner_committed(g))
+
+# Per candidate SWAP evaluation:
+reversal_penalty = 0
+for q in {swap[0], swap[1]}:
+  D_before = prev_dist[q]   # distance in committed mapping (pre-SWAP)
+  D_after_q = min_{g∈FL : q∈g} D_after_candidate(q, phys_partner(g))
+  
+  was_approaching = (D_before_prev_round[q] > D_before)   # positive = was closing in
+  now_retreating  = (D_after_q > D_before)
+  
+  if was_approaching and now_retreating:
+    reversal_penalty += (D_after_q - D_before)²
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = max_decay · (f_dist/|FL| + W · e_dist/max(|EL|,1)) + λ · reversal_penalty
+```
+
+LOOP_PREVENTION_STRATEGY: Oscillation requires first moving qubit A toward target, then reversing. The second move is penalized quadratically by `(D_after - D_before)²`, so the cost of undoing a good move is strictly larger than the benefit of the original move. The squared term ensures strong penalty even for single-step reversals.
+
+WHY_NOVEL: Neither the baseline nor standard SABRE derivatives track the *sign of the distance derivative* for individual qubits across rounds. This is inspired by momentum in gradient-based optimization — the first derivative of progress is a first-class component of the cost function.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 9
+AVERAGE_SCORE: 8.0
+
+---
+
+IDEA_NAME: **Thermal EMA Qubit Heat Cost (TEQH)**
+
+DESCRIPTION: Replaces the step-increment `decay_parameter` with a per-physical-qubit exponential moving average (EMA) "heat" score. After each round, the chosen SWAP qubits absorb heat; all qubits cool naturally. Heat is applied superlinearly (power `β > 1`) so qubits involved in many consecutive SWAPs face rapidly escalating cost. Crucially, this uses *both* qubits' heat (additive) rather than just the max, and applies power-law scaling rather than linear.
+
+MATHEMATICAL_FORMULATION:
+```
+# State maintained across rounds:
+heat[q] ← α · heat[q] + (1−α) · 1   for q ∈ committed_swap  (α ∈ [0.7, 0.9])
+heat[q] ← α · heat[q]                 for all other q          (natural cooling)
+
+# Per candidate SWAP:
+thermal_cost = heat[swap[0]]^β + heat[swap[1]]^β               (β ∈ [1.5, 3.0])
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = (1 + λ · thermal_cost) · (f_dist/|FL| + W · e_dist/max(|EL|,1))
+```
+
+LOOP_PREVENTION_STRATEGY: Repeated swapping between the same two qubits raises `heat[q1]` and `heat[q2]` both toward 1.0. The `^β` power law ensures that at near-saturation heat, the cost multiplier `(1 + λ · (1^β + 1^β))` becomes `(1 + 2λ)`, a hard upper bound that makes the swap prohibitively expensive. Natural cooling allows the penalty to dissipate if a different swap is chosen, breaking the cycle.
+
+WHY_NOVEL: The baseline's `decay_parameter` is a monotonically increasing linear accumulator reset only by... not being used. TEQH uses EMA (bounded, smooth, decaying) with superlinear scaling. The additive combination of both qubits' heat instead of the max creates penalties for *patterns* of use (e.g., hot qubit A swapped with cold qubit B still accumulates heat on A).
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+CONVERGENCE_SCORE: 9
+AVERAGE_SCORE: 8.0
+
+---
+
+IDEA_NAME: **Adaptive Stagnation-Escape Amplifier (ASEA)**
+
+DESCRIPTION: Detects routing stagnation by tracking whether the minimum achieved front-layer aggregate distance is improving each round. If the routing fails to improve for `K` consecutive rounds, exponentially amplifies the front-layer weight term to force the optimizer into aggressive front-layer mode, breaking the local optimum. When improvement resumes, the amplifier resets. This adapts the effective value of `W` dynamically based on convergence behavior.
+
+MATHEMATICAL_FORMULATION:
+```
+# State maintained across rounds:
+if min_fl_dist(committed) < best_fl_dist:
+    stagnation_counter = 0
+    best_fl_dist = min_fl_dist(committed)
+else:
+    stagnation_counter = min(stagnation_counter + 1, K_max)
+
+FL_amplifier = 1 + γ · stagnation_counter²           (γ ≥ 0.5, K_max ≤ 10)
+W_effective  = W / (1 + stagnation_counter)           (shrink EL weight when stuck)
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = max_decay · (FL_amplifier · f_dist/|FL| + W_effective · e_dist/max(|EL|,1))
+```
+
+LOOP_PREVENTION_STRATEGY: When oscillation occurs, `stagnation_counter` increments, making `FL_amplifier` grow quadratically. After `K` stagnant rounds, the front-layer term dominates so overwhelmingly that the only rational choice is any SWAP that strictly reduces FL distance, breaking the cycle. Simultaneously, `W_effective` shrinks, preventing extended-layer "pulls" from maintaining the oscillation.
+
+WHY_NOVEL: The baseline has a fixed `W` coefficient. ASEA makes `W` and the FL weight both functions of detected stagnation — a closed-loop adaptive mechanism inspired by PID controllers. No current SABRE-family heuristic adapts its relative layer weighting based on observed convergence dynamics.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 9
+AVERAGE_SCORE: 7.75
+
+---
+
+IDEA_NAME: **Critical Remaining Circuit Depth Weighting (CRCD)**
+
+DESCRIPTION: Replaces dependency count `deps(g)` with the gate's *critical remaining depth* `crcd[g]` — the length of the longest directed path from `g` to any circuit output in the DAG. This is the true measure of how much future computation is blocked. A gate on a long critical path is weighted far more heavily than a gate with many immediate predecessors (high `deps`) but short downstream chain.
+
+MATHEMATICAL_FORMULATION:
+```
+# Precomputed once (topological sort + DP):
+crcd[g] = 1 + max(crcd[successor] for successor of g in DAG)    (leaves: crcd = 1)
+
+norm_FL = max(Σ_{g∈FL} crcd[g], 1)
+norm_EL = max(Σ_{g∈EL} crcd[g], 1)
+
+f_dist = Σ_{g∈FL} crcd[g] · D(g) / norm_FL
+e_dist = Σ_{g∈EL} crcd[g] · D(g) / (layer_factor(g) · norm_EL)
+
+H = max_decay · (f_dist + W · e_dist/max(|EL|,1) · norm_EL)
+```
+
+LOOP_PREVENTION_STRATEGY: `crcd[g]` values are circuit-structure constants, not symmetric graph distances. Two swap candidates that produce equal path-distance reductions will differ in `crcd`-weighted cost if the affected gates are on critical paths of different lengths. This structural asymmetry breaks ties that the baseline resolves only by decay.
+
+WHY_NOVEL: The baseline weights by `deps(g)` (immediate predecessor count) which measures the *past* of the gate, not its *future*. `crcd[g]` measures downstream circuit depth — the correct metric for minimizing final circuit depth, not just clearing the immediate queue. This connects routing cost directly to the circuit compilation objective.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.5
+
+---
+
+IDEA_NAME: **Immediate Gate Unlock Bonus (IGUB)**
+
+DESCRIPTION: Augments the standard distance cost with a direct reward for SWAPs that make front-layer gates immediately executable. After applying the candidate SWAP to `temp_mapping_dict`, counts how many FL gates have their logical qubits now physically adjacent (distance ≤ 1 in the coupling graph). Each such gate contributes a negative bonus to the cost, directly measuring circuit depth impact.
+
+MATHEMATICAL_FORMULATION:
+```
+unlock_count = |{g ∈ FL : D(g) ≤ 1}|       (gates executable after this SWAP)
+unlock_bonus = α · unlock_count / |FL|       (α > 0, e.g. α = 2.0)
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = max_decay · (f_dist/|FL| - unlock_bonus + W · e_dist/max(|EL|,1))
+```
+*Note:* `H` can become negative when many gates unlock — this is fine since we compare candidates relatively.
+
+LOOP_PREVENTION_STRATEGY: A SWAP that reverses a previous swap will UNDO adjacency for gates that were just brought to distance 1, reducing `unlock_count` and increasing `H`. The bonus term creates a one-way ratchet: moves that create executable gates are rewarded; moves that destroy executability are penalized via loss of the bonus. Combined with `max_decay`, this strongly prevents oscillation.
+
+WHY_NOVEL: The baseline measures routing *progress* purely as distance reduction. IGUB measures *circuit executability* — the actual circuit depth impact. It directly counts "how many gates can I run immediately after this SWAP," which is the quantity the compiler ultimately optimizes. This creates a direct feedback loop between routing decisions and circuit depth.
+
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.5
+
+---
+
+IDEA_NAME: **Exponential Repulsion Potential Field (ERPF)**
+
+DESCRIPTION: Replaces the linear distance term `D(g)` with an exponential penalty `exp(α·D(g)) − 1`. Near adjacency (D=1), this approximates linear behavior. But for D ≥ 3, the cost grows steeply — creating a repulsive "potential field" that makes distant qubits urgently expensive. The difference from linear cost is largest for the most problematic cases (distant pairs), ensuring the algorithm strongly prioritizes resolving large distances.
+
+MATHEMATICAL_FORMULATION:
+```
+ϕ(d) = exp(α · d) − 1       (α ∈ [0.3, 0.7])
+
+# ϕ(0)=0, ϕ(1)≈α, ϕ(2)≈e^{2α}-1, ϕ(3)≈e^{3α}-1  (superlinear growth)
+
+f_potential = Σ_{g∈FL} (deps(g)+1) · ϕ(D(g)) / |FL|
+e_potential = Σ_{g∈EL} (deps(g)+1) · ϕ(D(g)) / (layer_factor(g) · max(|EL|,1))
+
+H = max_decay · (f_potential + W · e_potential)
+```
+
+LOOP_PREVENTION_STRATEGY: The convexity of `exp` means the cost landscape near tie points is asymmetric. If two candidate SWAPs reduce D(g) by 1 for the same gate, the one starting from a higher D value contributes a larger cost reduction (since `exp` has larger slope at higher D). Combined with `max_decay`, this makes revisiting high-D states increasingly expensive.
+
+WHY_NOVEL: All known SABRE-family heuristics use linear or polynomial (power-of-distance) functions. ERPF introduces exponential distance cost — a qualitative change in the shape of the optimization landscape, not just a coefficient tweak. This is directly analogous to Morse potential in molecular dynamics, where repulsion grows exponentially with proximity inversion.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.5
+
+---
+
+IDEA_NAME: **Subgraph Fanout Cascade Weighting (SFCW)**
+
+DESCRIPTION: Weights each FL gate by `fanout[g]` — the number of DAG nodes *transitively reachable* from `g` (the size of `g`'s descendant subgraph). Unlike `deps(g)` which counts immediate predecessors, `fanout[g]` counts how many total future operations are blocked by `g` not yet executing. A gate with `fanout=50` blocks 50 downstream operations and must be treated with the highest priority.
+
+MATHEMATICAL_FORMULATION:
+```
+# Precomputed once (reverse topological sort + DP):
+fanout[g] = 1 + Σ_{c: immediate successor of g} fanout[c]    (leaves: fanout=1)
+
+# Normalize to prevent scale dominance:
+max_fanout = max(fanout[g] for g in FL ∪ EL)
+w(g) = fanout[g] / max_fanout   ∈ (0, 1]
+
+f_dist = Σ_{g∈FL}  w(g) · D(g) / |FL|
+e_dist = Σ_{g∈EL}  w(g) · D(g) / (layer_factor(g) · max(|EL|,1))
+
+H = max_decay · (f_dist + W · e_dist)
+```
+
+LOOP_PREVENTION_STRATEGY: `w(g)` is a circuit-structural constant — it does not depend on the coupling graph distance. Tie-breaking between symmetric distance candidates always resolves to the one with higher `fanout` weight, which is determined by the DAG structure, not the qubit layout. `max_decay` handles physical-qubit symmetry breaking.
+
+WHY_NOVEL: `deps(g)` counts gates that block `g` from executing (backwards view). `fanout[g]` counts gates that `g` blocks (forward view). The forward view directly measures cascading routing impact and aligns the cost function with the circuit depth minimization objective. This is a strictly different signal from any existing heuristic.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.5
+
+---
+
+IDEA_NAME: **Effective Graph Resistance Distance (EGRD)**
+
+DESCRIPTION: Replaces the shortest-path `distance_matrix` with the *effective electrical resistance distance* `R[u][v]` between physical qubits, computed as `R[u][v] = (e_u − e_v)ᵀ L⁺ (e_u − e_v)` where `L⁺` is the Moore-Penrose pseudoinverse of the coupling graph Laplacian `L`. The resistance distance naturally accounts for graph topology: two nodes connected by many parallel paths have low resistance; bottleneck paths have high resistance. This makes routing prefer topologically well-connected paths.
+
+MATHEMATICAL_FORMULATION:
+```
+# Precomputed once at initialization:
+L = degree_matrix(G) − adjacency_matrix(G)     (coupling graph Laplacian)
+L⁺ = Moore-Penrose pseudoinverse(L)
+R[u][v] = L⁺[u][u] + L⁺[v][v] − 2·L⁺[u][v]  for all u,v ∈ physical qubits
+
+# Routing cost (same structure as baseline, different distance):
+f_resist = Σ_{g∈FL} (deps(g)+1) · R[Q1][Q2]
+e_resist = Σ_{g∈EL} (deps(g)+1) · R[Q1][Q2] / layer_factor(g)
+
+H = max_decay · (f_resist/|FL| + W · e_resist/max(|EL|,1))
+```
+
+LOOP_PREVENTION_STRATEGY: Resistance distances are non-integer, non-symmetric values derived from the full graph topology. Two swap candidates that appear equivalent under shortest-path distance almost always differ in resistance distance (since `R[u][v]` encodes all-path information). This structural asymmetry, combined with `max_decay`, strongly reduces symmetric ties. `L⁺` is precomputed once — no runtime overhead.
+
+WHY_NOVEL: Every published quantum routing heuristic uses shortest-path distance. EGRD is the first to use effective resistance, a quantity from spectral graph theory and electrical network theory. It captures *path diversity* and *bottleneck structure* that shortest path ignores — a fundamentally different geometric embedding of the coupling graph.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+CONVERGENCE_SCORE: 7
+AVERAGE_SCORE: 7.25
+
+---
+
+IDEA_NAME: **Monotonic Bottleneck Max-Distance (MBMD)**
+
+DESCRIPTION: Replaces the arithmetic sum of FL distances with the maximum (L∞ norm). Instead of minimizing average routing distance, the algorithm minimizes the worst-case gate pair distance. This is a min-bottleneck objective: the most "stuck" gate pair dominates the cost, preventing the common failure where the algorithm improves average distance but leaves one gate pair perpetually stranded.
+
+MATHEMATICAL_FORMULATION:
+```
+bottleneck_f = max_{g ∈ FL} D(g)         (0 if FL is empty)
+avg_e        = Σ_{g∈EL} (deps(g)+1) · D(g) / (layer_factor(g) · max(|EL|,1))
+
+H = max_decay · (bottleneck_f + W · avg_e)
+```
+
+*Tie-breaking extension (optional):* when two SWAPs tie on `bottleneck_f`, break tie by sum of FL distances: `H_tiebreak = H + ε · Σ_{g∈FL} D(g)/|FL|`
+
+LOOP_PREVENTION_STRATEGY: The bottleneck term is non-increasing in a well-functioning routing run. Any SWAP that increases the maximum FL distance (i.e., reverses progress on the most stuck pair) will strictly increase `H`. Since `max_decay` provides qubit-level symmetry breaking, two competing swap candidates that tie on bottleneck distance still differ by decay.
+
+WHY_NOVEL: SABRE and all variants use L1 (sum) aggregation. MBMD uses L∞ (max). This changes the optimization objective from "minimize average routing effort" to "minimize worst-case routing effort" — a min-bottleneck problem. On hardware with irregular topologies (heavy-hex, falcon), bottleneck pairs are the primary cause of excess SWAP overhead.
+
+NOVELTY_SCORE: 5
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.25
+
+---
+
+IDEA_NAME: **Adaptive Minkowski p-Norm Aggregation (AMPA)**
+
+DESCRIPTION: Uses p-norm aggregation of FL distances with *adaptive p* based on the stagnation counter. When routing is making progress (stagnation = 0), uses p = 1 (arithmetic mean — standard behavior). As stagnation accumulates, p increases toward p = ∞ (max-norm behavior), smoothly transitioning the optimizer from "average progress" mode to "fix the worst pair" mode.
+
+MATHEMATICAL_FORMULATION:
+```
+p = 1 + stagnation_counter · Δp     (Δp ∈ [0.5, 1.0], capped at p_max = 6)
+
+L_p_norm(FL) = (Σ_{g∈FL} D(g)^p / |FL|)^{1/p}    (p-norm of normalized distances)
+avg_e        = Σ_{g∈EL} (deps(g)+1) · D(g) / (layer_factor(g) · max(|EL|,1))
+
+H = max_decay · (L_p_norm(FL) + W · avg_e/max(|EL|,1))
+```
+
+*Numerical note:* for large p, compute as `max(D(g)) · (Σ (D(g)/max_D)^p / |FL|)^{1/p}` to avoid overflow.
+
+LOOP_PREVENTION_STRATEGY: At high stagnation, p → p_max converts the objective to near-max-norm — MBMD behavior — which breaks oscillation by focusing entirely on the worst pair. As oscillation is detected, the cost landscape reshapes to expose the bottleneck. Once progress resumes and stagnation resets, p returns to 1 for efficient operation.
+
+WHY_NOVEL: The concept of adaptively changing the norm of the objective function during optimization is novel in quantum routing. This is similar to curriculum learning or adaptive loss scaling in deep learning — the algorithm changes its *definition of progress* based on its own convergence behavior.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 8
+AVERAGE_SCORE: 7.25
+
+---
+
+IDEA_NAME: **Path-Sharing Congestion Penalty (PSCP)**
+
+DESCRIPTION: Counts the number of FL gates whose optimal routing path *passes through* either qubit in the candidate SWAP. If many gates need to route through the same physical qubit, that qubit is a routing bottleneck and should not be "blocked" by a SWAP that uses it non-productively. This adds a congestion awareness term absent from all distance-only heuristics.
+
+MATHEMATICAL_FORMULATION:
+```
+# For each candidate SWAP (q1, q2):
+congested(g, q) = 1 if q lies on some shortest path from Q1(g) to Q2(g) else 0
+
+congestion_q1 = Σ_{g∈FL} congested(g, q1) / |FL|
+congestion_q2 = Σ_{g∈FL} congested(g, q2) / |FL|
+congestion_penalty = max(congestion_q1, congestion_q2)
+
+f_dist = Σ_{g∈FL} (deps(g)+1) · D(g)
+e_dist = Σ_{g∈EL} (deps(g)+1) · D(g) / layer_factor(g)
+
+H = max_decay · (f_dist/|FL| + γ · congestion_penalty + W · e_dist/max(|EL|,1))
+```
+
+*Implementation note:* precompute `all_shortest_paths` for the coupling graph; `congested(g, q)` is an O(1) lookup via a precomputed `path_membership[q1][q2][q]` boolean tensor.
+
+LOOP_PREVENTION_STRATEGY: Oscillating on the same two qubits increases their congestion score (both are repeatedly involved in paths). The congestion penalty grows as more FL gates depend on routing through those qubits, making the oscillating pair increasingly expensive. Additionally, congestion scores are circuit-dependent, breaking the graph-distance symmetry that causes ties.
+
+WHY_NOVEL: All existing routing heuristics treat each gate's routing independently. PSCP measures *interference between routing demands* — a collective property of the routing problem that cannot be captured by per-gate distance terms. This is directly analogous to congestion-aware routing in network flow theory.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+CONVERGENCE_SCORE: 7
+AVERAGE_SCORE: 7.0
+
+---
+
+IDEA_NAME: **Gate Pair Co-occurrence Urgency Weighting (GCOUW)**
+
+DESCRIPTION: Precomputes for each logical qubit pair (q1, q2) the total number of gates in the *remaining* (unexecuted) circuit that involve this pair: `remaining_interactions[q1][q2]`. This is an urgency score — pairs with many future interactions need to be close repeatedly throughout execution, not just for the current gate. Weights FL and EL gate distances by this future-demand score.
+
+MATHEMATICAL_FORMULATION:
+```
+# Precomputed and updated as gates execute:
+remaining_interactions[q1][q2] = |{gates in remaining DAG involving q1 AND q2}|
+
+urgency(g) = remaining_interactions[q1(g)][q2(g)] + 1     (+1 for current gate)
+norm_u_FL  = max(Σ_{g∈FL} urgency(g), 1)
+norm_u_EL  = max(Σ_{g∈EL} urgency(g), 1)
+
+f_dist = Σ_{g∈FL} urgency(g) · D(g) / norm_u_FL
+e_dist = Σ_{g∈EL} urgency(g) · D(g) / (layer_factor(g) · norm_u_EL)
+
+H = max_decay · (f_dist + W · e_dist)
+```
+
+LOOP_PREVENTION_STRATEGY: `urgency(g)` is a monotonically decreasing value (remaining interactions can only decrease as circuit executes), creating a time-varying asymmetric cost landscape. Two swap candidates that tie in distance almost certainly differ in urgency weights since circuit structure is non-symmetric. `max_decay` provides secondary symmetry breaking.
+
+WHY_NOVEL: The baseline weights by immediate predecessors (`deps`). GCOUW weights by total future demand — how many *times more* two qubits will need to interact throughout the rest of the circuit. This is a global circuit analysis metric vs. the baseline's purely local DAG depth signal. It is equivalent to building a "interaction frequency graph" and routing to minimize total future SWAP overhead, not just the current gate.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+CONVERGENCE_SCORE: 7
+AVERAGE_SCORE: 7.0
+
+---
+
+IDEA_NAME: **Harmonic Mean Near-Completion Incentive (HMNCI)**
+
+DESCRIPTION: Aggregates FL distances using the *harmonic mean* rather than the arithmetic mean. The harmonic mean `|FL| / Σ 1/max(D(g),1)` is dominated by the smallest values — if any single gate pair is at distance 1 (almost adjacent), its contribution `1/1 = 1` dominates the sum, pulling the harmonic mean down sharply. This creates a strong incentive to finish "almost done" pairs first, directly minimizing circuit depth by maximizing near-term gate execution opportunities.
+
+MATHEMATICAL_FORMULATION:
+```
+# Handle D(g)=0 (already adjacent, gate should already be executed — 
+# but defensively): use max(D(g), 1) throughout
+
+harmonic_f = |FL| / Σ_{g∈FL} 1/max(D(g), 1)      (harmonic mean; 0 < harmonic_f ≤ max D(g))
+avg_e       = Σ_{g∈EL} (deps(g)+1) · D(g) / (layer_factor(g) · max(|EL|,1))
+
+H = max_decay · (harmonic_f + W · avg_e)
+```
+
+LOOP_PREVENTION_STRATEGY: If a SWAP brings gate g to D(g)=1, the term `1/max(D(g),1)` becomes 1 (maximum per-gate contribution), sharply reducing `harmonic_f`. Reversing that SWAP increases `harmonic_f` (D goes back to 2, contribution drops from 1 to 0.5). Combined with `max_decay`, the cost of reversal is always strictly higher than the cost of remaining near-adjacent. The harmonic function creates a one-way benefit for near-completion states.
+
+WHY_NOVEL: Arithmetic mean aggregation (standard SABRE) treats a gate at distance 1 identically to one at distance 3, relative to a gate at distance 2 — only the sum matters. Harmonic mean qualitatively changes the incentive structure: near-adjacent gates are extraordinarily valuable, and the algorithm naturally sequences to complete them first. This is the "greedy circuit depth" heuristic expressed as a single differentiable aggregation function.
+
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+CONVERGENCE_SCORE: 7
+AVERAGE_SCORE: 7.0
+
+---
+
+## Summary Ranking Table
+
+| Rank | Name | N | P | E | C | **Avg** |
+|------|------|---|---|---|---|---------|
+| 1 | Oscillation Signature Hash-Barrier | 8 | 9 | 7 | 10 | **8.5** |
+| 2 | Asymmetric Directional Decay | 8 | 8 | 8 | 9 | **8.25** |
+| 3 | Qubit Momentum Reversal Penalty | 8 | 8 | 7 | 9 | **8.0** |
+| 4 | Thermal EMA Qubit Heat | 7 | 8 | 8 | 9 | **8.0** |
+| 5 | Adaptive Stagnation-Escape Amplifier | 7 | 8 | 7 | 9 | **7.75** |
+| 6 | Critical Remaining Circuit Depth | 7 | 8 | 7 | 8 | **7.5** |
+| 7 | Immediate Gate Unlock Bonus | 6 | 8 | 8 | 8 | **7.5** |
+| 8 | Exponential Repulsion Potential Field | 7 | 7 | 8 | 8 | **7.5** |
+| 9 | Subgraph Fanout Cascade Weighting | 7 | 8 | 7 | 8 | **7.5** |
+| 10 | Effective Graph Resistance Distance | 9 | 7 | 6 | 7 | **7.25** |
+| 11 | Monotonic Bottleneck Max-Distance | 5 | 7 | 9 | 8 | **7.25** |
+| 12 | Adaptive Minkowski p-Norm | 7 | 7 | 7 | 8 | **7.25** |
+| 13 | Path-Sharing Congestion Penalty | 8 | 7 | 6 | 7 | **7.0** |
+| 14 | Gate Pair Co-occurrence Urgency | 7 | 7 | 7 | 7 | **7.0** |
+| 15 | Harmonic Mean Near-Completion | 6 | 7 | 8 | 7 | **7.0** |
+
+**Filtering result:** All 15 ideas pass the `C ≥ 7` convergence safety threshold. No ideas are eliminated.
+
+---
+
+## Top Recommendations for Implementation
+
+**Highest-impact, lowest-risk combination** (implementable in a single session):
+
+1. **OSHB** (8.5) — drop-in replacement for decay logic; high C=10 convergence guarantee
+2. **ADD** (8.25) — augments the decay multiplier with directional awareness; same output interface
+3. **IGUB** (7.5) — single-line addition of an unlock count bonus; trivially composable
+
+A powerful composite would combine all three:
+
+```python
+H = (asymmetric_decay + osc_penalty) * (
+    f_dist / |FL| - α * unlock_count / |FL| + W * e_dist / max(|EL|, 1)
+)
+```
+
+This addresses the three root failure modes simultaneously: symmetric ties (ADD), explicit oscillation detection (OSHB), and forward progress reward (IGUB).

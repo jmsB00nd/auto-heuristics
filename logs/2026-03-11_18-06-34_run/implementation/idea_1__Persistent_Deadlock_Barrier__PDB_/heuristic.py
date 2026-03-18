@@ -1,0 +1,73 @@
+def qlosure_poly_heuristic(self, swap_gate):
+    """
+    Persistent Deadlock Barrier (PDB) Heuristic
+    ============================================
+    Base cost: decay-scaled mean distance for front layer + attenuated extended layer.
+    Barrier:   When SWAP count since last gate execution exceeds T = 2·|FL|, any
+               candidate SWAP that increases distance for a front-layer gate incurs
+               an additive BIG_M penalty per affected gate.
+
+    State-free stagnation detection:
+        decay_parameter resets to 1 on every gate execution (execute_algorithm L146).
+        Each applied SWAP adds +0.001 to exactly 2 physical qubits (routing.py L241-242).
+        Therefore: stagnation_count = sum(d - 1.0 for d in decay) / 0.002
+        This equals the number of consecutive SWAPs without any gate executing.
+    """
+    BIG_M = 100.0
+
+    front_layer_size  = len(self.front_layer)
+    extended_layer_size = len(self.extended_layer)
+
+    q0, q1    = swap_gate
+    max_decay = max(self.decay_parameter[q0], self.decay_parameter[q1])
+
+    # ── Front Layer Score (no deps weighting — structurally distinct from baseline) ──
+    f_distance = 0.0
+    for g in self.front_layer:
+        qa, qb = self.access2q[g]
+        Qa = self.temp_mapping_dict[qa]
+        Qb = self.temp_mapping_dict[qb]
+        f_distance += self.distance_matrix[Qa][Qb]
+
+    f_score = f_distance / front_layer_size
+
+    # ── Extended Layer Score (exponential-index attenuation, W=0.5) ──
+    e_score = 0.0
+    if extended_layer_size > 0:
+        e_distance = 0.0
+        for g in self.extended_layer:
+            qa, qb = self.access2q[g]
+            Qa = self.temp_mapping_dict[qa]
+            Qb = self.temp_mapping_dict[qb]
+            layer_idx = self.extended_layer_index.get(g, 0) + 1
+            e_distance += self.distance_matrix[Qa][Qb] / layer_idx
+        e_score = e_distance / extended_layer_size
+
+    # ── PDB: Persistent Deadlock Barrier ─────────────────────────────────────────────
+    # Derive stagnation count from accumulated decay (no external state needed).
+    # decay resets to 1 on gate execution; each SWAP contributes exactly 0.002 total.
+    total_decay_excess  = sum(max(d - 1.0, 0.0) for d in self.decay_parameter)
+    stagnation_count    = round(total_decay_excess / 0.002)
+    T                   = 2 * front_layer_size   # threshold scales with problem width
+
+    barrier_cost = 0.0
+    if stagnation_count > T:
+        # Fire barrier: penalise SWAPs that INCREASE distance for any front-layer gate.
+        # Compare pre-SWAP (mapping_dict) vs post-SWAP (temp_mapping_dict) distances.
+        for g in self.front_layer:
+            qa, qb = self.access2q[g]
+
+            pre_Qa  = self.mapping_dict[qa]
+            pre_Qb  = self.mapping_dict[qb]
+            pre_dist = self.distance_matrix[pre_Qa][pre_Qb]
+
+            post_Qa  = self.temp_mapping_dict[qa]
+            post_Qb  = self.temp_mapping_dict[qb]
+            post_dist = self.distance_matrix[post_Qa][post_Qb]
+
+            if post_dist > pre_dist:
+                barrier_cost += BIG_M   # hard additive wall, >> typical f_score
+
+    H = max_decay * (f_score + 0.5 * e_score) + barrier_cost
+
+    return H

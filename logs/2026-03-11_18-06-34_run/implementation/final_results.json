@@ -1,0 +1,44 @@
+{
+  " Progressive Starvation Urgency (PSU)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: 'Qlosure' object has no attribute 'starvation'",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "'Qlosure' object has no attribute 'starvation'"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "'Qlosure' object has no attribute 'starvation'"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "'Qlosure' object has no attribute 'starvation'"
+      }
+    ]
+  },
+  " Persistent Deadlock Barrier (PDB)": {
+    "mean_swaps": 650.2727272727273,
+    "mean_depth": 1044.3636363636363,
+    "error": null,
+    "failures": []
+  },
+  " Soft Barrier Edge Accumulator (SBEA)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  " Immediate Gate Resolution Bonus (IGRB)": {
+    "mean_swaps": 672.7727272727273,
+    "mean_depth": 1006.2727272727273,
+    "error": null,
+    "failures": []
+  },
+  " Decay Product Penalty (DPP)": {
+    "mean_swaps": 693.3636363636364,
+    "mean_depth": 1018.8636363636364,
+    "error": null,
+    "failures": []
+  }
+}

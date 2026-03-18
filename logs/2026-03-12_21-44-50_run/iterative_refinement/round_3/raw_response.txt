@@ -1,0 +1,80 @@
+## Critical Analysis of MSGTC
+
+**Strengths:**
+- Geometric bucketing with γ^k decay provides bounded, finite extended-layer weight
+- Per-bucket normalization prevents large buckets from dominating
+- `(deps+1)` weighting correctly prioritizes critical-path gates
+
+**Weaknesses:**
+1. **Coarse bucketing loses resolution**: depths 3 and 4 fall into the same bucket (k=2), giving them equal weight even though depth 3 is more urgent
+2. **No executability reward**: when a candidate SWAP brings a front-layer gate to dist=1 (immediately executable), this is treated identically to dist=2 by the heuristic — no incentive to prefer "resolving" swaps
+3. **Front layer normalized by gate count, not by dependency weight**: a single high-dep gate gets the same normalization denominator as many low-dep gates
+4. **Fixed γ=0.5 bucketing is harsh**: drops to 0.25 by depth 3, potentially under-weighting useful lookahead
+
+## Evolution Strategy: Option A (Targeted Refinement with Novel Signal)
+
+The key insight: when evaluating a candidate SWAP via `temp_mapping_dict`, some front-layer gates may now have `dist=1` (one hop, immediately executable). MSGTC assigns them cost `1*weight`, but they deserve a **reward** — choosing this SWAP will let those gates execute for free immediately. This is a genuinely new signal that neither the baseline nor MSGTC captures.
+
+Combined with:
+- **Smooth per-gate exponential decay** for extended layer (eliminates coarse bucketing, preserves depth resolution)
+- **Dependency-weighted normalization** for front layer (proper weighted average)
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    resolve_reward = 2.0   # bonus subtracted per unit weight for dist=1 gates (immediately executable)
+    alpha = 0.65           # smooth per-depth exponential decay for extended layer
+    W_ext = 0.4            # extended layer weight relative to front layer
+
+    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+    # --- Front layer: penalize remaining distance, strongly reward executability ---
+    # Normalize by total dependency weight (proper weighted average, not gate count)
+    f_distance = 0.0
+    f_weight_sum = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+        w = deps + 1
+        dist = self.distance_matrix[Q1][Q2]
+
+        f_weight_sum += w
+        if dist == 1:
+            # Gate is immediately executable after this SWAP: strong reward
+            f_distance -= resolve_reward * w
+        else:
+            f_distance += w * dist
+
+    f_score = f_distance / max(f_weight_sum, 1)
+
+    # --- Extended layer: smooth exponential decay, fully weighted average ---
+    # Per-gate weight = (deps+1) * alpha^(depth-1), then take weighted mean distance.
+    # Avoids the MSGTC bucketing loss of resolution between depths 3 and 4.
+    e_wsum = 0.0
+    e_norm = 0.0
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_factor = self.extended_layer_index.get(g, 0) + 1
+        deps = self.dag_dependencies_count[g]
+        dist = self.distance_matrix[Q1][Q2]
+
+        w = (deps + 1) * (alpha ** (layer_factor - 1))
+        e_wsum += w * dist
+        e_norm += w
+
+    e_score = e_wsum / e_norm if e_norm > 0 else 0.0
+
+    H = max_decay * (f_score + W_ext * e_score)
+    return H
+```
+
+**Key differences from MSGTC:**
+| Aspect | MSGTC | This heuristic |
+|---|---|---|
+| Front-layer dist=1 | treated as cost `1*w` | **rewarded** with `-resolve_reward*w` |
+| Extended decay | discrete geometric buckets (k = bit_length) | smooth per-gate `alpha^(depth-1)` |
+| Front normalization | divide by gate count | divide by **total dependency weight** |
+| Depths 3 vs 4 | same bucket (k=2), equal weight | distinct: `0.65^2=0.42` vs `0.65^3=0.27` |
+
+The resolve reward is the primary new signal: a SWAP that makes even one front-layer gate immediately executable earns a significant H reduction, biasing the search toward those "resolving" swaps rather than just "approaching" swaps.

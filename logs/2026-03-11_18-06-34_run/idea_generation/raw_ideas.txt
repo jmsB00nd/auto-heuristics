@@ -1,0 +1,627 @@
+Good. I now have the full picture. Already implemented: OSHB, QMRP, TEQH, DVC, GLDC (geometric decay), PLVPC/Mean-Variance (variance), FGCA (centroid), TIC (temporal cohesion), GPIUC (parallelism urgency), CCDC (causal cone density), GCCAC (circuit co-execution affinity), BWBAC (betweenness), CRIC (concurrent interference), SDAPC (stochastic DAG probability), MAGD (momentum gradient).
+
+---
+
+## PART 1 & 2: Novel Ideas — Generated, Evaluated, Scored, Filtered
+
+**Notation used throughout:**
+- `s = (p, q)`: candidate SWAP on physical qubits p, q
+- `d_s(g) = distance_matrix[temp_mapping_dict[l1]][temp_mapping_dict[l2]]`: distance for gate g **after** swap s
+- `d_0(g) = distance_matrix[mapping_dict[l1]][mapping_dict[l2]]`: distance **before** swap s
+- `w(g) = dag_dependencies_count[g] + 1`: baseline gate weight
+- `γ_p = decay_parameter[p]`, `γ_q = decay_parameter[q]`
+- `l_p = reverse_mapping_dict[p]`, `l_q = reverse_mapping_dict[q]`: logical qubits at p, q before swap
+- `FL = front_layer`, `EL = extended_layer`, `ι(g) = extended_layer_index[g]`
+
+---
+
+**IDEA_NAME:** Progressive Starvation Urgency (PSU)
+
+**DESCRIPTION:**
+Each front-layer gate accumulates a starvation counter `starvation[g]` that increments by 1 every time a SWAP is applied without executing g. The urgency weight grows exponentially with starvation depth, guaranteeing that any gate left in `front_layer` for too long will eventually dominate the cost function and force the router to resolve it. Counters reset to 0 the moment a gate executes (is removed from `front_layer`). The exponential urgency replaces the linear dependency-count weight for the starvation-weighted distance, while the extended layer retains the baseline weight.
+
+**MATHEMATICAL_FORMULATION:**
+```
+α = 0.1  (tunable urgency rate)
+
+urgency(g) = w(g) · exp(α · starvation[g])
+
+W_total = Σ_{g ∈ FL} urgency(g)
+
+f_score = Σ_{g ∈ FL} urgency(g) · d_s(g) / W_total
+
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+
+# State update after each swap (called outside the heuristic):
+for g in front_layer:
+    starvation[g] += 1
+# Reset on gate execution:
+starvation[g] = 0  (when g is removed from front_layer)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+The starvation counter is strictly monotonically non-decreasing while a gate remains in `front_layer`. Since `exp(α · starvation[g])` grows unboundedly, any stuck gate will eventually have urgency so large that it absolutely dominates the cost, forcing the router to choose the SWAP that most reduces its distance. This makes perpetual avoidance of any gate mathematically impossible. The standard `max(γ_p, γ_q)` decay additionally penalizes repeated use of the same physical qubits, breaking flip-flop oscillations.
+
+**WHY_NOVEL:**
+Existing urgency approaches (GPIUC) measure *spatial* parallelism isolation. PSU measures *temporal starvation* — how long a gate has been waiting — and converts this into an exponential weight that dynamically re-prioritizes the most neglected gate. No existing implemented heuristic uses a gate-level urgency accumulator that resets on execution. This provides a formal anti-starvation guarantee absent from SABRE and all variants.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 9
+**AVERAGE_SCORE:** 8.25
+
+---
+
+**IDEA_NAME:** Persistent Deadlock Barrier (PDB)
+
+**DESCRIPTION:**
+Tracks consecutive SWAP applications where the `front_layer` set has not changed (no gate has become executable). When this stagnation count exceeds threshold T, the system declares a "routing deadlock" and adds a large additive barrier cost to any SWAP that increases distance for any front-layer gate. The barrier resets automatically the moment any gate executes (front_layer changes). Unlike OSHB (which detects revisited *mapping states*), PDB triggers on *functional stagnation* — the router is spinning without making any forward progress on gate execution.
+
+**MATHEMATICAL_FORMULATION:**
+```
+T = 2 · |FL|  (deadlock threshold; scales with front-layer size)
+BIG_M = 100.0  (barrier constant, >> typical f_score range)
+
+# State maintained outside heuristic:
+fl_unchanged_steps: int  # increments each swap, resets when FL changes
+
+# Inside heuristic:
+if fl_unchanged_steps >= T:
+    barrier = BIG_M · Σ_{g ∈ FL} w(g) · max(0, d_s(g) - d_0(g)) / |FL|
+else:
+    barrier = 0
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score) + barrier
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+The deadlock barrier is a *hard constraint* that activates precisely when infinite looping is occurring. After T consecutive non-productive SWAPs, any candidate that increases any front-layer distance is penalized by BIG_M, making it effectively inadmissible. The only admissible SWAPs are those that strictly reduce distances. This is a dynamic constraint tightening mechanism: the longer the loop continues, the more it is penalized. The barrier magnitude BIG_M is set large enough that no combination of distance savings in the extended layer can overcome it.
+
+**WHY_NOVEL:**
+OSHB detects revisited mapping *states* via hashing — a stateful memory mechanism. PDB detects *functional stagnation* via front-layer immutability — a progress metric. These are orthogonal failure modes: a router can cycle through many distinct mapping states without ever executing a gate (OSHB doesn't fire), or it can resolve gates one by one while never hitting a previously seen state (OSHB fires unnecessarily). PDB fires on the semantically correct condition: lack of circuit progress.
+
+**NOVELTY_SCORE:** 9
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 7
+**CONVERGENCE_SCORE:** 10
+**AVERAGE_SCORE:** 8.25
+
+---
+
+**IDEA_NAME:** Soft Barrier Edge Accumulator (SBEA)
+
+**DESCRIPTION:**
+Maintains a per-edge barrier potential `edge_barrier[(p,q)]` that accumulates each time a SWAP is applied to coupling edge (p,q), and decays multiplicatively after every SWAP step. Whereas the baseline `decay_parameter` penalizes individual *qubits*, SBEA penalizes specific *coupling edges* — the exact (p,q) pair that was just swapped. This means that directly reversing a SWAP on the same edge (the most common ping-pong mode) incurs maximum penalty, while SWAPs on adjacent different edges are unaffected. The barrier is an additive multiplicative factor on the total cost.
+
+**MATHEMATICAL_FORMULATION:**
+```
+μ = 0.98   (per-step multiplicative decay rate)
+η = 5.0    (barrier accumulation per use)
+
+# State maintained outside heuristic (per (p,q) edge, canonicalized as min(p,q), max(p,q)):
+edge_barrier: dict[(int,int), float]  # defaults to 0.0
+
+# State update after applying best SWAP (p*, q*):
+edge_key = (min(p*, q*), max(p*, q*))
+for key in edge_barrier:
+    edge_barrier[key] *= μ
+edge_barrier[edge_key] = edge_barrier.get(edge_key, 0.0) + η
+
+# Inside heuristic for candidate SWAP s = (p, q):
+edge_key = (min(p, q), max(p, q))
+b = edge_barrier.get(edge_key, 0.0)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (1 + b) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+A SWAP ping-pong on edge (p,q) accumulates `edge_barrier[(p,q)]` geometrically: after k consecutive uses, barrier ≈ η · (1 + μ + μ² + … + μ^(k-1)) ≈ η/(1−μ) = 250 (for μ=0.98, η=5). The cost multiplier (1 + 250) = 251 makes any repeated edge reuse 251× more expensive than a fresh edge, making ping-pong provably non-optimal unless no other move exists. The decay rate μ ensures that old barrier accumulations fade away when a different routing direction is taken.
+
+**WHY_NOVEL:**
+The baseline `decay_parameter` is per-qubit (scalar), tracking how "hot" individual qubits are. SBEA is per-*edge* (directional pair), tracking the specific coupling that was used. This is a fundamentally different resolution: two adjacent qubits can both be cold (low decay_parameter) yet the edge between them is "hot" from repeated use. No existing implemented heuristic uses per-edge state — they are all either per-qubit (decay) or gate-level weights. Edge-based memory directly targets the most common failure mode: reversing the same physical swap.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 9
+**AVERAGE_SCORE:** 8.25
+
+---
+
+**IDEA_NAME:** Immediate Gate Resolution Bonus (IGRB)
+
+**DESCRIPTION:**
+Adds a *hard lexicographic bonus* for any candidate SWAP that brings at least one front-layer gate to distance exactly 1 (making it immediately executable in the very next iteration). Rather than being a soft distance reduction, this is a discontinuous reward that creates a strong step function: SWAPs that achieve adjacency are categorically preferred over SWAPs that only reduce distance without achieving adjacency. A gate at d=1 executes immediately in the next cycle (since `extract_ready_to_execute_gate_list` checks for adjacency), making this a concrete, not hypothetical, improvement.
+
+**MATHEMATICAL_FORMULATION:**
+```
+M = 10.0  (milestone scale, tuned so M >> typical f_score/|FL|)
+
+# Count weighted resolution events:
+resolution_bonus = Σ_{g ∈ FL} w(g) · 𝟙[d_s(g) == 1]
+W_total = Σ_{g ∈ FL} w(g)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+# Subtract bonus from cost (minimize H → maximize resolution):
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+       - M · resolution_bonus / (W_total + ε)
+```
+The subtracted term (≤ M) dominates the base cost when M is set appropriately (e.g., M = 10 vs typical f_score ≈ 1–5 for normalized distances).
+
+**LOOP_PREVENTION_STRATEGY:**
+Resolving a front-layer gate (achieving d=1) is always forward progress — it means the gate will execute next iteration, changing `front_layer`. A SWAP that earns the milestone bonus moves the system into a strictly different state (the gate executes), making it impossible to create an infinite loop through the bonus path. The decay penalty `max(γ_p, γ_q)` handles loops in the no-bonus path (when no gate reaches d=1), since the router falls back to the standard distance-minimizing behavior.
+
+**WHY_NOVEL:**
+All existing implemented heuristics use *continuous* distance metrics. IGRB introduces a *discrete milestone objective*: the d=1 threshold at which a gate becomes executable creates a phase transition in the optimization landscape. This is analogous to the difference between a distance-based reward and a goal-conditioned reward in reinforcement learning — the latter is known to produce fundamentally different (often better) optimization trajectories. No existing heuristic in this codebase treats d=1 as categorically different from d=2.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+
+---
+
+**IDEA_NAME:** Decay Product Penalty (DPP)
+
+**DESCRIPTION:**
+Replaces the baseline's `max(γ_p, γ_q)` decay aggregation with the *product* `γ_p · γ_q`. This changes the fundamental nature of the penalty: while `max` only penalizes the hotter qubit (cold qubit is irrelevant), the product penalizes *both* qubits proportionally to their individual heat. The product also has super-linear growth when both qubits are hot simultaneously — as occurs in SWAP ping-pong — making repeated alternating use of the same qubit pair far more expensive than using either qubit individually. A geometric mean variant `(γ_p · γ_q)^0.5` provides a scaled version.
+
+**MATHEMATICAL_FORMULATION:**
+```
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+# Replace max with product:
+H(s) = (γ_p · γ_q) · (f_score + W · e_score)
+
+# Optional: geometric mean variant for weaker penalty:
+H(s) = sqrt(γ_p · γ_q) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+Consider a ping-pong loop between SWAPs (p,q) and (q,r). After the first SWAP, γ_p and γ_q both increase by 0.001. After the second SWAP, γ_q and γ_r increase. The shared qubit q accumulates heat from *both* directions. With product aggregation, the cost of SWAP (p,q) is proportional to `γ_p · γ_q`, where γ_q is growing faster than in the baseline (it participates in every other step of the loop). This creates super-linear discouragement of any qubit that acts as a pivot in alternating patterns — precisely the structure of ping-pong oscillation.
+
+**WHY_NOVEL:**
+The baseline uses `max` (hot-qubit-dominant), SABRE uses `max`. No existing heuristic in this codebase uses the *product* of individual qubit decays as the aggregation. Product aggregation has a fundamentally different optimization landscape: it creates a "product manifold" of qubit costs rather than a max-manifold, distributing the penalty across both participants and making shared-qubit loops super-linearly expensive. This is a minimal change with non-trivial mathematical consequences.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 9
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+
+---
+
+**IDEA_NAME:** Adaptive Decay Rescaling (ADR)
+
+**DESCRIPTION:**
+The decay parameter grows by +0.001 per swap and resets to 1.0 when any gate executes. In long routing segments (many SWAPs before any gate executes), all `decay_parameter[p]` values grow large together, causing the decay-based tie-breaking signal to lose resolution (all swaps cost approximately the same after multiplication by a large, nearly-equal decay). ADR rescales all decay values by the current maximum, keeping them in `[1/max_decay, 1]` range. This preserves the *relative* ordering of qubit heat while preventing the absolute scale from inflating to the point of masking distance differences.
+
+**MATHEMATICAL_FORMULATION:**
+```
+# Inside heuristic:
+max_d = max(self.decay_parameter) + ε   # ε = 1e-9 to prevent divide-by-zero
+
+γ_p_scaled = γ_p / max_d
+γ_q_scaled = γ_q / max_d
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p_scaled, γ_q_scaled) · (f_score + W · e_score)
+
+# Scaled values are in [1/max_d, 1]; ties require max_d > 1 (i.e., at least one SWAP)
+# With max(γ_p_scaled, γ_q_scaled) ∈ [1/max_d, 1], the distance term always dominates
+# the decay term when distances are large, and decay breaks ties when distances are equal
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+Rescaling does not change the *ordering* of decays — it is a monotone transformation. The qubit with higher heat still gets a higher scaled decay. Crucially, rescaling prevents all decays from collapsing to indistinguishable values: when global decay scale is large (many SWAPs without gate execution), the most recently used qubit has γ ≈ max, so γ_scaled ≈ 1, while less recently used qubits have γ_scaled < 1. This restores the relative decay signal precisely when a routing loop is most likely to be occurring.
+
+**WHY_NOVEL:**
+No existing implementation addresses the numerical stability of the decay mechanism itself. Over very long routing segments, the raw decay values become large and their ratio approaches 1, causing the tie-breaking mechanism to silently fail. ADR is the only proposed heuristic that explicitly treats the decay mechanism's own numerical health as a first-class concern. It is also trivially combined with any other heuristic.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 9
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+
+---
+
+**IDEA_NAME:** Qubit Position History Backtrack Penalty (QPHBP)
+
+**DESCRIPTION:**
+Maintains a short-horizon position history for each logical qubit: `pos_history[l]` = deque of the last K physical positions that logical qubit `l` has occupied. When evaluating a candidate SWAP s=(p,q), if the SWAP would move logical qubit `l_p` to position q, and q appears in `pos_history[l_p]`, a backtracking penalty is applied proportional to how *recently* q was visited (older visits incur smaller penalties). This differs from QMRP (which penalizes reversals of momentum in distance space) by tracking actual *physical positions* in the coupling graph.
+
+**MATHEMATICAL_FORMULATION:**
+```
+K = 4   (history depth)
+λ = 2.0 (backtrack penalty scale)
+ρ = 0.5 (recency decay: older positions incur smaller penalty)
+
+# State: pos_history[l] = deque of last K physical qubit positions for logical qubit l
+# Updated after each SWAP: pos_history[l].appendleft(new_physical_pos[l])
+
+# Inside heuristic for SWAP s = (p, q):
+# l_p moves to q, l_q moves to p
+
+def backtrack_cost(l, destination):
+    hist = pos_history.get(l, [])
+    cost = 0.0
+    for i, past_pos in enumerate(hist):
+        if past_pos == destination:
+            cost += ρ**i   # recent = high penalty, old = low penalty
+    return cost
+
+bt_p = backtrack_cost(l_p, destination=q)
+bt_q = backtrack_cost(l_q, destination=p)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score) · (1 + λ · (bt_p + bt_q))
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+A two-step ping-pong: SWAP(p,q) then SWAP(q,p) moves `l_p` back to its original position p. After the first SWAP, `pos_history[l_p] = [q, p, ...]`. The second SWAP would move `l_p` to p, which is `pos_history[l_p][1]` (penalizes with `ρ^1 = 0.5`). A k-cycle is detected when the destination appears at history depth k-1, penalizing with `ρ^(k-1)`. Short cycles (k=2) get the highest penalty (ρ^0 = 1), longer cycles get progressively smaller penalties but are already broken by other mechanisms.
+
+**WHY_NOVEL:**
+QMRP tracks momentum in *distance space* (whether the qubit is approaching or retreating from its logical target). QPHBP tracks history in *physical space* (which specific physical qubits were occupied). These detect different failure modes: QMRP catches oscillations in distance; QPHBP catches physical position cycling even when the distance doesn't change (which occurs when routing through symmetric paths of equal length, a common topology pattern in grid-like coupling graphs).
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 7
+**CONVERGENCE_SCORE:** 9
+**AVERAGE_SCORE:** 7.75
+
+---
+
+**IDEA_NAME:** Lexicographic Distance Layer Priority (LDLP)
+
+**DESCRIPTION:**
+Partitions the front-layer gate distances into discrete priority layers by thresholds: layer 0 = gates at d≥3 (stuck), layer 1 = gates at d=2 (close), layer 2 = gates at d=1 (ready). The cost function is a lexicographic vector: first minimize the *count* of stuck gates (d≥3), then the *count* of close gates (d=2), then the total distance. This creates a strict priority ordering where making any stuck gate progress to d=2 is always better than reducing an already-close gate's distance, regardless of absolute magnitude.
+
+**MATHEMATICAL_FORMULATION:**
+```
+thresholds = [3, 2]   (distance cutoffs)
+ε = 1e-6             (tie-breaking resolution)
+
+stuck_count = Σ_{g ∈ FL} w(g) · 𝟙[d_s(g) >= 3]
+close_count  = Σ_{g ∈ FL} w(g) · 𝟙[d_s(g) == 2]
+total_dist   = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+
+W_total = Σ_{g ∈ FL} w(g) + ε
+
+# Lexicographic cost encoded as a single scalar:
+H(s) = max(γ_p, γ_q) · (
+    stuck_count / W_total          # primary objective (minimize stuck gates)
+    + ε · close_count / W_total    # secondary (minimize close gates)
+    + ε² · total_dist              # tertiary (minimize total distance)
+)
+
+# ε must satisfy: ε² · d_max · W_total << ε · 1.0  (ε=1e-6 works for d_max ≤ 10, W_total ≤ 1000)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+Making a stuck gate progress (d: 3→2) strictly reduces `stuck_count`, regardless of what happens to close_count or total_dist. This creates a monotone progress measure at the coarsest level — reducing stuck count is strictly irreversible (routing doesn't deliberately move gates further away). The decay multiplier breaks ties when two SWAPs produce identical (stuck, close, total) vectors. The ε-gap encoding prevents overflow artifacts from masking the lexicographic ordering.
+
+**WHY_NOVEL:**
+All existing heuristics use scalar aggregation (sum, mean, max) of distances. LDLP uses a *multi-level lexicographic* objective function — a structure well-studied in multi-objective optimization but not applied to quantum routing. It is motivated by the observation that a gate stuck at d=5 causes strictly more damage than a gate at d=2, regardless of how many d=2 gates are near resolution. The lexicographic structure formalizes this intuition into a provably ordered preference relation.
+
+**NOVELTY_SCORE:** 9
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 7
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 7.75
+
+---
+
+**IDEA_NAME:** Conditional Release Probability Score (CRPS)
+
+**DESCRIPTION:**
+Rather than minimizing expected distance, maximizes the *expected number of front-layer gates* that will be immediately executable after the SWAP — gates that will have d_s(g) = 1, and therefore execute in the very next iteration. This transforms the objective from distance minimization to probability maximization of gate execution. The distance-based term acts as a tiebreaker when no SWAP creates executable gates (the common case), while the probability term dominates when any SWAP can create executable gates.
+
+**MATHEMATICAL_FORMULATION:**
+```
+M = 5.0   (bonus scale, >> f_score normalization)
+
+release_prob = Σ_{g ∈ FL} w(g) · 𝟙[d_s(g) == 1] / (Σ_{g ∈ FL} w(g) + ε)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+# Cost subtracts release probability (minimizing H → maximizing release):
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score - M · release_prob)
+```
+The subtraction is bounded since `release_prob ∈ [0, 1]` and M is fixed. When all SWAPs have `release_prob = 0` (no gate reaches d=1), the term vanishes and H reduces to a weighted distance heuristic.
+
+**LOOP_PREVENTION_STRATEGY:**
+Any SWAP earning a non-zero `release_prob` strictly advances the circuit: the released gate(s) will execute, changing `front_layer`. This is a monotone progress event. For SWAPs with `release_prob = 0`, the decay multiplier provides the loop prevention. The key insight: CRPS provides *two* levels of protection — progress through release (strongest) and decay through decay penalty (standard). A SWAP can only create a loop in the `release_prob = 0` regime, which is identically controlled by decay.
+
+**WHY_NOVEL:**
+SDAPC (Stochastic DAG Activation Probability) estimates the probability that gates become executable through DAG traversal analysis. CRPS is sharply different: it computes the *deterministic* geometric condition for immediate execution (`distance == 1`) based on the coupling graph — no stochasticity required. SDAPC is DAG-topology-driven; CRPS is geometry-driven. The key difference is that CRPS provides a hard, computable signal at O(|FL|) cost, while SDAPC approximates a probabilistic DAG walk.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+
+---
+
+**IDEA_NAME:** Front-Layer Distance Delta Asymmetric Penalty (FLDAP)
+
+**DESCRIPTION:**
+Introduces *asymmetric loss* for distance changes: decreasing a front-layer gate's distance is rewarded linearly (standard), but *increasing* a front-layer gate's distance is penalized super-linearly with factor κ > 1. This is not merely weighting — it is a structurally different loss function that treats regression and progress asymmetrically, analogous to asymmetric loss functions in statistics (e.g., LINEX loss). A SWAP that reduces three gates' distance by 1 each but increases one gate's distance by 1 incurs net penalty rather than net gain if κ > 3.
+
+**MATHEMATICAL_FORMULATION:**
+```
+κ = 3.0   (regression penalty multiplier, κ > 1)
+
+delta(g) = d_s(g) - d_0(g)   # positive = regression, negative = progress
+
+# Asymmetric weighted delta:
+asymm_delta(g) = delta(g) if delta(g) <= 0 else κ · delta(g)
+
+# Front-layer asymmetric score:
+f_score = Σ_{g ∈ FL} w(g) · (d_0(g) + asymm_delta(g)) / |FL|
+        = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|                        [if d_s(g) < d_0(g)]
+        + Σ_{g ∈ FL} w(g) · (d_0(g) + κ·(d_s(g)-d_0(g))) / |FL|  [if d_s(g) > d_0(g)]
+
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+The asymmetric penalty directly penalizes backtracking moves. A SWAP that increases any front-layer gate's distance incurs a κ-multiplied penalty for that regression. In the ping-pong scenario: SWAP A reduces d(g1) by 1 but increases d(g2) by 1. If κ=3, the increase term costs 3× more than the decrease term saves, making the reversing SWAP cost more than the original. This creates a natural resistance to reversal at the cost-function level, not just at the decay level.
+
+**WHY_NOVEL:**
+DWDP (Demand-Weighted Displacement Penalty) penalizes displacement from demand-weighted targets — a different concept based on demand rather than distance regression. No existing heuristic uses an *asymmetric loss* directly on the ∆distance signal. The asymmetric loss concept is well-established in econometrics and decision theory but has not been applied to quantum routing. The key mathematical novelty is that the cost function is no longer a function of `d_s(g)` alone but of the *signed change* `d_s(g) - d_0(g)`, making the derivative of the cost with respect to distance asymmetric.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+
+---
+
+**IDEA_NAME:** Weighted Transitive Predecessor Pressure (WTPP)
+
+**DESCRIPTION:**
+The baseline weights each gate by its direct dependency count `dag_dependencies_count[g]` (transitive closure cardinality of successors). WTPP instead weights by the *total dependency pressure from above*: the sum of `dag_dependencies_count[g']` for all transitive predecessors `g'` of `g`. A gate with many heavy predecessors (each of which blocks many downstream gates) has much higher priority than a gate with many lightweight predecessors. This creates a "gravitational potential" analogous to pressure in a fluid system — the more weight pressing down from above in the DAG, the higher the priority.
+
+**MATHEMATICAL_FORMULATION:**
+```
+# Precompute (once, outside heuristic):
+# pred_pressure[g] = Σ_{g' ∈ transitive_predecessors(g)} dag_dependencies_count[g']
+# Using existing dag_predecessors2q_restricted and dag_dependencies_count:
+pred_pressure = {}
+for g in topological_order:
+    pred_pressure[g] = dag_dependencies_count[g]
+    for pred in dag_predecessors2q_restricted[g]:
+        pred_pressure[g] += pred_pressure.get(pred, 0)
+
+# Inside heuristic:
+pressure_w(g) = 1 + log(1 + pred_pressure[g])   # log-dampened to prevent scale explosion
+
+f_score = Σ_{g ∈ FL} pressure_w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} pressure_w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+`pred_pressure[g]` is a static precomputed value that does not change during routing — it cannot create dynamic instabilities. The loop prevention is entirely handled by `max(γ_p, γ_q)` (standard decay). The static weights only affect *which* front-layer gates receive higher priority, not whether loops can form. A gate with high predecessor pressure that is stuck will have disproportionately large weight, ensuring the router is strongly biased toward resolving it.
+
+**WHY_NOVEL:**
+All existing dependency-weighted approaches use `dag_dependencies_count[g]` directly — the count of gates that depend on `g`. WTPP uses the *cumulative upstream pressure*: the weight of gates that must execute *before* g. A gate with lightweight predecessors but many heavy downstream successors gets different treatment under WTPP vs. the baseline. This is analogous to the difference between betweenness centrality (how much traffic flows through you) and in-degree weighted pressure (how much work is waiting to flow through you).
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 6
+**CONVERGENCE_SCORE:** 7
+**AVERAGE_SCORE:** 7.0
+
+---
+
+**IDEA_NAME:** Inter-Layer Qubit Coupling Coefficient (ILQCC)
+
+**DESCRIPTION:**
+Measures the degree of *qubit overlap* between the front-layer and extended-layer gate sets. When many extended-layer gates involve the same logical qubits as front-layer gates, the extended layer is highly relevant (routing choices affect both layers simultaneously). When they involve completely disjoint qubits, the extended layer provides no useful guidance for the current routing decision. ILQCC dynamically adjusts the weight `W` of the extended layer term based on this overlap coefficient, amplifying lookahead only when it is genuinely informative.
+
+**MATHEMATICAL_FORMULATION:**
+```
+# Qubit sets:
+FL_qubits = {l for g ∈ FL for l in access2q[g]}
+EL_qubits = {l for g ∈ EL for l in access2q[g]}
+
+overlap = |FL_qubits ∩ EL_qubits|
+union   = |FL_qubits ∪ EL_qubits| + ε
+
+# Jaccard-like coupling coefficient ∈ [0, 1]:
+coupling = overlap / union
+
+# Adaptive extended-layer weight:
+W_adaptive = W_base · (1 + β · coupling)   # β = 2.0 (amplification factor)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W_adaptive · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+The coupling coefficient is based on qubit sets, which are static within a routing step (they don't change until a gate executes). It modulates the weight of the extended layer but does not introduce any new loop-creating dynamics. When `coupling = 0` (disjoint layers), `W_adaptive = W_base` (falls back to baseline behavior). When `coupling = 1` (identical qubit sets), `W_adaptive = W_base · (1 + β)`, giving more weight to the lookahead that is directly relevant to current routing decisions.
+
+**WHY_NOVEL:**
+Existing lookahead heuristics use a *fixed* weight `W` for the extended layer, regardless of how relevant the extended layer actually is to the current front-layer gates. ILQCC is the first proposed approach that *computes* the relevance of the extended layer using set-theoretic qubit overlap, and uses this as an adaptive signal. It provides a data-driven answer to the question "how much should I trust my lookahead right now?" rather than treating W as a static hyperparameter.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 7
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Front-Layer Maximum Distance Suppression (FLMDS)
+
+**DESCRIPTION:**
+Adds a minimax term to the cost that penalizes the *worst-case* (maximum) distance among all front-layer gates, in addition to the mean distance. The baseline minimizes total/mean distance, which allows one gate to remain at very high distance while others are resolved. FLMDS adds a term `max_{g ∈ FL} d_s(g)` (weighted by its dependency count), creating pressure to reduce the worst outlier even at the cost of marginally worse average distance. This is analogous to the difference between L1 and L∞ optimization.
+
+**MATHEMATICAL_FORMULATION:**
+```
+α = 0.3   (minimax blend weight)
+
+# Worst-case gate by weighted distance:
+worst_dist = max(w(g) · d_s(g) for g in FL)   # weighted maximum
+
+f_mean = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+f_score = (1 - α) · f_mean + α · worst_dist / (max(w(g) for g in FL) + ε)
+
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+
+# worst_dist normalization: divide by max weight to keep units consistent with f_mean
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+The worst-case term creates *additional* pressure toward the most stuck gate, making it increasingly expensive to ignore. As the worst-case gate accumulates high distance while others resolve, `worst_dist` grows, increasing H for any SWAP that does not improve it. This creates a self-correcting mechanism that naturally breaks the "focusing" pattern where the router keeps resolving easy gates while a hard gate stays stuck. Decay still handles qubit-level loop prevention.
+
+**WHY_NOVEL:**
+The "Minimax Regret with Bottleneck Amplification" heuristic uses minimax regret (the difference between the best and worst achievable outcomes). FLMDS uses a *direct max distance term*, which is mathematically distinct: minimax regret measures opportunity cost, while direct max measures current worst-case state. FLMDS is also simpler, cheaper to compute (O(|FL|) vs requiring regret computation), and directly motivated by the L∞-norm objective of minimizing maximum waiting time.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 7
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Normalized Distance Improvement Ratio (NDIR)
+
+**DESCRIPTION:**
+Instead of measuring absolute distance `d_s(g)` after the swap, measures the *relative fractional improvement* compared to the initial distance of each gate at the time it entered `front_layer`. A gate that started at d=6 and is now at d=2 has improved by 67% — this is more valuable than a gate that started at d=3 and is now at d=1 (67% improvement but less routing work needed). By weighting by normalized improvement ratio, NDIR incentivizes finishing high-distance gates whose routing investment is amortized over many steps.
+
+**MATHEMATICAL_FORMULATION:**
+```
+# State: d_initial[g] = d_0(g) when g first entered front_layer (set once on entry)
+# Maintained outside heuristic; never changes for a given gate.
+
+improvement_ratio(g) = d_s(g) / (d_initial[g] + ε)   # in [0, 1] if making progress
+
+# Weighted by both dependency count and initial difficulty:
+ndir_w(g) = w(g) · (d_initial[g] + 1)   # harder gates get proportionally more weight
+
+f_score = Σ_{g ∈ FL} ndir_w(g) · improvement_ratio(g) / Σ_{g ∈ FL} ndir_w(g)
+
+# Note: f_score ∈ [0, 1], lower = better (good progress toward resolution)
+
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+`improvement_ratio(g) = d_s(g) / d_initial[g]` increases when `d_s(g)` increases (regression), increasing cost. The ratio provides a *normalized* backtracking signal: a regression from d=2 to d=3 in a gate that started at d=4 costs `3/4 = 0.75` vs. the improved state `2/4 = 0.5`, a meaningful difference. Decay provides qubit-level loop prevention. The normalization by `d_initial` ensures that easy gates (low d_initial) don't dominate the cost function in the final stages of routing.
+
+**WHY_NOVEL:**
+All existing heuristics measure *current* distance or *changes* in distance. NDIR measures distance relative to *initial distance at front-layer entry* — a normalization that provides scale-invariant progress signals. This is analogous to the difference between measuring absolute position and measuring fractional completion of a journey. A gate stuck at 90% completion is fundamentally different from one stuck at 10% completion, even if both have the same absolute remaining distance.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 7
+**CONVERGENCE_SCORE:** 7
+**AVERAGE_SCORE:** 7.25
+
+---
+
+**IDEA_NAME:** DAG Depth Cohort Joint Routing (DDCJR)
+
+**DESCRIPTION:**
+Precomputes the topological depth of each gate in the 2-qubit DAG and groups front-layer gates into "cohorts" by their depth modulo a window W (e.g., gates at depths 0,1,2 form cohort 0; depths 3,4,5 form cohort 1). Within a cohort, gates are routed *jointly* by treating their combined qubit demand as a unit: the weight of a gate is amplified by the cohort size. This creates pressure to finish all gates in a depth cohort together before moving to the next, minimizing the depth-layer fragmentation that causes cascading SWAP overhead.
+
+**MATHEMATICAL_FORMULATION:**
+```
+# Precompute (once):
+dag_depth = {}   # topological depth of each gate in dag2q_restricted
+# BFS/topological sort: dag_depth[g] = max(dag_depth[pred] for pred in preds) + 1
+
+W_cohort = 3   (cohort window size)
+
+cohort(g) = dag_depth[g] // W_cohort
+
+# Cohort size for front-layer gates:
+cohort_sizes = Counter(cohort(g) for g in FL)
+
+# Cohort-amplified weight:
+cohort_w(g) = w(g) · (1 + log(1 + cohort_sizes[cohort(g)]))
+
+f_score = Σ_{g ∈ FL} cohort_w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+```
+
+**LOOP_PREVENTION_STRATEGY:**
+Cohort-amplified weights are static (precomputed before routing begins) — they create a fixed priority landscape that does not oscillate. Front-layer gates in a large cohort get amplified weight, making SWAPs that reduce their distances strongly preferred. This does not create loops by itself; it only sharpens the gradient. Decay handles qubit-level loop prevention as before. The log dampening prevents cohort size from creating extreme weight ratios.
+
+**WHY_NOVEL:**
+TIC (Temporal Interaction Cohesion) measures temporal cohesion of logical qubit interactions over time. DDCJR uses structural DAG depth to define routing cohorts and amplifies weights by cohort cardinality — encouraging "batch" resolution of circuit layers. No existing heuristic precomputes topological depth to define joint routing groups. This is motivated by the observation that minimizing circuit *depth* requires executing gates at the same DAG level in the same physical time step, which requires their qubits to be adjacent simultaneously.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 6
+**CONVERGENCE_SCORE:** 7
+**AVERAGE_SCORE:** 7.0
+
+---
+
+## Filtered Summary Table
+
+| Rank | Acronym | N | P | E | C | Avg | Status |
+|------|---------|---|---|---|---|-----|--------|
+| 1 | **PSU** | 8 | 8 | 8 | 9 | **8.25** | ✓ Top |
+| 1 | **PDB** | 9 | 7 | 7 | 10 | **8.25** | ✓ Top |
+| 1 | **SBEA** | 8 | 8 | 8 | 9 | **8.25** | ✓ Top |
+| 4 | **IGRB** | 8 | 8 | 8 | 8 | **8.00** | ✓ |
+| 4 | **DPP** | 7 | 8 | 9 | 8 | **8.00** | ✓ |
+| 4 | **ADR** | 7 | 8 | 9 | 8 | **8.00** | ✓ |
+| 4 | **FLDAP** | 8 | 8 | 8 | 8 | **8.00** | ✓ |
+| 4 | **CRPS** | 8 | 8 | 8 | 8 | **8.00** | ✓ |
+| 9 | **QPHBP** | 8 | 7 | 7 | 9 | **7.75** | ✓ |
+| 9 | **LDLP** | 9 | 7 | 7 | 8 | **7.75** | ✓ |
+| 11 | **ILQCC** | 8 | 7 | 8 | 7 | **7.50** | ✓ |
+| 11 | **FLMDS** | 7 | 8 | 8 | 7 | **7.50** | ✓ |
+| 13 | **NDIR** | 8 | 7 | 7 | 7 | **7.25** | ✓ |
+| 14 | **WTPP** | 8 | 7 | 6 | 7 | **7.00** | ✓ |
+| 14 | **DDCJR** | 8 | 7 | 6 | 7 | **7.00** | ✓ |
+
+All 15 pass the C ≥ 7 threshold. No ideas were eliminated.
+
+---
+
+**Top 3 Recommendations for immediate implementation:**
+
+1. **SBEA** — Highest orthogonality to existing mechanisms (per-edge vs per-qubit state). Trivial to implement, directly targets the most common failure mode. Best effort-to-impact ratio.
+
+2. **PSU** — Provides a formal anti-starvation guarantee missing from all existing approaches. The exponential urgency counter creates a mathematical proof of eventual resolution for every front-layer gate.
+
+3. **FLDAP** — Asymmetric loss function requires no new state. Just compute `d_s(g) - d_0(g)` and multiply regressions by κ. Immediately penalizes backtracking at the cost-function level rather than relying solely on decay.

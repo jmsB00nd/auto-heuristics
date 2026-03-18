@@ -7,11 +7,12 @@ import numpy as np
 import time
 import csv
 import os
+from tqdm import tqdm 
 
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-81qbt"
+BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-54qbt"
 OUTPUT_DIR = "/home/jmsb00nd/Documents/auto-heuristics/autoheuristics_results"
-OUTPUT_CSV = os.path.join(OUTPUT_DIR, "llm_queko81_ibm_sherbrooke_trivial.csv")
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, "qlosure_queko54_ibm_sherbrooke_trivial.csv")
 
 edges = load_backend_edges(BACKEND)
 circuit_files = list(Path(BENCHMARK_DIR).glob("*.json"))
@@ -29,8 +30,12 @@ with open(OUTPUT_CSV, mode='w', newline='') as file:
     writer = csv.writer(file)
     writer.writerow(["filename", "final_depth", "swap_count", "runtime"])
 
-    for circuit_path in circuit_files:
+    pbar = tqdm(circuit_files, desc="Processing Circuits", unit="circuit")
+
+    for circuit_path in pbar:
         try:
+            pbar.set_postfix(file=circuit_path.name[:15]) 
+            
             data = json_file_to_isl(str(circuit_path))
             router = Qlosure(edges, data)
             
@@ -44,6 +49,7 @@ with open(OUTPUT_CSV, mode='w', newline='') as file:
             writer.writerow([circuit_path.name, min_depth, min_swaps, runtime])
 
         except Exception as e:
-            print(f"Failed to process {circuit_path.name}: {e}")
+            # tqdm.write ensures the error doesn't break the progress bar formatting
+            tqdm.write(f"Failed to process {circuit_path.name}: {e}")
 
 print("Batch run completed.")

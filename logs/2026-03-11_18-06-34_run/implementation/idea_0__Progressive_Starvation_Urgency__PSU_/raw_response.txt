@@ -1,0 +1,112 @@
+It seems write permissions aren't granted for that file. Let me provide the complete implementation as code you can apply directly.
+
+---
+
+Here is the full PSU implementation. It requires **4 small changes** to `routing.py`:
+
+---
+
+### 1. `__init__` — add starvation dict (after `self.instruction_times` line)
+
+```python
+# PSU: per-gate starvation counter; incremented each swap, reset on execution
+self.starvation = {}
+```
+
+---
+
+### 2. `execute_algorithm` — reset starvation at start of each run (after `self.decay_parameter` reset line)
+
+```python
+self.starvation = {}
+```
+
+---
+
+### 3. `update_front_layer` — reset starvation for gates that just executed
+
+```python
+def update_front_layer(self, executable_gates):
+    for gate in executable_gates:
+        for successor_gate in self.dag_full[gate]:
+            self.dag_predecessors_full[successor_gate].discard(gate)
+            if len(self.dag_predecessors_full[successor_gate]) == 0:
+                self.front_layer.add(successor_gate)
+
+        self.front_layer.discard(gate)
+        self.starvation.pop(gate, None)  # PSU: reset on execution
+```
+
+---
+
+### 4. `apply_qlosure_heuristic` — increment starvation after the best swap is chosen (after `self.update_depth` call)
+
+```python
+# PSU: every front_layer gate just waited one more swap without executing
+for g in self.front_layer:
+    self.starvation[g] = self.starvation.get(g, 0) + 1
+```
+
+---
+
+### 5. The cost function itself
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    W = 0.5
+    ALPHA = 0.1  # urgency growth rate per starvation step
+
+    extended_layer_size = len(self.extended_layer)
+    max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+    # --- Front layer: starvation-weighted urgency score ---
+    W_total = 0.0
+    f_distance = 0.0
+
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+
+        # Base weight + exponential starvation urgency (capped to avoid overflow)
+        base_w = deps + 1
+        starvation_steps = self.starvation.get(g, 0)
+        urgency = base_w * math.exp(min(ALPHA * starvation_steps, 700.0))
+
+        W_total += urgency
+        f_distance += urgency * self.distance_matrix[Q1][Q2]
+
+    # W_total > 0 guaranteed: front_layer non-empty, urgency always > 0
+    f_score = f_distance / W_total
+
+    # --- Extended layer: baseline depth-discounted score ---
+    e_score = 0.0
+    if extended_layer_size > 0:
+        e_distance = 0.0
+        for g in self.extended_layer:
+            q1, q2 = self.access2q[g]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            layer_factor = self.extended_layer_index.get(g, 0) + 1
+            deps = self.dag_dependencies_count[g]
+            e_distance += (deps + 1) * self.distance_matrix[Q1][Q2] / layer_factor
+
+        e_score = e_distance / extended_layer_size
+
+    H = max_decay * (f_score + W * e_score)
+    return H
+```
+
+---
+
+**Key design decisions vs. baseline:**
+
+| Property | Baseline | PSU |
+|---|---|---|
+| Front-layer weight | `deps+1` (static) | `(deps+1)·exp(α·starvation)` (dynamic) |
+| Front-layer normalization | `/|FL|` (count) | `/W_total` (urgency-weighted, self-normalizing) |
+| Extended weight | `(deps+1)/layer` | same — unchanged intentionally |
+| Anti-starvation | none | exponential growth → gate dominates cost if neglected |
+| Overflow guard | n/a | `min(α·s, 700)` caps `exp` below `~1e304` |
+| Divide-by-zero | possible if FL=0 | impossible: FL non-empty when heuristic runs; `W_total>0` always |
+
+The `W_total` normalization means `f_score` is a **urgency-weighted average distance** — high-starvation gates pull the score up proportionally, forcing the router to choose swaps that reduce their distance.

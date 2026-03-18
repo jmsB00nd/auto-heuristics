@@ -1,0 +1,82 @@
+## Critical Analysis of MSGTC
+
+**Strengths:**
+- Geometric decay γ^k bounds the extended-layer sum (no runaway scaling)
+- Per-bucket normalization prevents large buckets from dominating
+- Dependency-weighted gate costs prioritize critical-path gates
+
+**Weaknesses:**
+1. **Bucketing loses resolution**: `bit_length()` maps depths 3 & 4 → bucket 2, depths 5-8 → bucket 3. Gates within the same bucket are treated identically despite having different urgency.
+2. **Unequal bucket distortion**: Averaging within each bucket and then summing with γ^k weights can distort when bucket sizes differ wildly (1 gate in k=0 vs 50 in k=3 get equal per-gate weight after normalization).
+3. **No bottleneck awareness**: By using only the mean of front-layer distances, a single "stuck" gate pair (very far from its hardware neighbors) is masked by other nearby gates — the heuristic won't see the urgency.
+
+## Evolution Strategy: Option A (Targeted Refinement)
+
+Three focused improvements:
+1. **Per-gate smooth exponential decay** instead of bucketed → higher resolution, no binning loss
+2. **Dependency-weighted normalization** for extended layer (`Σ w·cost / Σ w`) → stable scaling regardless of depth distribution
+3. **Bottleneck blend** for front layer: `(1-β)·mean + β·max` → explicitly penalizes configurations where any single front-layer gate is stuck very far from its target
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    """
+    Smooth Exponential Decay with Bottleneck Awareness (SEDBA)
+
+    Key improvements over MSGTC:
+    1. Per-gate exponential decay gamma^(depth-1) instead of bucketed decay.
+       No precision loss from binning — depth 3 and depth 4 get distinct weights.
+    2. Dependency-weighted normalization: sum(w * cost) / sum(w) where
+       w = (deps+1) * gamma^(depth-1). Avoids distortion from unequal bucket sizes.
+    3. Bottleneck blend for front layer: (1-beta)*mean + beta*max.
+       Penalizes any single "stuck" front-layer pair that averaging would mask.
+    """
+    gamma = 0.55      # per-depth decay; depth-5 weight ≈ 0.092 (smooth roll-off)
+    W_ext = 0.42      # extended-layer influence (slightly reduced vs MSGTC since
+                      # bottleneck term already captures worst-case front pressure)
+    beta  = 0.35      # bottleneck blend: 0 = pure mean, 1 = pure max
+
+    front_size = max(len(self.front_layer), 1)
+    max_decay  = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+    # --- Front layer: dependency-weighted mean + bottleneck blend ---
+    f_sum      = 0.0
+    f_max_cost = 0.0
+
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+        cost = (deps + 1) * self.distance_matrix[Q1][Q2]
+        f_sum += cost
+        if cost > f_max_cost:
+            f_max_cost = cost
+
+    f_mean  = f_sum / front_size
+    f_score = (1.0 - beta) * f_mean + beta * f_max_cost
+
+    # --- Extended layer: per-gate smooth exponential decay,
+    #     dependency-weighted normalization to remove size artifacts ---
+    e_num = 0.0
+    e_den = 0.0
+
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        depth = self.extended_layer_index.get(g, 0) + 1   # 1-based BFS depth
+        deps  = self.dag_dependencies_count[g]
+        d     = self.distance_matrix[Q1][Q2]
+
+        w      = (deps + 1) * (gamma ** (depth - 1))
+        e_num += w * d
+        e_den += w
+
+    e_score = e_num / e_den if e_den > 0 else 0.0
+
+    H = max_decay * (f_score + W_ext * e_score)
+    return H
+```
+
+**Why each change helps:**
+- **Smooth decay** (depth 1→1.0, depth 2→0.55, depth 3→0.30, depth 4→0.17…) gives the optimizer a true gradient over depth, not coarse steps. MSGTC puts depths 5–8 in the same bucket with weight γ³≈0.125; SEDBA spreads them from 0.092 down to 0.011.
+- **Dependency-weighted normalization** `e_num/e_den` means high-deps gates at shallow depths naturally dominate — no artificial per-bucket averaging needed.
+- **Bottleneck blend** with β=0.35 gives 35% weight to the worst-case front-layer gate. When one qubit pair is far from its coupling target and all other pairs are already close, the mean heuristic won't push for that fix — the max term will.

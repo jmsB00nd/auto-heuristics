@@ -6,15 +6,18 @@ console = Console()
 
 class PromptManager:
     """Handles loading and formatting of prompt templates."""
-    def __init__(self, prompts_dir: str):
+    def __init__(self, prompts_dir: str, problem : str):
         self.prompts_dir = Path(prompts_dir)
-        self.baseline = self._load("routing/baseline.txt")
-        self.system_generator = self._load("common/system_generator.txt")
-        self.documentation = self._load("common/documentation.txt")
-        self.output_format = self._load("routing/output_format.txt")
-        self.idea_prompt = self._load("routing/ideas_generation.txt")
-        self.idea_history = self._load("routing/ideas_history.txt")
-        self.lit_review_prompt = self._load("routing/literature_review.txt")
+        self.problem = problem
+        self.baseline = self._load(f"{self.problem}/baseline.txt")
+        self.system_generator = self._load(f"{self.problem}/system_generator.txt")
+        self.documentation = self._load(f"{self.problem}/documentation.txt")
+        self.output_format = self._load(f"{self.problem}/output_format.txt")
+        self.idea_prompt = self._load(f"{self.problem}/ideas_generation.txt")
+        self.code = self._load(f"{self.problem}/code.txt")
+        self.idea_history = self._load(f"{self.problem}/ideas_history.txt")
+        self.lit_review_prompt = self._load(f"{self.problem}/literature_review.txt")
+        self.refinement_prompt = self._load(f"{self.problem}/refinement.txt")
 
     def _load(self, relative_path: str) -> str:
         path = self.prompts_dir / relative_path

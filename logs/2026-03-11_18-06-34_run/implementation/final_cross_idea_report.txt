@@ -1,0 +1,41 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-11 18:35:16
+Ideas Tested: 5
+
+## Global Metrics
+- **Generation Success Rate:** 60.00%
+- **Average Score (Mean Swaps):** 672.14
+- **Best Score:** 650.27
+- **Worst Score:** 693.36
+- **Total Number of Tokens:** 10,620
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 13m 31s
+- **Implementation:** 15m 10s
+- **Total Pipeline:** 28m 42s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔  Persistent Deadlock Barrier (PDB)
+- Mean Swaps: 650.2727272727273
+- Mean Depth: 1044.3636363636363
+
+### 2. ✔  Immediate Gate Resolution Bonus (IGRB)
+- Mean Swaps: 672.7727272727273
+- Mean Depth: 1006.2727272727273
+
+### 3. ✔  Decay Product Penalty (DPP)
+- Mean Swaps: 693.3636363636364
+- Mean Depth: 1018.8636363636364
+
+### 4. ✘  Progressive Starvation Urgency (PSU)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+### 5. ✘  Soft Barrier Edge Accumulator (SBEA)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner:  Persistent Deadlock Barrier (PDB) (Mean Swaps: 650.27)

@@ -1,0 +1,43 @@
+{
+  " Critical Path Slack Inversion Cost (CPSIC)": {
+    "mean_swaps": 447.0952380952381,
+    "mean_depth": 592.3333333333334,
+    "error": null,
+    "failures": []
+  },
+  " Edge Traffic Quadratic Congestion Cost (ETQCC)": {
+    "mean_swaps": Infinity,
+    "error": "Timeout on multiplier_n45__462CYC.json"
+  },
+  " Multi-Scale Geometric Telescope Cost (MSGTC)": {
+    "mean_swaps": 419.3809523809524,
+    "mean_depth": 532.8571428571429,
+    "error": null,
+    "failures": []
+  },
+  " UCB-Regret Swap Aversion Cost (URSAC)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  },
+  " Interaction Homomorphism Profit Cost (IHPC)": {
+    "mean_swaps": 548.3809523809524,
+    "mean_depth": 584.1428571428571,
+    "error": null,
+    "failures": []
+  }
+}

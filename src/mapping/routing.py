@@ -249,63 +249,33 @@ class Qlosure():
 #                                                                  Qlosure Cost Function                                                                       #
 ################################################################################################################################################################    
     def qlosure_poly_heuristic(self, swap_gate):
-        # --- Step 1: BFS over the remaining DAG to compute Remaining Interaction Frequency ---
-        # RIF(q1, q2) = number of remaining (unexecuted) gates acting on this logical pair
-        rif = {}          # (min_q, max_q) -> count
-        visited = set()
-        stack = list(self.front_layer)
-
-        while stack:
-            gate = stack.pop()
-            if gate in visited:
-                continue
-            visited.add(gate)
-
-            q1, q2 = self.access2q[gate]
-            pair = (min(q1, q2), max(q1, q2))
-            rif[pair] = rif.get(pair, 0) + 1
-
-            for succ in self.dag2q.get(gate, set()):
-                if succ not in visited:
-                    stack.append(succ)
-
-        if not rif:
-            return 0.0
-
-        max_rif = max(rif.values())  # normalisation denominator
-
-        # --- Step 2: Front layer — weight distance by pair's global future workload ---
+        W = 1
         front_layer_size = len(self.front_layer)
         extended_layer_size = len(self.extended_layer)
-        max_decay = max(
-            self.decay_parameter[swap_gate[0]],
-            self.decay_parameter[swap_gate[1]]
-        )
 
-        f_distance = 0.0
+        max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+        f_distance = 0
+
         for g in self.front_layer:
             q1, q2 = self.access2q[g]
-            Q1 = self.temp_mapping_dict[q1]
-            Q2 = self.temp_mapping_dict[q2]
-            pair = (min(q1, q2), max(q1, q2))
-            rif_weight = rif.get(pair, 1) / max_rif   # high-frequency pairs matter more
-            f_distance += rif_weight * self.distance_matrix[Q1][Q2]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            deps = self.dag_dependencies_count[g]
 
-        # --- Step 3: Extended layer — same weighting, decayed by lookahead depth ---
-        e_distance = 0.0
+            f_distance += (deps+1) * self.distance_matrix[Q1][Q2]
+
+        e_distance = 0
         for g in self.extended_layer:
             q1, q2 = self.access2q[g]
-            Q1 = self.temp_mapping_dict[q1]
-            Q2 = self.temp_mapping_dict[q2]
-            pair = (min(q1, q2), max(q1, q2))
-            rif_weight = rif.get(pair, 1) / max_rif
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
             layer_factor = self.extended_layer_index.get(g, 0) + 1
-            e_distance += rif_weight * self.distance_matrix[Q1][Q2] / layer_factor
 
-        W = 1.0
-        H = max_decay * (
-            f_distance / front_layer_size
-            + W * (e_distance / extended_layer_size if extended_layer_size else 0.0)
-        )
+            deps = self.dag_dependencies_count[g]
+            e_distance += (deps+1) * \
+                self.distance_matrix[Q1][Q2] * 1/layer_factor
+
+        H = max_decay * (f_distance / front_layer_size + W *
+                        ((e_distance / extended_layer_size) if extended_layer_size else 0))
+
         return H
 ################################################################################################################################################################

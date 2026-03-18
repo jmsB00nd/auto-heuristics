@@ -1,4 +1,4 @@
-Baseline Cost Function (for reference, your solution must be fundamentally different, not just a tweak)
+Baseline Cost Function (for reference, your solution must be different, not just a tweak)
 
 ```python
 def qlosure_poly_heuristic(self, swap_gate):

@@ -1,0 +1,87 @@
+Now I have everything I need. Key facts confirmed:
+- `self.backend` is a `defaultdict(set)` adjacency list
+- `self.distance_matrix[i][j]` is the BFS hop distance (integer) between nodes i and j
+- `self.backend_connections` stores one-directional original edges
+
+The greedy path trick: since `distance_matrix` is from unweighted BFS, following the steepest neighbor descent is guaranteed to find a shortest path (distance strictly decreases by 1 per step), giving O(depth) path traversal instead of O(V+E) BFS per gate.
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    LAMBDA = 0.5  # congestion–distance tradeoff weight
+
+    front_layer_size = len(self.front_layer)
+    if front_layer_size == 0:
+        return 0.0
+
+    max_decay = max(
+        self.decay_parameter[swap_gate[0]],
+        self.decay_parameter[swap_gate[1]]
+    )
+
+    # Undirected edge count for normalization (avoid div-by-zero)
+    num_edges = sum(len(nbrs) for nbrs in self.backend.values()) // 2
+    if num_edges == 0:
+        num_edges = 1
+
+    # Edge load accumulator: (min_node, max_node) -> float
+    load = {}
+
+    def accumulate_path(src, dst, weight):
+        """Greedy shortest-path walk using distance matrix; O(dist(src,dst))."""
+        cur = src
+        while cur != dst:
+            cur_dist = self.distance_matrix[cur][dst]
+            best_next = None
+            best_d = cur_dist
+            for nbr in self.backend[cur]:
+                d = self.distance_matrix[nbr][dst]
+                if d < best_d:
+                    best_d = d
+                    best_next = nbr
+            if best_next is None:
+                break  # disconnected graph guard; should never trigger
+            key = (min(cur, best_next), max(cur, best_next))
+            load[key] = load.get(key, 0.0) + weight
+            cur = best_next
+
+    # --- Front layer: distance + congestion contribution (layer_factor = 1) ---
+    f_distance = 0.0
+    for g in self.front_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        deps = self.dag_dependencies_count[g]
+        weight = float(deps + 1)
+        f_distance += weight * self.distance_matrix[Q1][Q2]
+        if Q1 != Q2:
+            accumulate_path(Q1, Q2, weight)
+
+    # --- Extended layer: congestion contribution only, discounted by depth ---
+    for g in self.extended_layer:
+        q1, q2 = self.access2q[g]
+        Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+        layer_factor = float(self.extended_layer_index.get(g, 0) + 1)
+        deps = self.dag_dependencies_count[g]
+        weight = float(deps + 1) / layer_factor
+        if Q1 != Q2:
+            accumulate_path(Q1, Q2, weight)
+
+    # --- L2-norm² of edge load vector (quadratic congestion penalty) ---
+    congestion = sum(v * v for v in load.values())
+
+    H = max_decay * (
+        f_distance / front_layer_size
+        + LAMBDA * congestion / num_edges
+    )
+    return H
+```
+
+**Key design decisions:**
+
+| Choice | Rationale |
+|--------|-----------|
+| Greedy path via `distance_matrix` | O(depth) vs O(V+E) BFS; valid because BFS distances on unweighted graphs guarantee monotone descent |
+| `Q1 != Q2` guard before `accumulate_path` | Gate already adjacent — no path to walk, no load contribution |
+| L2 norm² (quadratic) | Convex penalty that punishes bottleneck edges exponentially more than balanced load; unique minimum discourages oscillation |
+| `num_edges = sum(len)//2` | Counts undirected hardware edges for proper normalization regardless of edge list format |
+| Extended layer excluded from `f_distance` | Matches baseline convention; only congestion paths from extended layer influence edge load |
+| `LAMBDA = 0.5` | Balances distance reduction vs load balancing; tunable in [0.1, 1.0] per the formulation |

@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Oscillation Signature Hash-Barrier (OSHB)",
+    "status": "KEPT",
+    "description": "Maintains a fixed-size deque of recent committed SWAP pairs `swap_history[k]` as frozensets. Before scoring, checks if the candidate SWAP `{q1, q2}` matches any entry in the deque. If it matches the entry at recency depth `k` (1 = most recent), multiplies the base cost by `\u03b2^(1/k)` \u2014 an exponentially large penalty for reversing the most recent swap, decaying smoothly for older matches. This is conceptually a soft state-hash barrier: the algorithm is explicitly forbidden from revisiting recent exchange states.",
+    "average_score": 8.5,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Asymmetric Directional Decay (ADD)",
+    "status": "KEPT",
+    "description": "Replaces `max_decay` with a direction-conditional penalty. For each qubit `q` in the candidate SWAP, computes whether the SWAP moves `q` *toward* or *away from* its nearest FL target. Qubits moving away get their decay multiplied by a penalty factor `\u03b4 > 1`; qubits moving toward their target retain their base decay. The effective decay is the maximum over both qubits. This makes the cost function *asymmetric by construction*: a SWAP that was just applied cannot be reversed cheaply because the reversing qubit would be moving away from the target it was just moved toward.",
+    "average_score": 8.25,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Qubit Momentum Reversal Penalty (QMRP)",
+    "status": "KEPT",
+    "description": "Maintains a per-physical-qubit \"committed distance\" history: after each round's SWAP is chosen, records `prev_dist[q]` = distance from `q` to its nearest FL target in the committed mapping. When evaluating a candidate SWAP, checks whether the candidate would reverse the qubit's established movement direction from the previous round. A reversal is detected when a qubit was previously approaching its target (`prev_dist[q] > current_dist[q]`) but the candidate SWAP would move it further away. The reversal penalty is proportional to the magnitude of the reversal.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Thermal EMA Qubit Heat Cost (TEQH)",
+    "status": "KEPT",
+    "description": "Replaces the step-increment `decay_parameter` with a per-physical-qubit exponential moving average (EMA) \"heat\" score. After each round, the chosen SWAP qubits absorb heat; all qubits cool naturally. Heat is applied superlinearly (power `\u03b2 > 1`) so qubits involved in many consecutive SWAPs face rapidly escalating cost. Crucially, this uses *both* qubits' heat (additive) rather than just the max, and applies power-law scaling rather than linear.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Adaptive Stagnation-Escape Amplifier (ASEA)",
+    "status": "KEPT",
+    "description": "Detects routing stagnation by tracking whether the minimum achieved front-layer aggregate distance is improving each round. If the routing fails to improve for `K` consecutive rounds, exponentially amplifies the front-layer weight term to force the optimizer into aggressive front-layer mode, breaking the local optimum. When improvement resumes, the amplifier resets. This adapts the effective value of `W` dynamically based on convergence behavior.",
+    "average_score": 7.75,
+    "elimination_reason": "N/A"
+  }
+]

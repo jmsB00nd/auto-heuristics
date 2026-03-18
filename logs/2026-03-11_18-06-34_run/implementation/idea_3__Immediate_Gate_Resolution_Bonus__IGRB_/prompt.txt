@@ -1,0 +1,82 @@
+You are an expert Quantum Compiler Researcher and Algorithm Engineer. Your goal is to invent a NOVEL, mathematically sound cost function to minimize SWAP counts and circuit depth in quantum mapping (specifically at the routing stage).
+
+CRITICAL ENGINEERING CONSTRAINTS:
+1. GUARANTEE CONVERGENCE: The most common failure in routing heuristics is infinite looping (ping-ponging the same qubits). Your cost function MUST deterministically break ties and heavily penalize reversing recent swaps.
+2. FRONT LAYER DOMINANCE: You must enforce strict forward progress. Resolving the immediate dependency graph (`front_layer`) MUST be prioritized over the `extended_layer`.
+3. COMPUTATIONAL STABILITY: Your mathematical formulations must perfectly translate to the available data structures in O(1) or O(N) time complexity. You must strictly avoid divide-by-zero errors and handle empty sets gracefully (e.g., when the extended_layer is empty).
+TASK: Implement Cost Function.
+REQUIRED OUTPUT FORMAT :
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+    # Your code here
+    return cost
+```
+
+You MUST follow this exact format.
+Idea:  Immediate Gate Resolution Bonus (IGRB)
+Desc: **
+Adds a *hard lexicographic bonus* for any candidate SWAP that brings at least one front-layer gate to distance exactly 1 (making it immediately executable in the very next iteration). Rather than being a soft distance reduction, this is a discontinuous reward that creates a strong step function: SWAPs that achieve adjacency are categorically preferred over SWAPs that only reduce distance without achieving adjacency. A gate at d=1 executes immediately in the next cycle (since `extract_ready_to_execute_gate_list` checks for adjacency), making this a concrete, not hypothetical, improvement.
+
+**MATHEMATICAL_FORMULATION:**
+```
+M = 10.0  (milestone scale, tuned so M >> typical f_score/|FL|)
+
+# Count weighted resolution events:
+resolution_bonus = Σ_{g ∈ FL} w(g) · 𝟙[d_s(g) == 1]
+W_total = Σ_{g ∈ FL} w(g)
+
+f_score = Σ_{g ∈ FL} w(g) · d_s(g) / |FL|
+e_score = Σ_{g ∈ EL} w(g) · d_s(g) / (|EL| · (ι(g) + 1))  [if |EL| > 0, else 0]
+
+# Subtract bonus from cost (minimize H → maximize resolution):
+H(s) = max(γ_p, γ_q) · (f_score + W · e_score)
+       - M · resolution_bonus / (W_total + ε)
+```
+The subtracted term (≤ M) dominates the base cost when M is set appropriately (e.g., M = 10 vs typical f_score ≈ 1–5 for normalized distances).
+
+**LOOP_PREVENTION_STRATEGY:**
+Resolving a front-layer gate (achieving d=1) is always forward progress — it means the gate will execute next iteration, changing `front_layer`. A SWAP that earns the milestone bonus moves the system into a strictly different state (the gate executes), making it impossible to create an infinite loop through the bonus path. The decay penalty `max(γ_p, γ_q)` handles loops in the no-bonus path (when no gate reaches d=1), since the router falls back to the standard distance-minimizing behavior.
+
+**WHY_NOVEL:**
+All existing implemented heuristics use *continuous* distance metrics. IGRB introduces a *discrete milestone objective*: the d=1 threshold at which a gate becomes executable creates a phase transition in the optimization landscape. This is analogous to the difference between a distance-based reward and a goal-conditioned reward in reinforcement learning — the latter is known to produce fundamentally different (often better) optimization trajectories. No existing heuristic in this codebase treats d=1 as categorically different from d=2.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 8
+**EFFORT_SCORE:** 8
+**CONVERGENCE_SCORE:** 8
+**AVERAGE_SCORE:** 8.0
+Baseline Cost Function (for reference, your solution must be different, not just a tweak)
+
+```python
+def qlosure_poly_heuristic(self, swap_gate):
+        W = 1
+        front_layer_size = len(self.front_layer)
+        extended_layer_size = len(self.extended_layer)
+
+        max_decay = max(self.decay_parameter[swap_gate[0]], self.decay_parameter[swap_gate[1]])
+
+        f_distance = 0
+
+        for g in self.front_layer:
+            q1, q2 = self.access2q[g]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            deps = self.dag_dependencies_count[g]
+
+            f_distance += (deps+1) * self.distance_matrix[Q1][Q2]
+
+        e_distance = 0
+        for g in self.extended_layer:
+            q1, q2 = self.access2q[g]
+            Q1, Q2 = self.temp_mapping_dict[q1], self.temp_mapping_dict[q2]
+            layer_factor = self.extended_layer_index.get(g, 0) + 1
+
+            deps = self.dag_dependencies_count[g]
+            e_distance += (deps+1) * \
+                self.distance_matrix[Q1][Q2] * 1/layer_factor
+
+        H = max_decay * (f_distance / front_layer_size + W *
+                        ((e_distance / extended_layer_size) if extended_layer_size else 0))
+
+        return H
+```
