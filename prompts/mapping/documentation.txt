@@ -1,0 +1,30 @@
+ACCESSIBLE DATA (self)
+
+1. TOPOLOGY & DISTANCE
+- self.distance_matrix: List[List[int]]
+  All-pairs shortest-path distances on the hardware graph.
+- self.num_qubits: int
+  Total number of physical qubits on the hardware.
+- self.backend: DefaultDict[int, Set[int]]
+  Hardware adjacency list.
+- self.backend_connections: Set[Tuple[int, int]]
+  Set of hardware edges for O(1) adjacency checks.
+
+2. CIRCUIT INFORMATION
+- self.access2q: List[List[int]]
+  Maps a gate ID to its two logical qubits [q1, q2].
+- self.front_layer: Set[int]
+  Gate IDs ready for immediate execution at the start of the circuit.
+- self.extended_layer: List[int]
+  Lookahead gates (future successors in the DAG).
+- self.dag_dependencies_count: Dict[int, int]
+  Number of descendants for each gate in the dependency graph.
+
+3. REQUIRED OUTPUT VARIABLES TO POPULATE
+- self.mapping_dict: List[int]
+  Initialize as `[-1] * self.num_qubits`. You must update this so that `self.mapping_dict[logical_q] = physical_q`.
+- self.reverse_mapping_dict: List[int]
+  Initialize as `[-1] * self.num_qubits`. You must update this so that `self.reverse_mapping_dict[physical_q] = logical_q`.
+
+CRITICAL RULE:
+A physical qubit can hold at most one logical qubit. A logical qubit must be mapped to exactly one physical qubit. Ensure consistency between mapping_dict and reverse_mapping_dict.

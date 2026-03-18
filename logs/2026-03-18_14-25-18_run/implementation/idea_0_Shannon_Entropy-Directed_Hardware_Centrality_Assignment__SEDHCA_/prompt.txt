@@ -1,3 +1,22 @@
+You are an expert Quantum Compiler Researcher and Algorithm Engineer. 
+Your goal is to invent a NOVEL, mathematically sound algorithmic strategy for the Initial Mapping (Placement) problem in quantum circuit compilation. 
+Your objective is to assign logical qubits to physical qubits before routing begins, to inherently minimize the total routing overhead (SWAP counts) and circuit depth.
+
+CRITICAL ENGINEERING CONSTRAINTS:
+1. GUARANTEE VALIDITY: You must generate a strict 1-to-1 mapping. Every logical qubit used in the circuit must be mapped to exactly one unique physical qubit.
+2. COMPUTATIONAL STABILITY: Your algorithm must run efficiently. Avoid exponential time complexities (like exhaustive subgraph isomorphism searches) unless heavily pruned.
+TASK: Implement Idea.
+REQUIRED OUTPUT FORMAT :
+
+```python
+def init_mapping(self):
+    # Your code here
+    # MUST populate self.mapping_dict and self.reverse_mapping_dict
+```
+Idea: Shannon Entropy-Directed Hardware Centrality Assignment (SEDHCA)
+Desc: For each logical qubit, computes the Shannon entropy of its interaction distribution — qubits that interact broadly (high entropy) need central physical locations for routing flexibility, while focused qubits (low entropy) tolerate peripheral placement. Matches this entropy ordering to physical qubits sorted by closeness centrality (inverse mean BFS distance). This is an information-theoretic approach to placement that has no precedent in quantum compilation literature.
+Reference code to see the variables can be accessed and how the initial mapping fit within the code
+
 import random
 import copy
 from time import time

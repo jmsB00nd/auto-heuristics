@@ -1,0 +1,54 @@
+
+Cross-Idea Comparison Report
+Generated: 2026-03-18 15:10:26
+Ideas Tested: 8
+
+## Global Metrics
+- **Generation Success Rate:** 87.50%
+- **Average Score (Mean Swaps):** 375.57
+- **Best Score:** 284.00
+- **Worst Score:** 563.52
+- **Total Number of Tokens:** 21,952
+
+## Execution Times
+- **Literature Review:** 0.00s
+- **Idea Generation:** 7m 13s
+- **Implementation:** 20m 40s
+- **Iterative Refinement:** 17m 14s
+- **Total Pipeline:** 45m 8s
+
+## Idea Ranking (by Mean Swaps)
+
+### 1. ✔ Interaction-Frequency Weighted BFS Anchor Placement (IFWBAP)
+- Mean Swaps: 284.0
+- Mean Depth: 504.6666666666667
+
+### 2. ✔ Refined_Idea_Round_2
+- Mean Swaps: 306.2857142857143
+- Mean Depth: 493.85714285714283
+
+### 3. ✔ Refined_Idea_Round_1
+- Mean Swaps: 310.1904761904762
+- Mean Depth: 498.42857142857144
+
+### 4. ✔ Refined_Idea_Round_3
+- Mean Swaps: 323.23809523809524
+- Mean Depth: 510.76190476190476
+
+### 5. ✔ Temporal-Decay Front-Gate Interaction Anchoring (TDFGIA)
+- Mean Swaps: 327.3333333333333
+- Mean Depth: 523.5714285714286
+
+### 6. ✔ Gate-Sequence Sliding Window Adjacent-Pair Greedy Seeding (GSWAPS)
+- Mean Swaps: 514.4285714285714
+- Mean Depth: 577.5714285714286
+
+### 7. ✔ K-Core Decomposition Hierarchical Centrality Matching (KCDHCM)
+- Mean Swaps: 563.5238095238095
+- Mean Depth: 583.7142857142857
+
+### 8. ✘ Shannon Entropy-Directed Hardware Centrality Assignment (SEDHCA)
+- Mean Swaps: FAILED
+- Mean Depth: 0
+
+## Overall Winner: Interaction-Frequency Weighted BFS Anchor Placement (IFWBAP) (Mean Swaps: 284.00)

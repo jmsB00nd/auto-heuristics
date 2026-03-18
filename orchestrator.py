@@ -91,13 +91,14 @@ class OrchestratorV2:
             
             console.print(f"[bold]Implementing {idea_name}...[/bold]")
             
-            prompt = f"{self.prompts.system_generator}\nTASK: Implement Cost Function.\n{getattr(self.prompts, 'output_format', '')}\nIdea: {idea_name}\nDesc: {idea.get('description')}\n{getattr(self.prompts, 'code', '')}"
+            prompt = f"{self.prompts.system_generator}\nTASK: Implement Idea.\n{getattr(self.prompts, 'output_format', '')}\nIdea: {idea_name}\nDesc: {idea.get('description')}\n{getattr(self.prompts, 'code', '')}"
             save_log(idea_dir, "prompt.txt", prompt)
             
             response = self.llm.query(prompt, reset_conversation=True)
             save_log(idea_dir, "raw_response.txt", response or "")
+            target_func = "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
             
-            code = IdeaParser.extract_code(response or "")
+            code = IdeaParser.extract_code(response or "", target_func)
             
             if not code:
                 console.print(f"[red]Failed to extract code for {idea_name}[/red]")
@@ -182,7 +183,9 @@ class OrchestratorV2:
             response = self.llm.query(prompt, reset_conversation=True)
             save_log(round_dir, "raw_response.txt", response or "")
             
-            code = IdeaParser.extract_code(response or "")
+            target_func = "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
+            
+            code = IdeaParser.extract_code(response or "", target_func)
             idea_name = f"Refined_Idea_Round_{round_idx}"
 
             if not code:

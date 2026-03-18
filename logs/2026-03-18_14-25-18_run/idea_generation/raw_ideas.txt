@@ -1,0 +1,343 @@
+Now I have a thorough understanding of the full codebase. Let me generate the 15 ideas.
+
+---
+
+## Part 1 & 2 — Novel Initial Mapping Ideas: Generated, Scored, and Filtered
+
+> **Reference code context**: `init_mapping()` is called before DAG construction, so `self.access2q`, `self.dag_dependencies_count`, and `self.front_layer` are **not yet available**. The interaction graph must be built directly from `self.access` (filtered to 2-qubit gates). The function must populate `self.mapping_dict[logical_q] = physical_q` and `self.reverse_mapping_dict[physical_q] = logical_q`.
+>
+> ```python
+> def init_mapping(self):
+>     # AVAILABLE:
+>     # self.access          → dict[gate_id → list[logical_qubit]]  (all gates)
+>     # self.write_dict      → dict[gate_id → list[logical_qubit]]  (write access)
+>     # self.distance_matrix → list[list[int]]  (all-pairs BFS hardware distances)
+>     # self.num_qubits      → int
+>     # self.backend         → defaultdict[int, set[int]]  (hardware adjacency)
+>     # self.backend_connections → set of (p1,p2)
+>
+>     self.mapping_dict = [-1] * self.num_qubits
+>     self.reverse_mapping_dict = [-1] * self.num_qubits
+>
+>     # Build interaction graph from 2-qubit gates in self.access:
+>     # interaction_freq[(q1,q2)] += 1 for each gate with access = [q1, q2]
+>
+>     if self.use_isl:
+>         from src.utils.isl_data_loader import dict_to_isl_map
+>         self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+> ```
+
+---
+
+IDEA_NAME: Fiedler-Vector Spectral Rank Alignment (FVSRA)
+DESCRIPTION: Computes the Fiedler vector (2nd smallest eigenvector of the normalized Laplacian) for both the weighted logical interaction graph and the hardware graph. Logical qubits are sorted by their Fiedler component, physical qubits are independently sorted by their Fiedler component, and a rank-preserving bijection is constructed. The Fiedler vector encodes the graph's optimal bisection axis, so aligning both orderings maps interaction-clustered logical qubits to topologically-clustered physical qubits.
+ALGORITHMIC_APPROACH:
+1. Build weighted interaction frequency matrix `W_L[q1][q2]` from `self.access` (count of 2-qubit gates per pair).
+2. Compute the normalized Laplacian `L_L = D_L^{-1/2}(D_L - W_L)D_L^{-1/2}`.
+3. Extract the Fiedler vector `f_L` via numpy's `eigh` (eigenvalue index 1).
+4. For the hardware graph, build adjacency matrix, compute its normalized Laplacian `L_H`, extract Fiedler vector `f_H`.
+5. Sort logical qubit indices by `f_L` ascending → sorted list `ord_L`.
+6. Sort physical qubit indices by `f_H` ascending → sorted list `ord_P`.
+7. Assign `mapping_dict[ord_L[i]] = ord_P[i]` for all i.
+COLLISION_PREVENTION: Both `ord_L` and `ord_P` are permutations of their respective index sets. The rank-matched bijection `ord_L[i] → ord_P[i]` is strictly 1-to-1 by construction: each logical index appears exactly once in `ord_L`, each physical index exactly once in `ord_P`.
+WHY_NOVEL: Standard SOTA uses SABRE (routing-based), subgraph isomorphism, or noise-aware greedy. Applying Fiedler vector rank-alignment to match the natural bisection structure of both graphs simultaneously has not appeared in the quantum compilation literature. It differs from mere degree-sorting by using the full spectral geometry of both graphs.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+IDEA_NAME: Interaction-Frequency Weighted BFS Anchor Placement (IFWBAP)
+DESCRIPTION: Identifies the single most-interacting logical qubit (highest weighted degree in the interaction graph) and anchors it to the most globally-central physical qubit (lowest mean BFS distance to all others). Then expands outward via a dual BFS: each subsequent unplaced logical qubit — selected by maximum interaction weight to already-placed qubits — is placed on the unoccupied physical neighbor of the current placement that minimizes total weighted distance to its already-placed interaction partners. Remaining unplaced qubits fill remaining physical qubits by hardware degree order.
+ALGORITHMIC_APPROACH:
+1. Build `interaction_freq[(q1,q2)]` from `self.access`.
+2. Compute weighted degree `WD[q] = sum_j interaction_freq[(q,j)]` for each logical qubit `q`.
+3. Compute `mean_dist[p] = mean(distance_matrix[p])` for each physical qubit.
+4. Anchor: `anchor_logical = argmax(WD)`, `anchor_physical = argmin(mean_dist)`.
+5. `mapping_dict[anchor_logical] = anchor_physical`.
+6. Priority queue of unplaced logical qubits ordered by `sum_{placed j} interaction_freq[(q,j)]` (descending).
+7. For each popped logical qubit `q`: find `p* = argmin_{unoccupied p in backend neighbors of placed} sum_{placed j} freq[(q,j)] * distance_matrix[p][mapping[j]]`; assign `q → p*`.
+8. Fill remaining unplaced logical with remaining physical sorted by hardware degree descending.
+COLLISION_PREVENTION: Maintains a `placed_physical` set; each assigned physical qubit is immediately added and never reassigned. `mapping_dict` and `reverse_mapping_dict` are updated atomically. Final fill uses the complement set — guaranteed disjoint.
+WHY_NOVEL: Combines interaction-frequency-weighted BFS expansion with hardware-centrality-driven anchoring into a single greedy pass. Unlike SABRE layout (which runs full routing simulations) or degree-sorted matching (which ignores topology structure), this propagates placement decisions through the interaction graph structure while respecting the hardware's local connectivity at each step.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+---
+
+IDEA_NAME: Temporal-Decay Front-Gate Interaction Anchoring (TDFGIA)
+DESCRIPTION: Weights each interaction between logical qubits by an exponential decay based on the gate's circuit position: interactions appearing at gate index `t` receive weight `exp(-t / τ)`. This produces a temporally-biased interaction graph that prioritizes the early, front-layer interactions — exactly the ones that determine SWAP cost before routing can react. The resulting weighted graph is then used for the IFWBAP anchor-and-expand placement strategy.
+ALGORITHMIC_APPROACH:
+1. Sort gate IDs from `self.access` to establish circuit order.
+2. For each 2-qubit gate `g` at sorted position `t` with qubits `(q1, q2)`: `W[q1][q2] += exp(-t / τ)` where `τ = len(self.access) / 4` (configurable decay constant).
+3. Compute temporally-decayed weighted degree: `TWD[q] = sum_j W[q][j]`.
+4. Anchor the logical qubit with max TWD to the most-central physical qubit.
+5. Run the same BFS expansion as IFWBAP using `W` as the weight matrix.
+6. Fill remaining assignments by hardware degree.
+COLLISION_PREVENTION: Identical to IFWBAP: atomic placement tracking via `placed_physical` set with complement-fill guarantee.
+WHY_NOVEL: No existing placement method applies temporal exponential decay to interaction weights before placement. SABRE and noise-aware methods are position-agnostic or use circuit-level statistics without temporal weighting. This directly encodes the insight that front-layer interactions dominate early SWAP cost, giving them disproportionate influence on placement decisions.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+---
+
+IDEA_NAME: Shannon Entropy-Directed Hardware Centrality Assignment (SEDHCA)
+DESCRIPTION: For each logical qubit, computes the Shannon entropy of its interaction distribution — qubits that interact broadly (high entropy) need central physical locations for routing flexibility, while focused qubits (low entropy) tolerate peripheral placement. Matches this entropy ordering to physical qubits sorted by closeness centrality (inverse mean BFS distance). This is an information-theoretic approach to placement that has no precedent in quantum compilation literature.
+ALGORITHMIC_APPROACH:
+1. Build `interaction_freq[(q1,q2)]` from `self.access`.
+2. For each logical qubit `q`: compute `total_q = sum_j freq[(q,j)]`; if zero, H(q) = 0; else `H(q) = -sum_j (freq[(q,j)]/total_q) * log2(freq[(q,j)]/total_q + 1e-12)`.
+3. For each physical qubit `p`: compute closeness centrality `CC(p) = (num_qubits - 1) / sum_j distance_matrix[p][j]`.
+4. Sort logical qubits by `H(q)` descending → `ord_L`.
+5. Sort physical qubits by `CC(p)` descending → `ord_P`.
+6. Assign `mapping_dict[ord_L[i]] = ord_P[i]` for all i.
+COLLISION_PREVENTION: Both sort operations produce complete permutations of their respective index sets. Rank-based bijective assignment guarantees strict 1-to-1: each logical and physical qubit appears in exactly one sorted position.
+WHY_NOVEL: Applies Shannon information entropy to characterize logical qubit "interaction breadth" and pairs it with closeness centrality — a principled information-theoretic argument that broad interactors need central placement. No existing SOTA method uses entropy as a placement criterion.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.8
+
+---
+
+IDEA_NAME: PageRank Diffusion Interaction-to-Hardware Matching (PDIHM)
+DESCRIPTION: Runs a PageRank-style iterative diffusion on the logical interaction graph to compute a "routing importance" score for each logical qubit that captures both direct and transitive interaction influence. Simultaneously runs PageRank on the hardware graph to identify the most globally-reachable physical qubits. Matches by rank: highest-importance logical → most-reachable physical.
+ALGORITHMIC_APPROACH:
+1. Build symmetric weighted interaction matrix `W[q1][q2]` from `self.access`.
+2. Normalize rows: `P_L[q][j] = W[q][j] / sum_k W[q][k]` (or uniform if isolated).
+3. Initialize `rank_L = [1/n_logical] * n_logical`; iterate `rank_L = d * P_L^T @ rank_L + (1-d)/n` for T=20 steps, damping `d=0.85`.
+4. Similarly compute PageRank on the hardware adjacency (uniform weights): `rank_H`.
+5. Sort logical by `rank_L` descending → `ord_L`; sort physical by `rank_H` descending → `ord_P`.
+6. Assign `mapping_dict[ord_L[i]] = ord_P[i]`.
+COLLISION_PREVENTION: Rank-sorted bijection on disjoint index sets guarantees strict 1-to-1 assignment. Both `ord_L` and `ord_P` are complete permutations.
+WHY_NOVEL: PageRank captures the recursive "influence of influence" — a qubit important to important qubits gets a high score. Applied to the interaction graph, this extends beyond degree centrality by considering multi-hop interaction chains, which correspond directly to multi-SWAP routing chains. Matching this to hardware PageRank is a novel dual-graph diffusion approach.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+
+---
+
+IDEA_NAME: K-Core Decomposition Hierarchical Centrality Matching (KCDHCM)
+DESCRIPTION: Computes the k-core decomposition of both the logical interaction graph and the hardware graph. The k-core number of a node measures the maximum subgraph density it belongs to — a fundamentally richer centrality notion than degree alone. Matching logical qubits to physical qubits by their respective k-core ranks ensures that the densest interaction clusters land in the densest hardware regions.
+ALGORITHMIC_APPROACH:
+1. Build interaction adjacency (unweighted or weighted-threshold) from `self.access`.
+2. Compute k-core numbers for logical qubits via iterative degree-peeling: while a qubit has fewer than k neighbors in the remaining graph, remove it; repeat for k=1,2,... Record the maximum k at removal time as `core_L[q]`.
+3. Compute k-core numbers for physical qubits in hardware via the same peeling algorithm: `core_H[p]`.
+4. Sort logical by `core_L[q]` descending, break ties by weighted degree descending → `ord_L`.
+5. Sort physical by `core_H[p]` descending, break ties by hardware degree descending → `ord_P`.
+6. Assign `mapping_dict[ord_L[i]] = ord_P[i]`.
+COLLISION_PREVENTION: Rank-based bijection on complete sorted index arrays. The tie-breaking ensures a total order; each qubit appears at exactly one rank position.
+WHY_NOVEL: K-core decomposition has never been applied to initial qubit placement. Unlike degree centrality (one-hop neighbor count), k-core captures the recursive density structure of the graph, making it sensitive to dense interaction cliques that are the most demanding to route. Matching dual k-core ranks cross-maps interaction cluster hierarchy to hardware cluster hierarchy.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+---
+
+IDEA_NAME: Interaction-Profile Hardware-Proximity Cosine Similarity Greedy (IPHPCS)
+DESCRIPTION: Represents each logical qubit as an "interaction frequency vector" (how often it interacts with every other logical qubit) and each physical qubit as a "hardware proximity vector" (inverse BFS distance to every other physical qubit). A cosine similarity matrix between these cross-domain vectors drives a greedy bijective assignment: the most "structurally aligned" (logical, physical) pairs are matched first.
+ALGORITHMIC_APPROACH:
+1. Build `freq_vec[q]`: a vector of size `num_qubits`, `freq_vec[q][j] = count of 2-qubit gates between q and j`.
+2. Build `prox_vec[p]`: a vector of size `num_qubits`, `prox_vec[p][j] = 1.0 / (distance_matrix[p][j] + 1)`.
+3. Compute cosine similarity: `S[q][p] = dot(freq_vec[q], prox_vec[p]) / (||freq_vec[q]|| * ||prox_vec[p]|| + 1e-12)`.
+4. Greedy bijective matching: find `(q*, p*) = argmax S[q][p]` over all unmatched pairs; assign `q* → p*`; mark both used; repeat until all logical qubits are assigned.
+COLLISION_PREVENTION: A `used_logical` and `used_physical` set tracks assigned indices. Each iteration removes one logical and one physical index from contention. Since |logical qubits| ≤ |physical qubits|, the greedy loop always terminates with a valid partial or full bijection. Remaining physical qubits are irrelevant.
+WHY_NOVEL: Cosine similarity between an interaction-frequency vector and a hardware-proximity vector is a cross-domain alignment technique not present in any quantum compilation paper. It operationalizes the intuition that a qubit's "interaction fingerprint" should match the "proximity fingerprint" of the physical location it occupies.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+
+---
+
+IDEA_NAME: Lifetime-Concurrency Centrality Weighted Placement (LCCWP)
+DESCRIPTION: Analyzes each logical qubit's temporal activity profile: its circuit lifetime span (first to last gate) and peak concurrency (maximum number of simultaneously active qubits in a sliding window). Qubits with long lifetimes and high concurrency demand central, well-connected physical locations to minimize routing conflicts. This temporal-structural signal is used to drive a centrality-matched bijective assignment.
+ALGORITHMIC_APPROACH:
+1. For each logical qubit `q`: `first_use[q] = min(gate_id for gate_id, qubits in self.access.items() if q in qubits)`, `last_use[q] = max(...)`.
+2. `lifetime[q] = last_use[q] - first_use[q]`.
+3. For each gate position `t`, count active logical qubits (those with `first_use[q] <= t <= last_use[q]`); `peak_conc[q] = max over t in [first_use[q], last_use[q]] of active_count[t]`.
+4. Compute `interaction_count[q]` = number of 2-qubit gates involving `q`.
+5. `score[q] = interaction_count[q] * (1 + peak_conc[q] / num_qubits)`.
+6. For each physical qubit: `centrality[p] = (num_qubits - 1) / sum_j distance_matrix[p][j]`.
+7. Sort logical by `score[q]` descending → `ord_L`; sort physical by `centrality[p]` descending → `ord_P`; assign bijectively.
+COLLISION_PREVENTION: Rank-indexed bijection on complete sorted arrays of disjoint index sets guarantees strict 1-to-1 mapping.
+WHY_NOVEL: No existing placement method considers temporal concurrency of qubit activity. This captures the insight that a qubit active when many others are also active creates routing conflicts, and needs hardware centrality to resolve them efficiently. Lifetime span combined with concurrency is a novel temporal-structural signal for placement.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+
+---
+
+IDEA_NAME: Normalized Cut Recursive Bipartition Topology Matching (NCRBM)
+DESCRIPTION: Recursively bipartitions both the logical interaction graph and the hardware graph using an approximate normalized cut (Kernighan-Lin style greedy bisection). At each recursive level, the left partition of logical qubits is matched to the left partition of physical qubits, and right to right. This hierarchical structure-preserving matching runs until singleton groups remain, yielding a complete bijection. The key insight is that normalized cut preserves intra-cluster interaction density while separating inter-cluster interactions — exactly what a good placement should do.
+ALGORITHMIC_APPROACH:
+1. Represent logical qubits as nodes in a weighted graph `G_L` (interaction frequencies) and physical qubits in `G_H` (hardware adjacency, unit weights).
+2. `bisect(G)`: Compute degree of each node within the subgraph; greedily move nodes to minimize the normalized cut criterion `|cut(A,B)| / (vol(A) * vol(B))` via Kernighan-Lin local swaps (5–10 passes).
+3. Recursively call `match(L_left, H_left)` and `match(L_right, H_right)` if `|L_left| == |H_left|`; else balance sizes by degree before matching.
+4. Base case: singleton sets → `mapping_dict[l] = h`.
+COLLISION_PREVENTION: Each recursive call operates on strictly disjoint subsets of logical and physical indices (no index can appear in both left and right at any level). Base case assignments are final and unique. The recursion tree covers all indices exactly once.
+WHY_NOVEL: Recursive dual-graph bipartition matching has no precedent in quantum initial placement. It is fundamentally different from spectral ranking (which produces a global 1D order) and from subgraph isomorphism (exponential). It exploits hierarchical community structure in both the circuit and hardware simultaneously.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+IDEA_NAME: Gate-Sequence Sliding Window Adjacent-Pair Greedy Seeding (GSWAPS)
+DESCRIPTION: Examines the first K 2-qubit gates in circuit order (the "seeding window") and greedily places each interacting pair of logical qubits on an adjacent pair of physical qubits, prioritizing physical adjacency. This ensures the first K critical interactions are already "hardware-executable" before routing begins, eliminating early SWAP costs entirely for those gates. Remaining qubits fill by hardware degree.
+ALGORITHMIC_APPROACH:
+1. Extract 2-qubit gates from `self.access` in ascending gate-ID order; take the first `K = min(num_qubits, len(2q_gates))` such gates.
+2. For each gate `(q1, q2)` in order:
+   - If both `q1`, `q2` unplaced: find the pair of adjacent unoccupied physical qubits `(p1, p2)` (i.e., `(p1,p2) in backend_connections`) that minimizes `sum_{placed q} freq[(q1,q)] * dist[p1][mapping[q]] + freq[(q2,q)] * dist[p2][mapping[q]]`; assign `q1→p1`, `q2→p2`.
+   - If only `q1` placed: assign `q2` to the best unoccupied physical neighbor of `mapping[q1]`.
+   - If both placed: skip.
+3. Fill remaining unplaced logical qubits in weighted-degree descending order to remaining physical qubits sorted by hardware degree descending.
+COLLISION_PREVENTION: Tracked via `placed_physical` set; each assignment checks availability before insertion. Fill step uses complement of `placed_physical`, ensuring no physical qubit is used twice.
+WHY_NOVEL: Directly targets the zero-SWAP goal for the first K circuit operations — a greedy "pre-elimination" strategy for early routing overhead. Unlike SABRE (which simulates routing) or spectral methods (topology-matching), this operates at the gate-sequence level and explicitly enforces hardware adjacency as the primary placement constraint for the most time-critical gates.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+---
+
+IDEA_NAME: Effective Resistance Centrality Rank Matching (ERCM)
+DESCRIPTION: Computes the effective resistance (electrical resistance) between all pairs of nodes in the logical interaction graph using the Moore-Penrose pseudoinverse of the weighted Laplacian. The mean effective resistance of a node (Kirchhoff index contribution) captures its centrality in a way that accounts for all paths simultaneously — not just shortest paths. This is matched against hardware mean BFS distance centrality via sorted bijection.
+ALGORITHMIC_APPROACH:
+1. Build weighted Laplacian `L_L` from interaction frequencies: `L[q][q] = sum_j W[q][j]`, `L[q][j] = -W[q][j]`.
+2. Compute pseudoinverse `L_plus = numpy.linalg.pinv(L_L)`.
+3. Effective resistance: `R[i][j] = L_plus[i][i] + L_plus[j][j] - 2*L_plus[i][j]`.
+4. Mean effective resistance per logical qubit: `MER[q] = mean_j R[q][j]` (low MER = central).
+5. For hardware: `MBD[p] = mean_j distance_matrix[p][j]` (low MBD = central).
+6. Sort logical by `MER[q]` ascending → `ord_L`; sort physical by `MBD[p]` ascending → `ord_P`; assign bijectively.
+COLLISION_PREVENTION: Rank-sorted bijection on complete sorted arrays guarantees strict 1-to-1; both arrays are complete permutations of their index sets.
+WHY_NOVEL: Effective resistance (Kirchhoff distance) accounts for all paths in the graph simultaneously — it decreases when there are many parallel paths between nodes, capturing routing flexibility. Applying this to the interaction graph gives a placement criterion that inherently penalizes bottleneck qubits. No existing quantum placement method uses the pseudoinverse-based effective resistance.
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+IDEA_NAME: Betweenness Centrality Dual-Graph Bridge Matching (BCDBM)
+DESCRIPTION: Computes the betweenness centrality of each logical qubit in the interaction graph (how many shortest paths between other qubit pairs pass through it). Qubits with high betweenness are "bridge" nodes whose placement critically affects routing paths for all surrounding interactions. Matches these bridge qubits to physical qubits with high betweenness in the hardware graph — the physical "crossroads" that can serve multiple routing paths simultaneously.
+ALGORITHMIC_APPROACH:
+1. Build unweighted interaction graph adjacency from `self.access`.
+2. Compute betweenness centrality `BC_L[q]` via BFS from each node (Brandes algorithm): `O(n * (n + m))`.
+3. Compute betweenness centrality `BC_H[p]` on the hardware graph (same algorithm on `self.backend`).
+4. Sort logical by `BC_L[q]` descending → `ord_L`; sort physical by `BC_H[p]` descending → `ord_P`.
+5. Assign `mapping_dict[ord_L[i]] = ord_P[i]`.
+COLLISION_PREVENTION: Complete sorted permutations of disjoint index sets; rank-bijection is by construction 1-to-1.
+WHY_NOVEL: While betweenness centrality is well-known in graph theory, its dual application — computing betweenness on BOTH the logical interaction graph and the hardware graph and rank-matching the results — has not been applied to quantum initial placement. It captures the "bridge qubit" phenomenon: logical qubits whose removal would fragment the interaction graph need the best physical crossroad locations.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+IDEA_NAME: Multi-Objective Scalarized Neighbor-Coverage Greedy (MOSNCG)
+DESCRIPTION: Defines a two-objective scoring for each (logical qubit, physical qubit) candidate assignment: (1) degree alignment — how well the hardware degree of the physical qubit matches the interaction degree of the logical qubit; (2) neighbor coverage — for already-placed logical neighbors, how short are the distances to this physical candidate. Scalarizes both with weight α=0.5 and performs greedy bijective assignment. This combines global structural alignment with local neighbor-coverage in a single greedy pass.
+ALGORITHMIC_APPROACH:
+1. Build `interaction_freq[(q1,q2)]` and `WD[q] = sum_j freq[(q,j)]` from `self.access`.
+2. Compute `hw_deg[p] = len(self.backend[p])` for each physical qubit.
+3. Greedy loop (assign logical qubits in descending WD order):
+   - For each unplaced `q`, for each unoccupied `p`:
+     - `obj1 = |WD[q]/max_WD - hw_deg[p]/max_hw_deg|` (normalized degree mismatch, lower is better).
+     - `obj2 = sum_{placed j: freq[(q,j)]>0} freq[(q,j)] * distance_matrix[p][mapping[j]]` (neighbor distance, lower is better).
+     - `score[q][p] = 0.5 * obj1 + 0.5 * obj2 / (max_freq + 1)` (normalized).
+   - Assign `q → argmin_p score[q][p]`.
+COLLISION_PREVENTION: `occupied_physical` set tracks all assigned physical qubits; the argmin search is restricted to unoccupied candidates. Each assignment adds one physical qubit to the occupied set; the greedy order processes each logical qubit exactly once.
+WHY_NOVEL: Scalarizing degree-alignment and placed-neighbor coverage into a single greedy criterion is novel. It avoids the pure global matching of spectral methods and the pure local greediness of BFS expansion by combining both signals at each assignment step. The normalization ensures neither objective dominates regardless of circuit scale.
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+
+---
+
+IDEA_NAME: Weighted Interaction Graph Random-Walk Hitting-Time Matching (WIRWHTM)
+DESCRIPTION: Models the logical interaction graph as a weighted Markov chain and computes the mean first-passage time (hitting time) from each logical qubit to all others. Qubits with low mean hitting time are "fast-access" hubs in the interaction network. Simultaneously computes mean hitting times on the hardware graph's Markov chain (uniform weights). Matches both by rank: low-hitting-time logical → low-hitting-time physical.
+ALGORITHMIC_APPROACH:
+1. Build transition matrix `T_L[q][j] = W[q][j] / sum_k W[q][k]` from interaction frequencies (uniform if isolated).
+2. Compute mean hitting times via the fundamental matrix: `Z = (I - T_L + Π)^{-1}` where `Π[i][j] = stationary[j]`; `H[i][j] = (Z[j][j] - Z[i][j]) / stationary[j]`; mean hitting time `MHT_L[q] = mean_j H[q][j]`.
+3. For hardware: build `T_H[p][j] = 1/hw_deg[p]` if `j in backend[p]` else 0; compute `MHT_H[p]` analogously.
+4. Sort logical by `MHT_L[q]` ascending → `ord_L`; sort physical by `MHT_H[p]` ascending → `ord_P`; bijective assignment.
+COLLISION_PREVENTION: Rank-sorted bijection on complete permutations. For isolated logical qubits (zero interaction degree), assign them last, to remaining physical qubits sorted by hardware degree ascending.
+WHY_NOVEL: Mean hitting time is a richer graph-theoretic centrality than shortest-path distance or betweenness — it captures stochastic accessibility over all random walk trajectories. Applying it to the interaction graph (as a weighted Markov chain) and cross-matching with hardware hitting times is a novel application of stochastic graph theory to quantum placement.
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+IDEA_NAME: Simulated Annealing Pre-Placement with Interaction-Distance Cost (SAPPID)
+DESCRIPTION: Defines a compact, interaction-frequency-weighted distance cost function over the mapping, then optimizes it via simulated annealing using only swap perturbations (which preserve bijectivity by construction). The cost function `C = sum_{(q1,q2): freq>0} freq(q1,q2) * distance_matrix[mapping[q1]][mapping[q2]]` is a direct proxy for total routing overhead. The SA search starts from a degree-sorted initial mapping and runs a bounded number of iterations for polynomial runtime.
+ALGORITHMIC_APPROACH:
+1. Build `interaction_freq[(q1,q2)]` from `self.access`; build initial mapping via degree-sorted bijection (WD sort on logical, hardware-degree sort on physical).
+2. Compute initial cost `C` over all interacting pairs.
+3. SA loop for `N = min(5000, 20 * num_qubits^2)` iterations:
+   - Sample random logical qubit swap `(q_a, q_b)`.
+   - Compute `ΔC`: only recompute costs involving `q_a` or `q_b` (O(max_degree) per swap).
+   - Accept if `ΔC < 0` or with probability `exp(-ΔC / T)`.
+   - Temperature schedule: `T = T_0 * (0.98)^{iteration}`, `T_0 = max_freq * num_qubits`.
+4. Return the best mapping seen during the search.
+COLLISION_PREVENTION: Only swap perturbations are applied: swapping `mapping[q_a]` and `mapping[q_b]` preserves the bijection invariant since it exchanges two existing assignments without creating duplicates. `reverse_mapping_dict` is updated atomically with each accepted swap.
+WHY_NOVEL: While SA has been applied to placement in classical EDA, its application within the Qlosure framework using the exact interaction-frequency × hardware-distance cost function — with O(degree) incremental updates and a bounded iteration budget tuned to hardware size — is novel in quantum compilation. The incremental ΔC computation makes it feasible at polynomial cost with sub-quadratic per-iteration complexity.
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.8
+
+---
+
+## Summary Table
+
+| # | IDEA_NAME | N | P | E | F | AVG |
+|---|-----------|---|---|---|---|-----|
+| 1 | Fiedler-Vector Spectral Rank Alignment | 8 | 7 | 6 | 10 | 7.8 |
+| 2 | Interaction-Frequency Weighted BFS Anchor Placement | 7 | 8 | 9 | 10 | **8.5** |
+| 3 | Temporal-Decay Front-Gate Interaction Anchoring | 8 | 8 | 8 | 10 | **8.5** |
+| 4 | Shannon Entropy-Directed Hardware Centrality Assignment | 9 | 7 | 9 | 10 | **8.8** |
+| 5 | PageRank Diffusion Interaction-to-Hardware Matching | 8 | 7 | 8 | 10 | **8.3** |
+| 6 | K-Core Decomposition Hierarchical Centrality Matching | 8 | 7 | 9 | 10 | **8.5** |
+| 7 | Interaction-Profile Hardware-Proximity Cosine Similarity Greedy | 8 | 7 | 7 | 10 | 8.0 |
+| 8 | Lifetime-Concurrency Centrality Weighted Placement | 8 | 7 | 8 | 10 | **8.3** |
+| 9 | Normalized Cut Recursive Bipartition Topology Matching | 8 | 7 | 6 | 10 | 7.8 |
+| 10 | Gate-Sequence Sliding Window Adjacent-Pair Greedy Seeding | 7 | 8 | 9 | 10 | **8.5** |
+| 11 | Effective Resistance Centrality Rank Matching | 8 | 7 | 6 | 10 | 7.8 |
+| 12 | Betweenness Centrality Dual-Graph Bridge Matching | 7 | 7 | 7 | 10 | 7.8 |
+| 13 | Multi-Objective Scalarized Neighbor-Coverage Greedy | 7 | 7 | 8 | 10 | 8.0 |
+| 14 | Weighted Interaction Graph Random-Walk Hitting-Time Matching | 9 | 6 | 6 | 10 | 7.8 |
+| 15 | Simulated Annealing Pre-Placement with Interaction-Distance Cost | 6 | 8 | 7 | 10 | 7.8 |
+
+> **No ideas eliminated**: all 15 achieve F=10 (strict bijection guaranteed). All F≥8 threshold passed.
+
+**Top candidates by AVERAGE_SCORE (≥8.3)**:
+1. **SEDHCA** (8.8) — Shannon entropy + closeness centrality; pure Python, highly novel
+2. **IFWBAP / TDFGIA / KCDHCM / GSWAPS** (8.5) — high P and E; pure Python
+3. **PDIHM / LCCWP** (8.3) — PageRank diffusion and lifetime-concurrency analysis

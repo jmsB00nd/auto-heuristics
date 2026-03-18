@@ -19,6 +19,11 @@ class CodeEvaluator:
         self.edges = load_backend_edges(self.config.backend)
         self.circuit_files = list(Path(self.config.benchmark_dir).glob("*.json"))
 
+    @property
+    def target_func_name(self) -> str:
+        """Dynamically return the target function name based on the problem type."""
+        return "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
+
     def evaluate(self, heuristic_code_str: str) -> Dict[str, Any]:
         local_scope = {}
         try:
@@ -28,7 +33,7 @@ class CodeEvaluator:
 
         heuristic_func = self._extract_function(local_scope)
         if not heuristic_func:
-            return {"mean_swaps": float('inf'), "error": "Function 'qlosure_poly_heuristic' not found."}
+            return {"mean_swaps": float('inf'), "error": f"Function '{self.target_func_name}' not found."}
 
         if not self.circuit_files:
             return {"error": f"No .json files found in {self.config.benchmark_dir}"}
@@ -36,20 +41,23 @@ class CodeEvaluator:
         return self._run_benchmarks(heuristic_func)
 
     def _extract_function(self, local_scope: dict) -> Optional[callable]:
-        func = local_scope.get('qlosure_poly_heuristic')
+        func_name = self.target_func_name
+        func = local_scope.get(func_name)
         if not func:
             for obj in local_scope.values():
-                if isinstance(obj, type) and hasattr(obj, 'qlosure_poly_heuristic'):
-                    return getattr(obj, 'qlosure_poly_heuristic')
+                if isinstance(obj, type) and hasattr(obj, func_name):
+                    return getattr(obj, func_name)
         return func
 
     def _run_benchmarks(self, heuristic_func: callable) -> Dict[str, Any]:
         results = {"swaps": [], "depth": [], "runtimes": [], "failures": []}
 
-        for circuit_path in tqdm(self.circuit_files, desc="Routing progress"):
+        for circuit_path in tqdm(self.circuit_files, desc="Run progress"):
             data = json_file_to_isl(str(circuit_path))
             router = Qlosure(self.edges, data)
-            router.qlosure_poly_heuristic = types.MethodType(heuristic_func, router)
+            
+            func_name = self.target_func_name
+            setattr(router, func_name, types.MethodType(heuristic_func, router))
 
             res_container, exc_container = {}, {}
 
@@ -70,7 +78,6 @@ class CodeEvaluator:
 
             if 'error' in exc_container:
                 results["failures"].append({"circuit": circuit_path.name, "error": str(exc_container['error'])})
-                # Abort early if the heuristic is clearly broken
                 if len(results["failures"]) >= 3:
                     break 
             else:
@@ -90,7 +97,6 @@ class CodeEvaluator:
                 "failures": results["failures"]
             }
 
-        # If it reaches here, it truly succeeded on all circuits
         return {
             "mean_swaps": np.mean(results["swaps"]) if results["swaps"] else float('inf'),
             "mean_depth": np.mean(results["depth"]) if results["depth"] else 0,

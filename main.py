@@ -7,7 +7,7 @@ config = OrchestratorConfig(
     backend="ibm_sherbrooke",
     benchmark_dir="benchmarks/qasmbench-large/",
     prompts_dir="/home/jmsb00nd/Documents/auto-heuristics/prompts",
-    problem="routing"
+    problem="mapping"
 )
 
 orchestrator = OrchestratorV2(config)

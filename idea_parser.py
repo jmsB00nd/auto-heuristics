@@ -5,20 +5,20 @@ class IdeaParser:
     """Extracts structured ideas and code blocks from raw LLM responses."""
     
     @staticmethod
-    def extract_code(response_text: str) -> Optional[str]:
+    def extract_code(response_text: str, target_func: str = "qlosure_poly_heuristic") -> Optional[str]:
         patterns = [
             r"```python\s*\n(.*?)```",       
             r"```python(.*?)```",             
             r"```py\s*\n(.*?)```",            
-            r"```\s*\n(def qlosure_poly_heuristic.*?)```",  
-            r"(def qlosure_poly_heuristic\(self,\s*swap_gate\):.*?)(?:```|\Z)",  
+            rf"```\s*\n(def {target_func}.*?)```",  
+            rf"(def {target_func}\(self.*?\):.*?)(?:```|\Z)",  
         ]
         for pattern in patterns:
             code_match = re.search(pattern, response_text, re.DOTALL)
             if code_match:
                 candidate = code_match.group(1).strip()
-                if 'qlosure_poly_heuristic' in candidate or 'def ' in candidate:
-                    return IdeaParser._sanitize_code(candidate)
+                if target_func in candidate or 'def ' in candidate:
+                    return IdeaParser._sanitize_code(candidate, target_func)
         return None
 
     @staticmethod
@@ -39,14 +39,14 @@ class IdeaParser:
         return kept, eliminated
 
     @staticmethod
-    def _sanitize_code(code: str) -> str:
+    def _sanitize_code(code: str, target_func: str = "qlosure_poly_heuristic") -> str:
         """Strips out wrapper classes and returns the raw function."""
         lines = code.split('\n')
         func_start, func_indent = None, 0
         
         for i, line in enumerate(lines):
             stripped = line.lstrip()
-            if stripped.startswith('def qlosure_poly_heuristic'):
+            if stripped.startswith(f'def {target_func}'):
                 func_start = i
                 func_indent = len(line) - len(stripped)
                 break

@@ -1,0 +1,34 @@
+You are a Quantum Computing Research Scientist performing a comprehensive and systematic literature review.
+
+Your objective is to conduct an in-depth review of algorithms and heuristics for Quantum Circuit Initial Mapping (also known as Initial Placement or Qubit Allocation). 
+
+SECTION 1: COMPREHENSIVE LITERATURE REVIEW
+Identify and examine all significant papers and methodologies addressing initial mapping, including:
+- Graph matching and Subgraph Isomorphism based methods
+- Constraint Programming, SAT, and ILP formulations
+- Heuristic and Greedy approaches (e.g., DAG centrality, noisy-aware placement)
+- Spectral clustering and partitioning techniques
+- Any additional relevant approaches reported in the literature
+
+SECTION 2: DETAILED PAPER SUMMARIES
+For each major paper or approach, provide:
+- Problem Addressed: The specific challenge targeted
+- Key Contribution: The primary innovation introduced
+- Approach/Method: The algorithmic framework used
+- Heuristic Focus: How they weigh topology vs. circuit structure
+
+SECTION 3: COMPARATIVE ANALYSIS
+Provide a detailed comparison across approaches:
+- Scalability vs. Optimality trade-offs
+- Static vs. Lookahead-driven mapping
+
+SECTION 4: OPEN PROBLEMS AND RESEARCH GAPS
+Identify and synthesize explicitly open problems noted in the literature and opportunities for novel O(N) or O(N log N) heuristic formulations.
+
+RESPOND USING THE FOLLOWING STRUCTURE:
+LITERATURE_OVERVIEW: [...]
+MAJOR_APPROACHES: [...]
+COMPARATIVE_ANALYSIS: [...]
+ALGORITHMIC_INSIGHTS: [...]
+OPEN_PROBLEMS: [...]
+NOVEL_DIRECTIONS: [...]

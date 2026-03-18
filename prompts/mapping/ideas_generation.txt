@@ -1,0 +1,26 @@
+Your TASK: Generate, Evaluate, Score, Filter, and Report Novel Ideas for Quantum Circuit Initial Mapping (Placement) Algorithms.
+
+PART 1: GENERATE DIVERSE NOVEL IDEAS
+Propose at least 15 fundamentally novel algorithmic concepts for initial mapping. 
+
+PART 2: EVALUATE, SCORE, AND FILTER ALL IDEAS
+Score using four conservative metrics (1–10 scale):
+- Novelty (N): 10 = revolutionary, 1 = incremental  
+- Probability of Outperforming SOTA (P): 10 = very likely, 1 = unlikely  
+- Effort (E): 10 = easy to implement in Python, 1 = requires extreme optimization/external SAT solvers 
+- Feasibility/Validity (F): 10 = perfectly guarantees 1-to-1 mapping, 1 = high risk of mapping collisions.
+
+Compute: AVERAGE_SCORE = (N + P + E + F) / 4  
+Round to one decimal place. Eliminate ideas that score poorly on Feasibility (F < 8).
+
+REQUIRED OUTPUT FORMAT (one block per idea, separated by ---):
+IDEA_NAME: [Short descriptive name]  
+DESCRIPTION: [Explanation of the core mechanism]  
+ALGORITHMIC_APPROACH: [Key steps / heuristics used]  
+COLLISION_PREVENTION: [How it guarantees a valid 1-to-1 physical-logical assignment]
+WHY_NOVEL: [Explanation of what makes it fundamentally different]  
+NOVELTY_SCORE: [1–10]  
+PROBABILITY_SCORE: [1–10]  
+EFFORT_SCORE: [1–10]
+FEASIBILITY_SCORE: [1-10]
+AVERAGE_SCORE: [1-10]

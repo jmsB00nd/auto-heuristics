@@ -1,3 +1,5 @@
+Reference code to see the variables can be accessed and how the initial mapping fit within the code
+
 import random
 import copy
 from time import time
