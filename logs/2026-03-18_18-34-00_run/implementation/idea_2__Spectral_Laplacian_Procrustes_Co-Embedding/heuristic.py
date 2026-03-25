@@ -1,0 +1,191 @@
+def init_mapping(self):
+    """
+    Spectral Laplacian Procrustes Co-Embedding (SLPCE):
+
+    Computes the normalized graph Laplacian of both the circuit interaction
+    graph and the hardware graph, extracts the top-k Fiedler eigenvectors
+    (k = ceil(log2(n_logical))), and uses the orthogonal Procrustes problem
+    to find the rotation R that best aligns the circuit spectral embedding
+    into the hardware spectral space. Each logical qubit is then assigned to
+    the nearest physical qubit under the aligned embedding, with collision
+    resolution via greedy augmenting on distance.
+    """
+    import numpy as np
+    from scipy.linalg import eigh
+    from collections import defaultdict
+
+    # ------------------------------------------------------------------ #
+    # Step 1 – Build weighted circuit interaction graph                   #
+    # W_c[i][j] = total number of 2-qubit gates between qubits i and j   #
+    # ------------------------------------------------------------------ #
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            key = (min(q1, q2), max(q1, q2))
+            interaction_weight[key] += 1.0
+
+    logical_qubits  = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_logical  = len(logical_qubits)
+    n_physical = len(physical_qubits)
+
+    # Trivial fallback: no logical qubits
+    if n_logical == 0:
+        self.mapping_dict         = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    lq_idx = {lq: i for i, lq in enumerate(logical_qubits)}
+    ph_idx = {ph: i for i, ph in enumerate(physical_qubits)}
+
+    # k = ceil(log2(n_logical)), clipped to valid eigenvector range
+    k_raw = max(1, math.ceil(math.log2(max(n_logical, 2))))
+    k = min(k_raw, n_logical - 1, n_physical - 1)
+
+    # Degenerate fallback when spectral embedding is impossible
+    if k < 1 or not interaction_weight:
+        hw_deg_sorted = sorted(physical_qubits, key=lambda p: len(self.backend[p]), reverse=True)
+        sorted_logical = sorted(
+            logical_qubits,
+            key=lambda q: sum(interaction_weight.get((min(q, o), max(q, o)), 0)
+                              for o in logical_qubits if o != q),
+            reverse=True
+        )
+        lq_to_phys = {lq: hw_deg_sorted[i] for i, lq in enumerate(sorted_logical)}
+
+        mapping_dict         = list(range(self.num_qubits))
+        reverse_mapping_dict = list(range(self.num_qubits))
+        for lq, target_phys in lq_to_phys.items():
+            current_phys = mapping_dict[lq]
+            if current_phys == target_phys:
+                continue
+            displaced_lq = reverse_mapping_dict[target_phys]
+            mapping_dict[lq]                   = target_phys
+            mapping_dict[displaced_lq]         = current_phys
+            reverse_mapping_dict[target_phys]  = lq
+            reverse_mapping_dict[current_phys] = displaced_lq
+
+        self.mapping_dict         = mapping_dict
+        self.reverse_mapping_dict = reverse_mapping_dict
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 2 – Circuit normalized Laplacian eigenvectors                  #
+    # L_norm_c = D_c^{-1/2} L_c D_c^{-1/2},  L_c = D_c - W_c           #
+    # Extract eigenvectors at indices [1, k] (skip trivial 0th)          #
+    # ------------------------------------------------------------------ #
+    W_c = np.zeros((n_logical, n_logical))
+    for (q1, q2), w in interaction_weight.items():
+        i, j = lq_idx[q1], lq_idx[q2]
+        W_c[i, j] = w
+        W_c[j, i] = w
+
+    deg_c = W_c.sum(axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        d_inv_sqrt_c = np.where(deg_c > 0, 1.0 / np.sqrt(deg_c), 0.0)
+    D_inv_sqrt_c = np.diag(d_inv_sqrt_c)
+    L_norm_c = np.eye(n_logical) - D_inv_sqrt_c @ W_c @ D_inv_sqrt_c
+
+    hi_c = min(k, n_logical - 1)
+    _, V_c = eigh(L_norm_c, subset_by_index=[1, hi_c])
+    # V_c: (n_logical, hi_c)
+
+    # ------------------------------------------------------------------ #
+    # Step 3 – Hardware normalized Laplacian eigenvectors                 #
+    # ------------------------------------------------------------------ #
+    W_h = np.zeros((n_physical, n_physical))
+    for ph in physical_qubits:
+        i = ph_idx[ph]
+        for nb in self.backend[ph]:
+            if nb in ph_idx:
+                W_h[i, ph_idx[nb]] = 1.0
+
+    deg_h = W_h.sum(axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        d_inv_sqrt_h = np.where(deg_h > 0, 1.0 / np.sqrt(deg_h), 0.0)
+    D_inv_sqrt_h = np.diag(d_inv_sqrt_h)
+    L_norm_h = np.eye(n_physical) - D_inv_sqrt_h @ W_h @ D_inv_sqrt_h
+
+    hi_h = min(k, n_physical - 1)
+    _, V_h = eigh(L_norm_h, subset_by_index=[1, hi_h])
+    # V_h: (n_physical, hi_h)
+
+    # Reconcile column counts
+    k_use = min(V_c.shape[1], V_h.shape[1])
+    V_c = V_c[:, :k_use]
+    V_h = V_h[:, :k_use]
+
+    # ------------------------------------------------------------------ #
+    # Step 4 – Subsample V_h to n_logical rows                           #
+    # Select the n_logical highest-degree physical qubits                #
+    # ------------------------------------------------------------------ #
+    hw_deg_sorted = sorted(physical_qubits, key=lambda p: len(self.backend[p]), reverse=True)
+    top_indices   = [ph_idx[ph] for ph in hw_deg_sorted[:n_logical]]
+    V_h_sub       = V_h[top_indices, :]   # (n_logical, k_use)
+
+    # ------------------------------------------------------------------ #
+    # Step 5 – Solve orthogonal Procrustes: R = argmin ||V_c - V_h_sub R||_F
+    # SVD(V_h_sub^T V_c) = U S V^T  =>  R = U V^T                       #
+    # ------------------------------------------------------------------ #
+    M        = V_h_sub.T @ V_c             # (k_use, k_use)
+    U, _S, Vt = np.linalg.svd(M)
+    R        = U @ Vt                      # orthogonal rotation
+
+    # ------------------------------------------------------------------ #
+    # Step 6 – Align full hardware embedding                              #
+    # dist[i, j] = ||V_c[i] - (V_h @ R)[j]||^2                          #
+    # ------------------------------------------------------------------ #
+    V_h_aligned = V_h @ R                  # (n_physical, k_use)
+    diffs       = V_c[:, np.newaxis, :] - V_h_aligned[np.newaxis, :, :]
+    dist_mat    = (diffs ** 2).sum(axis=2) # (n_logical, n_physical)
+
+    # ------------------------------------------------------------------ #
+    # Step 7 – Greedy augmenting by increasing distance                   #
+    # ------------------------------------------------------------------ #
+    lq_indices, ph_indices = np.unravel_index(
+        np.argsort(dist_mat, axis=None), dist_mat.shape
+    )
+
+    lq_assigned = {}
+    ph_used     = set()
+
+    for lq_i, ph_j in zip(lq_indices, ph_indices):
+        lq_i, ph_j = int(lq_i), int(ph_j)
+        if lq_i not in lq_assigned and ph_j not in ph_used:
+            lq_assigned[lq_i] = ph_j
+            ph_used.add(ph_j)
+        if len(lq_assigned) == n_logical:
+            break
+
+    # ------------------------------------------------------------------ #
+    # Step 8 – Build strict 1-to-1 bijection over all num_qubits indices #
+    # ------------------------------------------------------------------ #
+    mapping_dict         = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq_i, ph_j in lq_assigned.items():
+        lq           = logical_qubits[lq_i]
+        target_phys  = physical_qubits[ph_j]
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq]                   = target_phys
+        mapping_dict[displaced_lq]         = current_phys
+        reverse_mapping_dict[target_phys]  = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

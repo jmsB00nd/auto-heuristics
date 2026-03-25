@@ -1,0 +1,31 @@
+{
+  "Fused Spectral-Seed + Routing-Local-Search (FSSRLS)": {
+    "mean_swaps": 401.6190476190476,
+    "mean_depth": 542.9047619047619,
+    "error": null,
+    "failures": []
+  },
+  "Spectral Fiedler Qubit Alignment (SFQA)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Critical Path Hardware Spine Alignment (CPHSA)": {
+    "mean_swaps": 327.7142857142857,
+    "mean_depth": 514.3333333333334,
+    "error": null,
+    "failures": []
+  },
+  "PageRank Dual Rank Matching (PRDM)": {
+    "mean_swaps": 766.0952380952381,
+    "mean_depth": 642.6666666666666,
+    "error": null,
+    "failures": []
+  },
+  "Token Sliding Conflict Resolution (TSCR)": {
+    "mean_swaps": 322.14285714285717,
+    "mean_depth": 516.5714285714286,
+    "error": null,
+    "failures": []
+  }
+}

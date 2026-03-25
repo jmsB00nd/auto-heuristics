@@ -12,13 +12,13 @@ class OrchestratorConfig:
     use_conversation_mode: bool = True
     send_context_api: bool = False
     show_token_counter: bool = True
-    target_top_ideas: int = 5
+    target_top_ideas: int = 10
     min_score_threshold: int = 6
     run_stage1_literature_review: bool = False
     timeout_seconds: int = 200
-    top_ideas_to_implement: int = 5
+    top_ideas_to_implement: int = 10
     run_stage4_iterative_refinement: bool = True
-    refinement_rounds: int = 3
+    refinement_rounds: int = 10
     
     # Generated at runtime
     current_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))

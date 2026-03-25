@@ -1,0 +1,267 @@
+TASK: Iterative Refinement.
+CURRENT BEST HEURISTIC (Refined_Idea_Round_1)
+Score (Mean Swaps): 297.57
+Code:
+```python
+def init_mapping(self):
+    """
+    Centroid-Seeded Interaction-Weighted Mapping with Local Search (CSIWM-LS)
+
+    Strategy:
+      1. Build interaction graph (2Q gate counts as edge weights).
+      2. Find the hardware centroid: physical node with minimum total
+         distance to all other nodes (most globally accessible).
+      3. Identify critical-path qubits via DP on the sequential 2Q DAG.
+      4. Boost interaction weights 4x for pairs both on the critical path,
+         so the greedy phase prioritises placing bottleneck qubits adjacent.
+      5. Seed: map the highest enhanced-degree logical qubit to the hardware
+         centroid (not a peripheral diameter endpoint).
+      6. Greedy BFS expansion: repeatedly pick the unplaced logical qubit
+         with the highest enhanced interaction weight to placed qubits and
+         seat it on the hardware neighbour minimising total weighted distance.
+      7. Local-search refinement: iteratively swap pairs of logical->physical
+         assignments whenever the swap strictly reduces total weighted
+         distance, repeating until no improving swap exists (or 20 passes).
+      8. Commit via in-place swap bijection.
+    """
+    from collections import defaultdict, deque
+
+    # ------------------------------------------------------------------ #
+    # 1. Build interaction graph                                           #
+    # ------------------------------------------------------------------ #
+    logical_qubit_set = set()
+    interaction_neighbors = defaultdict(dict)
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            w = interaction_neighbors[q1].get(q2, 0) + 1
+            interaction_neighbors[q1][q2] = w
+            interaction_neighbors[q2][q1] = w
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # 2. Hardware centroid: most globally accessible physical node        #
+    # ------------------------------------------------------------------ #
+    center_phys = min(
+        physical_qubits,
+        key=lambda p: sum(
+            self.distance_matrix[p][o]
+            for o in physical_qubits
+            if self.distance_matrix[p][o] != float('inf')
+        )
+    )
+
+    # ------------------------------------------------------------------ #
+    # 3. Critical path via DP on sequential 2Q gate DAG                   #
+    # ------------------------------------------------------------------ #
+    two_qubit_gates = {g: q for g, q in self.access.items() if len(q) == 2}
+    critical_qubits = set()
+
+    if two_qubit_gates:
+        sorted_2q = sorted(two_qubit_gates.keys())
+        last_gate_on_qubit = {}
+        dag_succ = defaultdict(set)
+        dag_pred = defaultdict(set)
+
+        for gate in sorted_2q:
+            q1, q2 = two_qubit_gates[gate]
+            for q in (q1, q2):
+                if q in last_gate_on_qubit:
+                    pred = last_gate_on_qubit[q]
+                    dag_succ[pred].add(gate)
+                    dag_pred[gate].add(pred)
+            last_gate_on_qubit[q1] = gate
+            last_gate_on_qubit[q2] = gate
+
+        in_deg  = {g: len(dag_pred[g]) for g in sorted_2q}
+        dp_len  = {g: 1 for g in sorted_2q}
+        dp_prev = {g: None for g in sorted_2q}
+        topo_q  = deque(g for g in sorted_2q if in_deg[g] == 0)
+
+        while topo_q:
+            node = topo_q.popleft()
+            for succ in dag_succ[node]:
+                if dp_len[node] + 1 > dp_len[succ]:
+                    dp_len[succ] = dp_len[node] + 1
+                    dp_prev[succ] = node
+                in_deg[succ] -= 1
+                if in_deg[succ] == 0:
+                    topo_q.append(succ)
+
+        node = max(sorted_2q, key=lambda g: dp_len[g])
+        while node is not None:
+            for q in two_qubit_gates[node]:
+                critical_qubits.add(q)
+            node = dp_prev[node]
+
+    # ------------------------------------------------------------------ #
+    # 4. Enhanced interaction weights: 4x bonus for critical-path pairs   #
+    # ------------------------------------------------------------------ #
+    CRITICAL_BONUS = 4.0
+    enhanced = defaultdict(dict)
+    for q1 in interaction_neighbors:
+        for q2, w in interaction_neighbors[q1].items():
+            bonus = CRITICAL_BONUS if (q1 in critical_qubits and q2 in critical_qubits) else 1.0
+            enhanced[q1][q2] = w * bonus
+
+    # ------------------------------------------------------------------ #
+    # 5. Seed: highest enhanced-degree logical qubit → hardware centroid  #
+    # ------------------------------------------------------------------ #
+    anchor_lq = max(
+        logical_qubits,
+        key=lambda q: sum(enhanced[q].values()) if enhanced[q] else 0
+    )
+    lq_to_phys = {anchor_lq: center_phys}
+    placed_phys = {center_phys}
+
+    # ------------------------------------------------------------------ #
+    # 6. Greedy BFS expansion with enhanced weights                       #
+    # ------------------------------------------------------------------ #
+    unplaced = [lq for lq in logical_qubits if lq not in lq_to_phys]
+
+    while unplaced:
+        next_lq = max(
+            unplaced,
+            key=lambda lq: sum(enhanced[lq].get(p_lq, 0) for p_lq in lq_to_phys)
+        )
+
+        candidates = list({
+            nb
+            for phys in placed_phys
+            for nb in self.backend[phys]
+            if nb not in placed_phys
+        })
+        if not candidates:
+            candidates = [p for p in physical_qubits if p not in placed_phys]
+        if not candidates:
+            break
+
+        def placement_cost(phys_c, _lq=next_lq):
+            total = 0.0
+            for p_lq, p_phys in lq_to_phys.items():
+                w = enhanced[_lq].get(p_lq, 0)
+                if w > 0:
+                    d = self.distance_matrix[phys_c][p_phys]
+                    total += w * (d if d != float('inf') else 1e9)
+            return total
+
+        best_phys = min(candidates, key=placement_cost)
+        lq_to_phys[next_lq] = best_phys
+        placed_phys.add(best_phys)
+        unplaced.remove(next_lq)
+
+    # ------------------------------------------------------------------ #
+    # 7. Local-search refinement: pairwise swap improvement               #
+    #                                                                      #
+    # Swap logical→physical assignments of pairs (lq1, lq2) whenever it  #
+    # strictly reduces Σ w(lq,lq') * dist(phys(lq), phys(lq')).          #
+    # Uses first-improvement within each pass; repeats until stable.     #
+    # ------------------------------------------------------------------ #
+    lq_list = [lq for lq in logical_qubits if lq in lq_to_phys]
+    n = len(lq_list)
+
+    for _pass in range(20):
+        improved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                lq1, lq2 = lq_list[i], lq_list[j]
+                p1, p2 = lq_to_phys[lq1], lq_to_phys[lq2]
+                delta = 0.0
+
+                # Cost change for lq1's interaction edges (excluding lq1↔lq2)
+                for lq3, w in interaction_neighbors[lq1].items():
+                    if lq3 not in lq_to_phys or lq3 == lq2:
+                        continue
+                    p3 = lq_to_phys[lq3]
+                    d_old = self.distance_matrix[p1][p3]
+                    d_new = self.distance_matrix[p2][p3]
+                    delta += w * (
+                        (d_new if d_new != float('inf') else 1e9) -
+                        (d_old if d_old != float('inf') else 1e9)
+                    )
+
+                # Cost change for lq2's interaction edges (excluding lq1↔lq2)
+                for lq3, w in interaction_neighbors[lq2].items():
+                    if lq3 not in lq_to_phys or lq3 == lq1:
+                        continue
+                    p3 = lq_to_phys[lq3]
+                    d_old = self.distance_matrix[p2][p3]
+                    d_new = self.distance_matrix[p1][p3]
+                    delta += w * (
+                        (d_new if d_new != float('inf') else 1e9) -
+                        (d_old if d_old != float('inf') else 1e9)
+                    )
+
+                if delta < -1e-9:
+                    lq_to_phys[lq1], lq_to_phys[lq2] = p2, p1
+                    improved = True
+
+        if not improved:
+            break
+
+    # ------------------------------------------------------------------ #
+    # 8. Build strict 1-to-1 bijection via in-place swap                 #
+    # ------------------------------------------------------------------ #
+    mapping_dict         = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq]                   = target_phys
+        mapping_dict[displaced_lq]         = current_phys
+        reverse_mapping_dict[target_phys]  = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+You are an expert quantum computing researcher specializing in quantum circuit mapping, routing, and compiler optimization. 
+
+Above, you have been provided with the CURRENT BEST INITIAL MAPPING HEURISTIC discovered so far and its evaluation score (Mean Routing Swaps Required after mapping - lower is better). 
+
+Your task is to perform ITERATIVE REFINEMENT to create a superior initial mapping algorithm that results in fewer routing swaps. 
+
+Please follow these steps:
+1. CRITICAL ANALYSIS: Briefly analyze the provided current best mapping heuristic. Identify its strengths and pinpoint potential inefficiencies, topological features it ignores, or DAG depths it fails to look ahead into.
+2. EVOLUTION STRATEGY: Decide whether to:
+   - OPTION A (Refine): Make targeted improvements (e.g., adding deeper lookahead to the DAG, altering the tie-breaking criteria, adding subgraph isomorphism approximations).
+   - OPTION B (Mutate): Discard the current logic and attempt a completely novel approach if you suspect the current strategy has hit a local optimum.
+3. IMPLEMENTATION: Write the complete, updated Python code for the new `init_mapping` function. 
+
+Ensure your new code adheres strictly to the baseline constraints, uses only allowed libraries, guarantees a valid 1-to-1 mapping, and maintains the required function signature.
+REQUIRED OUTPUT FORMAT :
+
+```python
+def init_mapping(self):
+    # Your code here
+    # MUST populate self.mapping_dict and self.reverse_mapping_dict
+```
+Baseline Function (for reference, your solution must be different, not just a tweak)
+
+
+```python
+def init_mapping(self):
+        self.mapping = list(range(self.num_qubits))          # mapping[i] = i
+        self.reverse_mapping = list(range(self.num_qubits))  # reverse_mapping[i] = i
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```

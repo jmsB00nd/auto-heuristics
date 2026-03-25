@@ -1,0 +1,25 @@
+The file edit requires write permission. Please approve and I'll apply the change.
+
+Here's a summary of what the new `init_mapping` does and why each step is novel:
+
+---
+
+**DAG Critical-Path Priority Mapping with Cascade Propagation**
+
+**Step 1 — 2-qubit interaction scan:** Collect all logical qubits and build per-qubit interaction weights in O(G).
+
+**Step 2 — Sequential dependency DAG:** For each 2-qubit gate, add a dependency edge from the previous gate that touched either of its qubits (i.e., the gate it must wait for). This per-qubit "last writer" approach captures the true execution bottleneck in O(G).
+
+**Step 3 — Longest-path DP (critical path):** Topological sort + DP to find the deepest chain of dependent 2-qubit gates. Trace back via `parent[]` pointers to get the ordered gate sequence, then extract logical qubits in first-occurrence order. This is O(G).
+
+**Step 4 — Hardware centroid:** Physical qubit with minimum mean BFS distance to all others — the best starting anchor. O(|P|).
+
+**Step 5 — BFS ordering from centroid:** Ranks all physical qubits by proximity to the centroid. O(|P|).
+
+**Step 6 — Critical-path placement:** Assigns the bottleneck qubits to the first |CP| physical qubits in BFS order (i.e., the densest, most-central cluster). This ensures the serialization bottleneck has zero or minimal routing overhead.
+
+**Step 7 — Cascade propagation:** For each remaining qubit, finds its most-coupled already-placed partner, then places it at the closest available hardware neighbor of that partner. The `score = distance / (interaction_weight + 1)` metric prioritizes heavily-interacting qubits being placed close to their partners first. O(n²).
+
+**Step 8 — Isolated qubits:** Any qubit with no interactions fills remaining slots sorted by hardware degree descending (prefer high-connectivity positions). 
+
+**Step 9 — Bijection materialization:** Uses the identity permutation + displacement swap trick to guarantee a valid 1-to-1 mapping with no conflicts. O(n).

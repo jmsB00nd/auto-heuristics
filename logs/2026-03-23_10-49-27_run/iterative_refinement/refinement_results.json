@@ -1,0 +1,139 @@
+{
+  "Greedy Weighted Pair-First Adjacent Placement (GWPFAP)": {
+    "mean_swaps": 467.95238095238096,
+    "mean_depth": 588.4761904761905,
+    "error": null,
+    "failures": []
+  },
+  "Fiedler-Vector Bandwidth Minimization Ordering (FBMO)": {
+    "mean_swaps": 517.1428571428571,
+    "mean_depth": 600.0952380952381,
+    "error": null,
+    "failures": []
+  },
+  "Temporal Layer Exponentially Discounted Interaction Weighting (TLEDIW)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  },
+  "Dual PageRank Rank-Correlation Placement (DPRCP)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Interaction-Weighted Resistance Distance Rank Matching (IWRDRM)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Hungarian Algorithm Interaction-Degree Cost Matrix Placement (HIDCMP)": {
+    "mean_swaps": 516.4761904761905,
+    "mean_depth": 572.3333333333334,
+    "error": null,
+    "failures": []
+  },
+  "Critical Chain Hardware Path Co-Routing (CCHPCR)": {
+    "mean_swaps": 315.3809523809524,
+    "mean_depth": 490.4761904761905,
+    "error": null,
+    "failures": []
+  },
+  "Betweenness Centrality Bridge-to-Bridge Dual Rank Matching (BCBDRM)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Qubit Lifetime \u00d7 Interaction Importance Bipartite Hungarian Matching (QLIBHM)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: list index out of range",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "qugan_n71__72CYC.json",
+        "error": "list index out of range"
+      }
+    ]
+  },
+  "DAG Peak-Density Bottleneck Layer Compact Placement (DPDBCP)": {
+    "mean_swaps": 390.0,
+    "mean_depth": 527.2380952380952,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_1": {
+    "mean_swaps": 297.57142857142856,
+    "mean_depth": 504.04761904761904,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_2": {
+    "mean_swaps": 319.8095238095238,
+    "mean_depth": 512.047619047619,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_3": {
+    "mean_swaps": 309.0952380952381,
+    "mean_depth": 505.3809523809524,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_4": {
+    "mean_swaps": Infinity,
+    "error": "Timeout on qft_n63__494CYC.json"
+  },
+  "Refined_Idea_Round_5": {
+    "mean_swaps": Infinity,
+    "error": "Timeout on qft_n63__494CYC.json"
+  },
+  "Refined_Idea_Round_6": {
+    "mean_swaps": 290.0952380952381,
+    "mean_depth": 489.76190476190476,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_7": {
+    "mean_swaps": 282.3809523809524,
+    "mean_depth": 491.23809523809524,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_8": {
+    "mean_swaps": Infinity,
+    "error": "Timeout on qft_n63__494CYC.json"
+  },
+  "Refined_Idea_Round_9": {
+    "mean_swaps": 298.04761904761904,
+    "mean_depth": 494.2857142857143,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_10": {
+    "mean_swaps": 292.42857142857144,
+    "mean_depth": 495.95238095238096,
+    "error": null,
+    "failures": []
+  }
+}

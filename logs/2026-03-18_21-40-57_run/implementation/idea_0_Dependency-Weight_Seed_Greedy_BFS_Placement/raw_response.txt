@@ -1,0 +1,21 @@
+The edit was blocked. Please approve the write permission and I'll apply it. Here's a summary of what the implementation does:
+
+---
+
+## Dependency-Weight Seed Greedy BFS Placement — Implementation Plan
+
+**Step 1 — Criticality scoring** (novel vs. existing code)
+For each 2-qubit gate at position `idx`, each operand qubit receives `(N - idx)` criticality points. This weights early-appearing, high-remaining-dependency gates more heavily — approximating `dag_dependencies_count` without needing the DAG built yet. Pair weight accumulates the same way.
+
+**Step 2 — Seed pair selection**
+Best pair = `pair_weight[(q1,q2)] + criticality[q1] + criticality[q2]`. The most interaction-heavy pair that also appears early wins.
+
+**Step 3 — Central hardware anchor**
+Enumerate every hardware edge `(p1, p2)` and score by `centrality(p1) + centrality(p2)` where `centrality(p) = mean BFS distance` (precomputed). Minimise to find the hardware's topological "core".
+
+**Step 4 — Place seed pair** onto the anchor edge.
+
+**Step 5 — Greedy BFS expansion**
+Each round: pick unplaced logical qubit with max interaction weight to already-placed set → score each hardware BFS-frontier candidate by `(weighted_dist_cost, capacity_mismatch_penalty, centrality_tiebreak)` → place on best.
+
+**Step 6 — Bijection maintenance** via the same swap-chain trick already used in the codebase.

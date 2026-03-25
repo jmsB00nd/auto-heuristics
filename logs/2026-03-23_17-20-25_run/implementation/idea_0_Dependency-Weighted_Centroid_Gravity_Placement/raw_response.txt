@@ -1,0 +1,13 @@
+Please approve the file write and I'll apply the change. Here's a summary of the implementation:
+
+**Dependency-Weighted Centroid Gravity Placement (DWCGP)**
+
+The algorithm has 7 steps:
+
+1. **Collect** all logical qubits from `self.access`
+2. **Build a sequential 2Q DAG** — for each qubit, each new 2Q gate depends on the last 2Q gate that touched it (serialises per-qubit data flow)
+3. **Bitset transitive closure** — Kahn's topological sort + reverse-order propagation using Python integers as dense bitsets (O(G²/64) time/space); each gate gets a `bit_reach` int encoding all its reachable successors
+4. **Gravity mass per logical qubit** — `mass(lq) = Σ bit_count(bit_reach[g])` over all 2Q gates `g` using `lq`; bottleneck qubits accumulate more downstream impact
+5. **Closeness centrality per physical qubit** — `closeness(p) = (N−1) / Σdist(p,·)` using the precomputed `distance_matrix`; identifies hardware median nodes
+6. **Rank-matching** — sort logical qubits by mass (desc) and physical qubits by closeness (desc); match position-by-position so bottleneck qubits land at hardware centers
+7. **In-place swap bijection** — commits the placement into `mapping_dict` / `reverse_mapping_dict` as a strict 1-to-1 mapping

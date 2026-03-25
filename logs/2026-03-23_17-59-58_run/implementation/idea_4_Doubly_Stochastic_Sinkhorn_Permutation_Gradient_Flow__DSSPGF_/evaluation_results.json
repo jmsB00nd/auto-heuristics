@@ -1,0 +1,19 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: unhashable type: 'slice'",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "unhashable type: 'slice'"
+    }
+  ]
+}

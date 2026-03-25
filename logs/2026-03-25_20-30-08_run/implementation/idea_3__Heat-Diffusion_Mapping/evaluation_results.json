@@ -1,0 +1,20 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: unhashable type: 'slice'",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "unhashable type: 'slice'"
+    }
+  ],
+  "description": "** Place \"heat sources\" on the hardware graph at each physical qubit, with heat intensity proportional to that qubit's connectivity. Simultaneously, each logical qubit emits heat proportional to its interaction degree. Solve a diffusion equation to find the assignment that minimizes thermal mismatch \u2014 high-interaction logical qubits should land on high-connectivity physical qubits, and interacting pairs should be thermally close.\n\n**ALGORITHMIC_APPROACH:**\n1. Compute logical qubit interaction degree vector: `d_L[i] = number of 2-qubit gates involving qubit i`.\n2. Compute physical qubit connectivity degree vector: `d_P[j] = |backend[j]|`.\n3. Sort both vectors in descending order. Build cost matrix: `C[i][j] = |d_L[i] - d_P[j]| + lambda * sum over neighbors k of qubit i: distance_matrix[j][current_assignment[k]]`.\n4. Since step 3 has a circular dependency, use iterative refinement: start with degree-sorted assignment, then iteratively improve using local search (swap pairs that reduce total cost).\n5. Use Hungarian algorithm on the final refined cost matrix.\n\n**COLLISION_PREVENTION:** Degree-sorted initial assignment is a permutation (1-to-1). Local search only swaps existing assignments, preserving bijectivity. Final Hungarian guarantees optimality.\n\n**WHY_NOVEL:** Combines degree matching (a coarse heuristic) with iterative refinement using actual interaction topology. The \"thermal\" framing naturally balances centrality matching with proximity of interacting pairs.\n\n**NOVELTY_SCORE:** 5\n**PROBABILITY_SCORE:** 6\n**EFFORT_SCORE:** 8\n**FEASIBILITY_SCORE:** 10\n**AVERAGE_SCORE:** 7.3"
+}

@@ -1,0 +1,165 @@
+The edit requires your permission to write to the file. Please approve it to proceed.
+
+In the meantime, here is the complete implementation with detailed explanation:
+
+---
+
+## FBMO `init_mapping` — Implementation
+
+```python
+def init_mapping(self):
+    """
+    Fiedler-Vector Bandwidth Minimization Ordering (FBMO).
+
+    The Fiedler vector (second eigenvector of the normalised graph Laplacian)
+    gives a spectral 1-D embedding of the logical interaction graph that
+    approximates bandwidth minimisation: frequently-interacting logical qubits
+    receive similar scalar values.  Independently, the hardware graph is
+    traversed by BFS from its most central node, yielding a physical "spectrum".
+    Matching both orderings aligns high-interaction logical pairs with
+    physically adjacent qubits, reducing expected routing overhead.
+
+    Complexity: O(L³) eigendecomposition on L logical qubits + O(P) BFS on
+    P physical qubits — polynomial and practical for all realistic circuit sizes.
+    """
+    import numpy as np
+    from collections import defaultdict, deque
+
+    # --- Step 1: Build weighted interaction graph ---
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            key = (min(q1, q2), max(q1, q2))
+            interaction_weight[key] += 1
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Fallback: trivial identity if circuit has no logical qubits
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    n_lq = len(logical_qubits)
+    lq_index = {lq: i for i, lq in enumerate(logical_qubits)}
+
+    # --- Step 2: Build normalised Laplacian of the logical interaction graph ---
+    # Weighted degree vector
+    degree = np.zeros(n_lq)
+    for (q1, q2), w in interaction_weight.items():
+        i, j = lq_index[q1], lq_index[q2]
+        degree[i] += w
+        degree[j] += w
+
+    # Combinatorial Laplacian L = D - W
+    L = np.zeros((n_lq, n_lq))
+    for (q1, q2), w in interaction_weight.items():
+        i, j = lq_index[q1], lq_index[q2]
+        L[i, j] -= w
+        L[j, i] -= w
+        L[i, i] += w
+        L[j, j] += w
+
+    # Symmetric normalised Laplacian: L_sym = D^{-1/2} L D^{-1/2}
+    # Isolated qubits (degree == 0) get d_inv_sqrt = 1 so their rows/cols
+    # remain zero — they end up in the trivial zero eigenspace and are sorted
+    # to a well-defined position without numerical issues.
+    d_inv_sqrt = np.where(degree > 0, 1.0 / np.sqrt(degree), 1.0)
+    L_sym = d_inv_sqrt[:, None] * L * d_inv_sqrt[None, :]
+
+    # --- Step 3: Fiedler vector — second eigenvector of L_sym ---
+    # np.linalg.eigh returns eigenvalues sorted ascending for symmetric matrices.
+    # Index 0 is always the zero eigenvector (constant / disconnected components).
+    # Index 1 (Fiedler) minimises the normalised cut Rayleigh quotient and
+    # provides the bandwidth-minimising spectral ordering.
+    eigenvalues, eigenvectors = np.linalg.eigh(L_sym)
+    fiedler_col = 1 if n_lq > 1 else 0
+    fiedler_vector = eigenvectors[:, fiedler_col]
+
+    # Logical qubits ordered by ascending Fiedler value
+    logical_spectral_order = [logical_qubits[i] for i in np.argsort(fiedler_vector)]
+
+    # --- Step 4: Hardware BFS spectrum from the most central physical qubit ---
+    # Centrality ≈ minimum mean BFS distance to all other nodes
+    def mean_bfs_dist(p):
+        finite = [self.distance_matrix[p][o] for o in physical_qubits
+                  if o != p and self.distance_matrix[p][o] != float('inf')]
+        return sum(finite) / len(finite) if finite else float('inf')
+
+    anchor_phys = min(physical_qubits, key=mean_bfs_dist)
+
+    # Level-order BFS — produces a natural "closeness" ordering of hardware qubits
+    visited = {anchor_phys}
+    bfs_queue = deque([anchor_phys])
+    physical_bfs_order = []
+    while bfs_queue:
+        node = bfs_queue.popleft()
+        physical_bfs_order.append(node)
+        for nb in sorted(self.backend[node]):   # sorted for determinism
+            if nb not in visited:
+                visited.add(nb)
+                bfs_queue.append(nb)
+
+    # Append any physically disconnected nodes not reached by BFS
+    for p in physical_qubits:
+        if p not in visited:
+            physical_bfs_order.append(p)
+
+    # --- Step 5: Align logical spectral order with hardware BFS order ---
+    # The i-th logical qubit in spectral order maps to the i-th physical qubit
+    # in BFS order: both orderings place "central / high-interaction" nodes
+    # at similar positions, so the match minimises expected routing distance.
+    lq_to_phys = {}
+    for i, lq in enumerate(logical_spectral_order):
+        if i < len(physical_bfs_order):
+            lq_to_phys[lq] = physical_bfs_order[i]
+
+    # --- Step 6: Build strict 1-to-1 bijection over all num_qubits indices ---
+    # Start from the identity permutation and apply each assignment via an
+    # in-place swap so the result is always a valid permutation.
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        # The logical qubit currently sitting at target_phys must be displaced
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+---
+
+## Algorithm walkthrough
+
+| Step | What happens | Why |
+|------|-------------|-----|
+| **1** | Count interaction frequency between every pair of logical qubits | Forms edge weights for the spectral analysis |
+| **2** | Assemble the symmetric normalised Laplacian `L_sym = D⁻¹²(D-W)D⁻¹²` | Normalisation makes the spectrum independent of qubit degree scale |
+| **3** | Compute the Fiedler vector via `eigh` (index 1) | Minimises the normalised Rayleigh quotient `Σ wᵢⱼ(fᵢ-fⱼ)²`; sorting by this vector is the standard spectral approximation to graph bandwidth minimisation |
+| **4** | BFS level-order from the most-central hardware node | Produces a "physical spectrum" — qubits close in BFS order are close on chip |
+| **5** | Match rank-i logical → rank-i physical | Both orderings are centred on "hub" nodes, so the alignment is meaningful |
+| **6** | Apply assignments as in-place permutation swaps | Guarantees a strict bijection at all times — no slot is ever double-assigned |
+
+**Validity guarantees:**
+- Every logical qubit receives exactly one physical qubit (in-place swap bijection).
+- `mapping_dict[lq]` and `reverse_mapping_dict[phys]` remain consistent inverses throughout.
+- Isolated logical qubits (no 2-qubit gates) are handled: their `degree = 0` rows vanish in the Laplacian, so they fall into the zero eigenspace and are sorted stably among themselves without crashing `eigh`.

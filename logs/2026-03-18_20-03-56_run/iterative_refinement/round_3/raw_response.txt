@@ -1,0 +1,416 @@
+## Analysis of Current Best (FWSE-LS, 307.62)
+
+**Strengths:** Edge-pair anchor, temporal bias, 2-hop lookahead, pairwise local search.
+
+**Key weaknesses:**
+1. **No true critical path** — uses `rank` as a proxy but `0.3/(rank+1)` is nearly identical for large circuits (gate 10 vs gate 1000 differ by <0.03). Doesn't capture which interactions block the most future work.
+2. **Single anchor attempt** — one bad anchor choice poisons the entire greedy BFS.
+3. **Local search only does pairwise swaps** — easily stuck in local optima that require 3-way cyclic moves to escape.
+4. **10 LS iterations** — often insufficient for convergence.
+
+## Strategy: Option A (Targeted Refinements)
+
+1. Build true DAG → compute forward critical path depth + backward urgency depth per gate.
+2. Multi-restart: top-3 anchor edges × top-2 adjacent physical pairs × 2 orientations = 12 placements, keep the one with lowest total weighted distance.
+3. Enhanced local search: 20 iters of pairwise, then 3-way cyclic permutations on the top-20 highest-weight qubits when pairwise converges.
+4. Smart anchor orientation: match logical qubit's neighborhood weight to physical qubit's degree.
+
+```python
+def init_mapping(self):
+    """
+    Critical-Path Multi-Restart with 3-Opt Local Search (CPMR-3OLS)
+
+    Improvements over FWSE-LS (307.62):
+
+    1. True DAG critical path: build gate dependency graph, compute
+       forward depth (longest chain ending here) and backward urgency
+       (longest remaining chain), so iw reflects genuine circuit criticality
+       rather than just temporal rank.
+
+    2. Multi-restart anchor selection: try top-K highest-weight logical
+       edges as anchors and top-M adjacent physical pairs; keep the full
+       greedy+LS result with the lowest weighted-distance cost.
+
+    3. 3-way cyclic permutations: after pairwise swaps converge, attempt
+       3-way rotations among the top-N highest-weight logical qubits.
+       These escape local optima that pairwise search cannot reach.
+
+    4. Increased LS iterations (20 vs 10) and smart anchor orientation
+       (match logical neighborhood weight to physical degree).
+    """
+    import heapq
+    from collections import defaultdict
+
+    # ------------------------------------------------------------------ #
+    # Collect logical / physical qubit sets                               #
+    # ------------------------------------------------------------------ #
+    logical_qubit_set = set()
+    for qubits in self.access.values():
+        for q in qubits:
+            logical_qubit_set.add(q)
+
+    logical_qubits  = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict         = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 1 – Build gate dependency DAG; compute critical path depths    #
+    # forward_depth[i]  = length of longest chain ending at gate i        #
+    # backward_depth[i] = length of longest chain starting at gate i      #
+    # ------------------------------------------------------------------ #
+    sorted_gates = sorted(self.access.keys())
+    n_gates      = len(sorted_gates)
+
+    qubit_last_gate  = {}   # qubit -> index of last gate that used it
+    gate_prev        = [[] for _ in range(n_gates)]   # immediate predecessors
+
+    for i, gate in enumerate(sorted_gates):
+        for q in self.access[gate]:
+            if q in qubit_last_gate:
+                gate_prev[i].append(qubit_last_gate[q])
+            qubit_last_gate[q] = i
+
+    # Forward depth (critical path length ending here)
+    fwd_depth = [0] * n_gates
+    for i in range(n_gates):
+        if gate_prev[i]:
+            fwd_depth[i] = 1 + max(fwd_depth[p] for p in gate_prev[i])
+
+    max_fwd = max(fwd_depth) if fwd_depth else 1
+
+    # Build successor lists for backward pass
+    gate_succ = [[] for _ in range(n_gates)]
+    for i in range(n_gates):
+        for p in gate_prev[i]:
+            gate_succ[p].append(i)
+
+    bwd_depth = [0] * n_gates
+    for i in range(n_gates - 1, -1, -1):
+        if gate_succ[i]:
+            bwd_depth[i] = 1 + max(bwd_depth[s] for s in gate_succ[i])
+
+    # ------------------------------------------------------------------ #
+    # Step 2 – Build interaction weights with critical path boost         #
+    # w = 1.0 + α*(fwd_norm) + β*(bwd_norm)                             #
+    # fwd_norm captures "how deep we are"; bwd_norm captures urgency     #
+    # ------------------------------------------------------------------ #
+    iw = defaultdict(lambda: defaultdict(float))
+    for i, gate in enumerate(sorted_gates):
+        qubits = self.access[gate]
+        if len(qubits) == 2:
+            q1, q2    = qubits[0], qubits[1]
+            fwd_norm  = fwd_depth[i] / (max_fwd + 1)
+            bwd_norm  = bwd_depth[i] / (max_fwd + 1)
+            combined  = 1.0 + 0.5 * fwd_norm + 0.5 * bwd_norm
+            iw[q1][q2] += combined
+            iw[q2][q1] += combined
+
+    # ------------------------------------------------------------------ #
+    # Step 3 – Hardware structures                                        #
+    # ------------------------------------------------------------------ #
+    phys_degree  = {p: len(self.backend[p]) for p in physical_qubits}
+    phys_adj_set = {p: set(self.backend[p]) for p in physical_qubits}
+
+    def _mean_dist(p):
+        vals = [self.distance_matrix[p][o] for o in physical_qubits
+                if o != p and self.distance_matrix[p][o] != float('inf')]
+        return sum(vals) / len(vals) if vals else float('inf')
+
+    phys_centrality = {p: _mean_dist(p) for p in physical_qubits}
+
+    # ------------------------------------------------------------------ #
+    # Total weighted-distance cost (objective to minimise)               #
+    # ------------------------------------------------------------------ #
+    def _total_cost(mapping):
+        cost = 0.0
+        for q1 in logical_qubits:
+            if q1 not in mapping:
+                continue
+            for q2, w in iw[q1].items():
+                if q2 > q1 and q2 in mapping:
+                    d = self.distance_matrix[mapping[q1]][mapping[q2]]
+                    if d != float('inf'):
+                        cost += w * d
+        return cost
+
+    # ------------------------------------------------------------------ #
+    # Core greedy BFS placement given initial anchor assignments          #
+    # ------------------------------------------------------------------ #
+    def _greedy_place(anchor_assignments):
+        lq_to_phys  = dict(anchor_assignments)
+        placed_phys = set(lq_to_phys.values())
+
+        heap    = []
+        counter = [0]
+
+        def _push_unplaced(lq):
+            for nb, w in iw[lq].items():
+                if nb not in lq_to_phys:
+                    heapq.heappush(heap, (-w, counter[0], nb))
+                    counter[0] += 1
+
+        for placed_lq in list(lq_to_phys.keys()):
+            _push_unplaced(placed_lq)
+
+        if not heap:
+            for lq in logical_qubits:
+                if lq not in lq_to_phys:
+                    heapq.heappush(heap, (0.0, counter[0], lq))
+                    counter[0] += 1
+                    break
+
+        while heap:
+            _, _, lq = heapq.heappop(heap)
+            if lq in lq_to_phys:
+                continue
+
+            available_phys = [p for p in physical_qubits if p not in placed_phys]
+            if not available_phys:
+                break
+
+            best_phys  = None
+            best_score = None
+
+            for p in available_phys:
+                # Direct overlap with already-placed interaction partners
+                direct = 0.0
+                for nb_lq, w in iw[lq].items():
+                    if nb_lq in lq_to_phys:
+                        d = self.distance_matrix[p][lq_to_phys[nb_lq]]
+                        if d != float('inf'):
+                            direct += w / (d + 1)
+
+                # 2-hop lookahead for unplaced neighbors
+                lookahead  = 0.0
+                avail_excl = [q for q in available_phys if q != p]
+                if avail_excl:
+                    for nb_lq, w in iw[lq].items():
+                        if nb_lq not in lq_to_phys:
+                            best_d = min(
+                                (self.distance_matrix[p][q] for q in avail_excl
+                                 if self.distance_matrix[p][q] != float('inf')),
+                                default=float('inf')
+                            )
+                            if best_d != float('inf'):
+                                lookahead += w * 0.4 / (best_d + 1)
+
+                score = (direct + lookahead, phys_degree[p])
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_phys  = p
+
+            if best_phys is None:
+                break
+
+            lq_to_phys[lq] = best_phys
+            placed_phys.add(best_phys)
+            _push_unplaced(lq)
+
+        # Fill isolated qubits on remaining slots ordered by hw degree
+        remaining_phys = sorted(
+            [p for p in physical_qubits if p not in placed_phys],
+            key=lambda p: phys_degree[p], reverse=True
+        )
+        for lq, phys in zip(
+            [lq for lq in logical_qubits if lq not in lq_to_phys],
+            remaining_phys
+        ):
+            lq_to_phys[lq] = phys
+
+        return lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # Enhanced local search: pairwise swaps + 3-way cyclic permutations  #
+    # ------------------------------------------------------------------ #
+    def _local_search(lq_to_phys):
+        placed_lqs   = [lq for lq in logical_qubits if lq in lq_to_phys]
+        MAX_LS_ITERS = 20
+
+        # Top-N qubits by total interaction weight for 3-way search
+        lq_total_w = sorted(placed_lqs,
+                            key=lambda lq: sum(iw[lq].values()), reverse=True)
+        top_lqs    = lq_total_w[:min(20, len(lq_total_w))]
+
+        for iteration in range(MAX_LS_ITERS):
+            improved = False
+
+            # --- Pairwise swaps ---
+            for i in range(len(placed_lqs)):
+                for j in range(i + 1, len(placed_lqs)):
+                    lq1, lq2 = placed_lqs[i], placed_lqs[j]
+                    p1, p2   = lq_to_phys[lq1], lq_to_phys[lq2]
+
+                    delta = 0.0
+                    for nb, w in iw[lq1].items():
+                        if nb in lq_to_phys and nb != lq2:
+                            nb_p  = lq_to_phys[nb]
+                            d_bef = self.distance_matrix[p1][nb_p]
+                            d_aft = self.distance_matrix[p2][nb_p]
+                            if d_bef != float('inf') and d_aft != float('inf'):
+                                delta += w * (d_aft - d_bef)
+                    for nb, w in iw[lq2].items():
+                        if nb in lq_to_phys and nb != lq1:
+                            nb_p  = lq_to_phys[nb]
+                            d_bef = self.distance_matrix[p2][nb_p]
+                            d_aft = self.distance_matrix[p1][nb_p]
+                            if d_bef != float('inf') and d_aft != float('inf'):
+                                delta += w * (d_aft - d_bef)
+
+                    if delta < -1e-9:
+                        lq_to_phys[lq1] = p2
+                        lq_to_phys[lq2] = p1
+                        improved = True
+
+            # --- 3-way cyclic permutations on top qubits (when pairwise stalls) ---
+            if not improved:
+                for i in range(len(top_lqs)):
+                    for j in range(i + 1, len(top_lqs)):
+                        for k in range(j + 1, len(top_lqs)):
+                            lq1, lq2, lq3 = top_lqs[i], top_lqs[j], top_lqs[k]
+                            p1  = lq_to_phys[lq1]
+                            p2  = lq_to_phys[lq2]
+                            p3  = lq_to_phys[lq3]
+                            triple    = {lq1, lq2, lq3}
+                            old_map   = {lq1: p1, lq2: p2, lq3: p3}
+
+                            for (np1, np2, np3) in [(p2, p3, p1), (p3, p1, p2)]:
+                                new_map = {lq1: np1, lq2: np2, lq3: np3}
+                                delta   = 0.0
+                                seen    = set()
+
+                                for lq in triple:
+                                    op  = old_map[lq]
+                                    npv = new_map[lq]
+                                    for nb, w in iw[lq].items():
+                                        edge = (min(lq, nb), max(lq, nb))
+                                        if edge in seen or nb not in lq_to_phys:
+                                            continue
+                                        seen.add(edge)
+                                        nb_old = old_map[nb] if nb in triple else lq_to_phys[nb]
+                                        nb_new = new_map[nb] if nb in triple else lq_to_phys[nb]
+                                        d_bef  = self.distance_matrix[op][nb_old]
+                                        d_aft  = self.distance_matrix[npv][nb_new]
+                                        if d_bef != float('inf') and d_aft != float('inf'):
+                                            delta += w * (d_aft - d_bef)
+
+                                if delta < -1e-9:
+                                    lq_to_phys[lq1] = np1
+                                    lq_to_phys[lq2] = np2
+                                    lq_to_phys[lq3] = np3
+                                    improved = True
+                                    break
+
+            if not improved:
+                break
+
+        return lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # Step 4 – Multi-restart: top-K anchor edges × top-M physical pairs  #
+    # ------------------------------------------------------------------ #
+    # Rank edges by weight + neighborhood richness
+    edge_weights = []
+    for q1 in logical_qubits:
+        for q2, w in iw[q1].items():
+            if q2 > q1:
+                nbw   = sum(iw[q1].values()) + sum(iw[q2].values()) - 2 * w
+                score = w + 0.15 * nbw
+                edge_weights.append((score, q1, q2))
+    edge_weights.sort(reverse=True)
+
+    TOP_K_EDGES = min(3, len(edge_weights)) if edge_weights else 0
+
+    # Top physical adjacent pairs by centrality (lower = more central)
+    adjacent_pairs = []
+    for p1 in physical_qubits:
+        for p2 in phys_adj_set[p1]:
+            if p2 > p1:
+                score = (phys_centrality[p1] + phys_centrality[p2],
+                         -(phys_degree[p1] + phys_degree[p2]))
+                adjacent_pairs.append((score, p1, p2))
+    adjacent_pairs.sort()
+    TOP_K_PAIRS   = min(2, len(adjacent_pairs))
+    top_phys_pairs = [(p1, p2) for _, p1, p2 in adjacent_pairs[:TOP_K_PAIRS]]
+
+    best_cost    = float('inf')
+    best_mapping = None
+
+    if edge_weights:
+        for _, alq1, alq2 in edge_weights[:TOP_K_EDGES]:
+            lq1_w = sum(iw[alq1].values())
+            lq2_w = sum(iw[alq2].values())
+
+            for bp1, bp2 in top_phys_pairs:
+                # Smart orientation: assign higher-weight lq to higher-degree p
+                if lq1_w >= lq2_w:
+                    if phys_degree[bp1] >= phys_degree[bp2]:
+                        orientations = [(bp1, bp2)]
+                    else:
+                        orientations = [(bp2, bp1)]
+                else:
+                    if phys_degree[bp1] >= phys_degree[bp2]:
+                        orientations = [(bp2, bp1)]
+                    else:
+                        orientations = [(bp1, bp2)]
+                # Always try both to avoid missing the better one
+                other = (orientations[0][1], orientations[0][0])
+                if other not in orientations:
+                    orientations.append(other)
+
+                for pp1, pp2 in orientations:
+                    anchor = {alq1: pp1, alq2: pp2}
+                    placed = _greedy_place(anchor)
+                    placed = _local_search(placed)
+                    cost   = _total_cost(placed)
+                    if cost < best_cost:
+                        best_cost    = cost
+                        best_mapping = dict(placed)
+    else:
+        # No 2-qubit gates
+        anchor_phys = min(physical_qubits, key=lambda p: phys_centrality[p])
+        placed      = _greedy_place({logical_qubits[0]: anchor_phys})
+        placed      = _local_search(placed)
+        best_mapping = placed
+
+    lq_to_phys = best_mapping
+
+    # ------------------------------------------------------------------ #
+    # Step 5 – Strict 1-to-1 permutation via in-place swap               #
+    # ------------------------------------------------------------------ #
+    mapping_dict         = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq                       = reverse_mapping_dict[target_phys]
+        mapping_dict[lq]                   = target_phys
+        mapping_dict[displaced_lq]         = current_phys
+        reverse_mapping_dict[target_phys]  = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+**Summary of changes vs FWSE-LS:**
+
+| Aspect | FWSE-LS | CPMR-3OLS |
+|---|---|---|
+| Interaction weight | `1.0 + 0.3/(rank+1)` | `1.0 + 0.5*fwd_cp + 0.5*bwd_cp` from true DAG |
+| Anchor attempts | 1 edge × 1 pair | top-3 edges × top-2 pairs × 2 orientations = 12 |
+| Anchor orientation | random | smart (match iw-degree to phys-degree) |
+| Local search iters | 10 | 20 |
+| Local search moves | pairwise only | pairwise + 3-way cyclic on top-20 qubits |
+
+The critical path weights properly differentiate gates that are bottlenecks vs independent operations. Multi-restart avoids the single-anchor failure mode. The 3-way moves escape O(n²) pairwise local optima at O(20³) = ~1333 triple checks — bounded and fast.

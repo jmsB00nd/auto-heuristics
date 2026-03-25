@@ -1,0 +1,88 @@
+def init_mapping(self):
+    from collections import defaultdict
+
+    # --- Step 1: Compute Shannon entropy of partner distribution per logical qubit ---
+    # High entropy  → many different partners throughout the circuit → needs a hub position.
+    # Low entropy   → few/one recurring partner → peripheral placement is acceptable.
+    partner_counts = defaultdict(lambda: defaultdict(int))
+    logical_qubit_set = set()
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            partner_counts[q1][q2] += 1
+            partner_counts[q2][q1] += 1
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Fallback to trivial identity mapping if circuit has no gates
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    def shannon_entropy(counts_dict):
+        total = sum(counts_dict.values())
+        if total == 0:
+            return 0.0
+        entropy = 0.0
+        for c in counts_dict.values():
+            p = c / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+        return entropy
+
+    qubit_entropy = {lq: shannon_entropy(partner_counts[lq]) for lq in logical_qubits}
+
+    # --- Step 2: Compute closeness centrality proxy for each physical qubit ---
+    # closeness(p) = reachable_count / sum_of_BFS_distances
+    # Higher value → more central (hub-like). Uses precomputed distance_matrix; O(|P|²).
+    def closeness_centrality(p):
+        distances = [
+            self.distance_matrix[p][o]
+            for o in physical_qubits
+            if o != p and self.distance_matrix[p][o] != float('inf')
+        ]
+        if not distances:
+            return 0.0
+        return len(distances) / sum(distances)
+
+    phys_centrality = {p: closeness_centrality(p) for p in physical_qubits}
+
+    # --- Step 3: Entropy-guided assignment to centrality-ranked hardware positions ---
+    # Sort logical qubits by entropy descending: highest-entropy qubit placed first.
+    # Sort physical qubits by centrality descending: most central position offered first.
+    # Zip → high-entropy logical qubits land on hub physical qubits.
+    sorted_logical = sorted(logical_qubits, key=lambda lq: qubit_entropy[lq], reverse=True)
+    sorted_physical = sorted(physical_qubits, key=lambda p: phys_centrality[p], reverse=True)
+
+    lq_to_phys = {}
+    for lq, phys in zip(sorted_logical, sorted_physical):
+        lq_to_phys[lq] = phys
+
+    # --- Step 4: Build strict 1-to-1 bijection over all num_qubits indices ---
+    # Start from the identity permutation; apply each assignment via a swap,
+    # displacing whatever logical qubit currently occupies target_phys.
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

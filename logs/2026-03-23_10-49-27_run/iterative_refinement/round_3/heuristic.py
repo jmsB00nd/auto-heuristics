@@ -1,0 +1,317 @@
+def init_mapping(self):
+    """
+    MSTA-LS: Multi-Seed Temporally-weighted Assignment with extended Local Search
+
+    Improvements over CSIWM-LS:
+    1. Time-decayed interaction weights: earlier gates weighted up to 2x more
+       (poor early placement cascades to deeper routing overhead).
+    2. Weighted-depth critical path DP: path length accumulates interaction
+       weights, not just gate count, so high-frequency edges dominate.
+    3. Multi-seed greedy: try top-5 hardware nodes by closeness centrality;
+       run full greedy for each; keep the lowest-cost placement before LS.
+    4. Degree-affinity in placement cost: small penalty for degree mismatch
+       between logical qubit interactions and hardware node connections.
+    5. Extended LS: 30 pairwise-swap passes + 5 passes of 3-way cyclic moves
+       restricted to the top-30 highest-degree logical qubits.
+    """
+    from collections import defaultdict, deque
+
+    # ------------------------------------------------------------------ #
+    # 1. Build time-decayed interaction graph                              #
+    # ------------------------------------------------------------------ #
+    logical_qubit_set = set()
+    interaction_neighbors = defaultdict(dict)
+    gate_items = sorted(self.access.items())
+    n_gates = max(len(gate_items), 1)
+
+    for idx, (gate, qubits) in enumerate(gate_items):
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            # Earlier gates get up to 2x weight; weight decays linearly to 1x
+            decay = 1.0 + (1.0 - idx / n_gates)
+            w = interaction_neighbors[q1].get(q2, 0.0) + decay
+            interaction_neighbors[q1][q2] = w
+            interaction_neighbors[q2][q1] = w
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # 2. Weighted-depth critical path DP                                  #
+    # ------------------------------------------------------------------ #
+    two_qubit_gates = {g: q for g, q in self.access.items() if len(q) == 2}
+    critical_qubits = set()
+
+    if two_qubit_gates:
+        sorted_2q = sorted(two_qubit_gates.keys())
+        last_gate_on_qubit = {}
+        dag_succ = defaultdict(set)
+        dag_pred = defaultdict(set)
+
+        for gate in sorted_2q:
+            q1, q2 = two_qubit_gates[gate]
+            for q in (q1, q2):
+                if q in last_gate_on_qubit:
+                    pred = last_gate_on_qubit[q]
+                    dag_succ[pred].add(gate)
+                    dag_pred[gate].add(pred)
+            last_gate_on_qubit[q1] = gate
+            last_gate_on_qubit[q2] = gate
+
+        def gate_w(g):
+            q1, q2 = two_qubit_gates[g]
+            return interaction_neighbors[q1].get(q2, 1.0)
+
+        in_deg  = {g: len(dag_pred[g]) for g in sorted_2q}
+        dp_len  = {g: gate_w(g) for g in sorted_2q}
+        dp_prev = {g: None for g in sorted_2q}
+        topo_q  = deque(g for g in sorted_2q if in_deg[g] == 0)
+
+        while topo_q:
+            node = topo_q.popleft()
+            for succ in dag_succ[node]:
+                new_val = dp_len[node] + gate_w(succ)
+                if new_val > dp_len[succ]:
+                    dp_len[succ] = new_val
+                    dp_prev[succ] = node
+                in_deg[succ] -= 1
+                if in_deg[succ] == 0:
+                    topo_q.append(succ)
+
+        node = max(sorted_2q, key=lambda g: dp_len[g])
+        while node is not None:
+            for q in two_qubit_gates[node]:
+                critical_qubits.add(q)
+            node = dp_prev[node]
+
+    # ------------------------------------------------------------------ #
+    # 3. Enhanced interaction weights (4x for critical-path pairs)        #
+    # ------------------------------------------------------------------ #
+    CRITICAL_BONUS = 4.0
+    enhanced = defaultdict(dict)
+    for q1 in interaction_neighbors:
+        for q2, w in interaction_neighbors[q1].items():
+            bonus = CRITICAL_BONUS if (q1 in critical_qubits and q2 in critical_qubits) else 1.0
+            enhanced[q1][q2] = w * bonus
+
+    hw_degree      = {p: len(self.backend[p]) for p in physical_qubits}
+    lq_degree      = {lq: len(interaction_neighbors[lq]) for lq in logical_qubits}
+    enhanced_degree = {lq: sum(enhanced[lq].values()) for lq in logical_qubits}
+
+    # ------------------------------------------------------------------ #
+    # 4. Seed candidates: top-5 most central physical nodes               #
+    # ------------------------------------------------------------------ #
+    centrality = {}
+    for p in physical_qubits:
+        centrality[p] = sum(
+            self.distance_matrix[p][o]
+            for o in physical_qubits
+            if self.distance_matrix[p][o] != float('inf')
+        )
+    seed_candidates = sorted(physical_qubits, key=lambda p: centrality[p])[:5]
+
+    anchor_lq = max(logical_qubits, key=lambda q: enhanced_degree.get(q, 0))
+
+    # ------------------------------------------------------------------ #
+    # 5. Greedy placement from a given seed physical node                 #
+    # ------------------------------------------------------------------ #
+    def run_greedy(seed_phys):
+        lq_to_phys = {anchor_lq: seed_phys}
+        placed_phys = {seed_phys}
+        unplaced = [lq for lq in logical_qubits if lq != anchor_lq]
+
+        while unplaced:
+            next_lq = max(
+                unplaced,
+                key=lambda lq: sum(enhanced[lq].get(p_lq, 0) for p_lq in lq_to_phys)
+            )
+
+            candidates = list({
+                nb
+                for phys in placed_phys
+                for nb in self.backend[phys]
+                if nb not in placed_phys
+            })
+            if not candidates:
+                candidates = [p for p in physical_qubits if p not in placed_phys]
+            if not candidates:
+                break
+
+            lq_deg = lq_degree.get(next_lq, 0)
+
+            def placement_cost(phys_c, _lq=next_lq, _lq_deg=lq_deg):
+                total = 0.0
+                for p_lq, p_phys in lq_to_phys.items():
+                    w = enhanced[_lq].get(p_lq, 0)
+                    if w > 0:
+                        d = self.distance_matrix[phys_c][p_phys]
+                        total += w * (d if d != float('inf') else 1e9)
+                # Degree-affinity: small penalty for hw/logical degree mismatch
+                total += abs(hw_degree[phys_c] - _lq_deg) * 0.05
+                return total
+
+            best_phys = min(candidates, key=placement_cost)
+            lq_to_phys[next_lq] = best_phys
+            placed_phys.add(best_phys)
+            unplaced.remove(next_lq)
+
+        return lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # 6. Evaluate total weighted distance of a mapping                    #
+    # ------------------------------------------------------------------ #
+    def eval_mapping(lq_to_phys):
+        total = 0.0
+        for q1 in interaction_neighbors:
+            if q1 not in lq_to_phys:
+                continue
+            for q2, w in interaction_neighbors[q1].items():
+                if q2 not in lq_to_phys or q2 <= q1:
+                    continue
+                d = self.distance_matrix[lq_to_phys[q1]][lq_to_phys[q2]]
+                total += w * (d if d != float('inf') else 1e9)
+        return total
+
+    # ------------------------------------------------------------------ #
+    # 7. Multi-seed: keep the best greedy solution                        #
+    # ------------------------------------------------------------------ #
+    best_mapping = None
+    best_score   = float('inf')
+
+    for seed in seed_candidates:
+        m = run_greedy(seed)
+        s = eval_mapping(m)
+        if s < best_score:
+            best_score = s
+            best_mapping = m
+
+    lq_to_phys = best_mapping
+
+    # ------------------------------------------------------------------ #
+    # 8. Local search – Phase A: pairwise swaps (30 passes)              #
+    # ------------------------------------------------------------------ #
+    lq_list = [lq for lq in logical_qubits if lq in lq_to_phys]
+    n = len(lq_list)
+
+    for _pass in range(30):
+        improved = False
+        for i in range(n):
+            for j in range(i + 1, n):
+                lq1, lq2 = lq_list[i], lq_list[j]
+                p1, p2   = lq_to_phys[lq1], lq_to_phys[lq2]
+                delta = 0.0
+
+                for lq3, w in interaction_neighbors[lq1].items():
+                    if lq3 not in lq_to_phys or lq3 == lq2:
+                        continue
+                    p3    = lq_to_phys[lq3]
+                    d_old = self.distance_matrix[p1][p3]
+                    d_new = self.distance_matrix[p2][p3]
+                    delta += w * (
+                        (d_new if d_new != float('inf') else 1e9) -
+                        (d_old if d_old != float('inf') else 1e9)
+                    )
+
+                for lq3, w in interaction_neighbors[lq2].items():
+                    if lq3 not in lq_to_phys or lq3 == lq1:
+                        continue
+                    p3    = lq_to_phys[lq3]
+                    d_old = self.distance_matrix[p2][p3]
+                    d_new = self.distance_matrix[p1][p3]
+                    delta += w * (
+                        (d_new if d_new != float('inf') else 1e9) -
+                        (d_old if d_old != float('inf') else 1e9)
+                    )
+
+                if delta < -1e-9:
+                    lq_to_phys[lq1], lq_to_phys[lq2] = p2, p1
+                    improved = True
+
+        if not improved:
+            break
+
+    # ------------------------------------------------------------------ #
+    # 9. Local search – Phase B: 3-way cyclic moves on top-30 qubits     #
+    # ------------------------------------------------------------------ #
+    top_lqs    = sorted(lq_list, key=lambda lq: enhanced_degree.get(lq, 0), reverse=True)
+    top_subset = top_lqs[:min(30, n)]
+    top_n      = len(top_subset)
+
+    def eval_triple_cost(lq1, lq2, lq3, pa, pb, pc):
+        """Cost of all interaction edges touching at least one of the triple."""
+        local_pos = {lq1: pa, lq2: pb, lq3: pc}
+        cost = 0.0
+        seen = set()
+        for lq_a in (lq1, lq2, lq3):
+            for lq_b, w in interaction_neighbors[lq_a].items():
+                if lq_b not in lq_to_phys:
+                    continue
+                pair = (min(lq_a, lq_b), max(lq_a, lq_b))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                p_a = local_pos.get(lq_a, lq_to_phys[lq_a])
+                p_b = local_pos.get(lq_b, lq_to_phys[lq_b])
+                d   = self.distance_matrix[p_a][p_b]
+                cost += w * (d if d != float('inf') else 1e9)
+        return cost
+
+    for _pass in range(5):
+        improved = False
+        for i in range(top_n):
+            for j in range(i + 1, top_n):
+                for k in range(j + 1, top_n):
+                    lq1, lq2, lq3 = top_subset[i], top_subset[j], top_subset[k]
+                    p1 = lq_to_phys[lq1]
+                    p2 = lq_to_phys[lq2]
+                    p3 = lq_to_phys[lq3]
+
+                    c_curr = eval_triple_cost(lq1, lq2, lq3, p1, p2, p3)
+                    c_rot1 = eval_triple_cost(lq1, lq2, lq3, p2, p3, p1)  # lq1→p2, lq2→p3, lq3→p1
+                    c_rot2 = eval_triple_cost(lq1, lq2, lq3, p3, p1, p2)  # lq1→p3, lq2→p1, lq3→p2
+
+                    best_c = min(c_rot1, c_rot2)
+                    if best_c < c_curr - 1e-9:
+                        if c_rot1 <= c_rot2:
+                            lq_to_phys[lq1] = p2
+                            lq_to_phys[lq2] = p3
+                            lq_to_phys[lq3] = p1
+                        else:
+                            lq_to_phys[lq1] = p3
+                            lq_to_phys[lq2] = p1
+                            lq_to_phys[lq3] = p2
+                        improved = True
+
+        if not improved:
+            break
+
+    # ------------------------------------------------------------------ #
+    # 10. Build strict 1-to-1 bijection via in-place swap                #
+    # ------------------------------------------------------------------ #
+    mapping_dict         = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq               = reverse_mapping_dict[target_phys]
+        mapping_dict[lq]           = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys]  = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

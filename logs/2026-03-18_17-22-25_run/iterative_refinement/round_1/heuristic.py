@@ -1,0 +1,240 @@
+def init_mapping(self):
+    """
+    TSCR-Seeded DAG-Aware 2-Opt (TSDA-2OPT).
+
+    Phase 1 — IFWBAP Seed (retained from TSCR):
+      Anchor the highest-interaction-degree logical qubit at the most central
+      physical qubit, expand outward via dual-BFS: always pick the unplaced
+      logical qubit with the greatest interaction weight to placed qubits and
+      assign it to the hardware-neighbor candidate that minimises total weighted
+      distance to its interaction partners.
+
+    Phase 2 — Lightweight 2Q DAG + Front/Extended Layer:
+      Build a sequential 2-qubit gate DAG and extract the front layer (no
+      predecessors) and an extended BFS lookahead layer (depth-discounted).
+      This gives a DAG-aware cost H = sum_front(dist)/|front|
+                                      + 0.5 * sum_ext(dist/depth)/|ext|
+      that matches what SABRE routing will first encounter.
+
+    Phase 3 — First-Improvement 2-Opt to Convergence:
+      For all pairs of logical qubits (lq_a, lq_b), swap their physical
+      assignments if it strictly reduces H. Accept the FIRST improving swap
+      and restart (first-improvement strategy), iterate until no swap helps.
+
+      This strictly dominates TSCR's token sliding (which is bounded to
+      hardware-path moves) and FSSRLS's local search (which uses best-
+      improvement capped at n_log iterations, not true convergence).
+    """
+    from collections import defaultdict, deque
+
+    # ── Phase 1: Build interaction graph ──────────────────────────────────
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            key = (min(q1, q2), max(q1, q2))
+            interaction_weight[key] += 1.0
+
+    weighted_degree = defaultdict(float)
+    interaction_neighbors = defaultdict(dict)
+    for (q1, q2), w in interaction_weight.items():
+        weighted_degree[q1] += w
+        weighted_degree[q2] += w
+        interaction_neighbors[q1][q2] = w
+        interaction_neighbors[q2][q1] = w
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ── Phase 2: IFWBAP Seed (identical to TSCR Phase 1) ─────────────────
+    anchor_logical = max(logical_qubits, key=lambda q: weighted_degree[q])
+
+    def mean_bfs_dist(p):
+        finite = [
+            self.distance_matrix[p][o]
+            for o in physical_qubits
+            if o != p and self.distance_matrix[p][o] != float('inf')
+        ]
+        return sum(finite) / len(finite) if finite else float('inf')
+
+    anchor_physical = min(physical_qubits, key=mean_bfs_dist)
+
+    lq_to_phys = {anchor_logical: anchor_physical}
+    placed_phys = {anchor_physical}
+    unplaced = [lq for lq in logical_qubits if lq != anchor_logical]
+
+    while unplaced:
+        next_lq = max(
+            unplaced,
+            key=lambda lq: sum(interaction_neighbors[lq].get(pl, 0)
+                               for pl in lq_to_phys)
+        )
+        candidates = list({
+            nb
+            for phys in placed_phys
+            for nb in self.backend[phys]
+            if nb not in placed_phys
+        })
+        if not candidates:
+            candidates = [p for p in physical_qubits if p not in placed_phys]
+        if not candidates:
+            break
+
+        def placement_cost(phys_c, _lq=next_lq):
+            total = 0.0
+            for pl, pp in lq_to_phys.items():
+                w = interaction_neighbors[_lq].get(pl, 0)
+                if w > 0:
+                    d = self.distance_matrix[phys_c][pp]
+                    total += w * (d if d != float('inf') else 1e9)
+            return total
+
+        best_phys = min(candidates, key=placement_cost)
+        lq_to_phys[next_lq] = best_phys
+        placed_phys.add(best_phys)
+        unplaced.remove(next_lq)
+
+    remaining_phys = sorted(
+        [p for p in physical_qubits if p not in placed_phys],
+        key=lambda p: len(self.backend[p]),
+        reverse=True
+    )
+    for lq, phys in zip(unplaced, remaining_phys):
+        lq_to_phys[lq] = phys
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    # ── Phase 3: Build lightweight 2Q DAG, front + extended layers ────────
+    gates_2q = sorted(
+        (gate, qubits[0], qubits[1])
+        for gate, qubits in self.access.items()
+        if len(qubits) == 2
+    )
+
+    if not gates_2q:
+        self.mapping_dict = mapping_dict
+        self.reverse_mapping_dict = reverse_mapping_dict
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    gate_qpairs = {g: (q1, q2) for g, q1, q2 in gates_2q}
+    gate_ids = [g for g, _, _ in gates_2q]
+
+    # Sequential 2Q dependency DAG: each gate on qubit q depends on
+    # the most recent previous 2Q gate that touched q.
+    successors_dag = defaultdict(set)
+    pred_count = {g: 0 for g in gate_ids}
+    last_gate_on = {}
+
+    for gate, q1, q2 in gates_2q:
+        for q in (q1, q2):
+            if q in last_gate_on:
+                prev = last_gate_on[q]
+                if gate not in successors_dag[prev]:
+                    successors_dag[prev].add(gate)
+                    pred_count[gate] += 1
+        last_gate_on[q1] = gate
+        last_gate_on[q2] = gate
+
+    front_layer = [g for g in gate_ids if pred_count[g] == 0]
+    n_front = max(len(front_layer), 1)
+
+    LOOKAHEAD = min(40, len(gate_ids))
+    extended = []           # list of (gate_id, bfs_depth)
+    visited_ext = set(front_layer)
+    bfs_q = deque((g, 1) for g in front_layer)
+
+    while bfs_q and len(extended) < LOOKAHEAD:
+        g, depth = bfs_q.popleft()
+        for succ in successors_dag[g]:
+            if succ not in visited_ext:
+                visited_ext.add(succ)
+                extended.append((succ, depth))
+                bfs_q.append((succ, depth + 1))
+
+    n_ext = max(len(extended), 1)
+    W_EXT = 0.5  # Extended-layer weight relative to front layer
+
+    # Flatten into a single weighted gate list for cost computation:
+    #   front gates   → weight 1/n_front
+    #   extended gates at BFS depth d → weight W_EXT / (d * n_ext)
+    dag_gates = []
+    for g in front_layer:
+        q1, q2 = gate_qpairs[g]
+        dag_gates.append((q1, q2, 1.0 / n_front))
+    for g, depth in extended:
+        q1, q2 = gate_qpairs[g]
+        dag_gates.append((q1, q2, W_EXT / (depth * n_ext)))
+
+    # Per-logical-qubit index into dag_gates for O(deg) delta computation
+    lq_gate_idx = defaultdict(list)
+    for idx, (q1, q2, _) in enumerate(dag_gates):
+        lq_gate_idx[q1].append(idx)
+        lq_gate_idx[q2].append(idx)
+
+    def delta_2opt(lq_a, lq_b):
+        """Change in DAG-aware cost H if physical assignments of lq_a and lq_b are swapped."""
+        p_a = mapping_dict[lq_a]
+        p_b = mapping_dict[lq_b]
+        delta = 0.0
+        for idx in set(lq_gate_idx[lq_a]) | set(lq_gate_idx[lq_b]):
+            q1, q2, w = dag_gates[idx]
+            old_p1 = mapping_dict[q1]
+            old_p2 = mapping_dict[q2]
+            new_p1 = p_b if q1 == lq_a else (p_a if q1 == lq_b else old_p1)
+            new_p2 = p_b if q2 == lq_a else (p_a if q2 == lq_b else old_p2)
+            delta += w * (self.distance_matrix[new_p1][new_p2] -
+                          self.distance_matrix[old_p1][old_p2])
+        return delta
+
+    # ── Phase 4: First-improvement 2-opt to convergence ───────────────────
+    logical_list = list(logical_qubit_set)
+    n_lq = len(logical_list)
+
+    improved = True
+    while improved:
+        improved = False
+        for i in range(n_lq):
+            lq_a = logical_list[i]
+            for j in range(i + 1, n_lq):
+                lq_b = logical_list[j]
+                if delta_2opt(lq_a, lq_b) < -1e-9:
+                    p_a = mapping_dict[lq_a]
+                    p_b = mapping_dict[lq_b]
+                    mapping_dict[lq_a] = p_b
+                    mapping_dict[lq_b] = p_a
+                    reverse_mapping_dict[p_a] = lq_b
+                    reverse_mapping_dict[p_b] = lq_a
+                    improved = True
+                    break  # first-improvement: restart immediately
+            if improved:
+                break
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

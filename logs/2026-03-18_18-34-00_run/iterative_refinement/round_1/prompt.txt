@@ -1,0 +1,270 @@
+TASK: Iterative Refinement.
+CURRENT BEST HEURISTIC ( Critical-Path Backbone Spine Embedding)
+Score (Mean Swaps): 374.76
+Code:
+```python
+def init_mapping(self):
+    """
+    Critical-Path Backbone Spine Embedding (CPBSE)
+
+    Algorithmic pipeline:
+    1. Build a DAG restricted to 2-qubit gates only (per-qubit sequential chains).
+    2. Compute dep_count[g] = longest chain length from g in the 2q-DAG.
+       This approximates dag_dependencies_count (transitive successor count)
+       without a full bitset transitive closure.
+    3. Weighted critical path DP: weight each gate node by dep_count[g].
+       dp[g] = dep_count[g] + max(dp[s] for s in succ[g]).
+       The path starting at argmax(dp) maximises total "future importance"
+       along the chain — gates with long dependency tails are preferred.
+    4. Extract unique logical qubits in critical-path gate order.
+    5. Hardware spine: BFS shortest path between the diameter endpoints
+       (pair of physical qubits with maximum distance_matrix entry).
+    6. Zip critical-path qubits onto the spine 1-to-1.
+    7. Remaining logical qubits sorted descending by total 2q-gate frequency.
+       For each: BFS outward from the physical qubit of the single placed
+       partner with the highest interaction count to find the nearest free
+       physical qubit.  This embeds frequently-used qubits close to their
+       heaviest interaction partner rather than optimising against all partners
+       simultaneously (which can disperse placements on heavy-hex topologies).
+    8. Build strict bijection via in-place swap from identity.
+
+    Key differences from CPHSA:
+    - DAG is over 2-qubit gates only (single-qubit gates excluded from path).
+    - Critical path is weighted by dep_count (future depth), not just gate count.
+    - Greedy attachment uses BFS-nearest rather than global weighted-distance cost.
+    - Unplaced sort key is total gate frequency, not interaction to placed set.
+    """
+    from collections import defaultdict, deque
+
+    # ── Collect data ─────────────────────────────────────────────────────────
+    logical_qubit_set = set()
+    two_qubit_gates = []        # gate ids of 2-qubit gates, in program order
+    gate_freq = defaultdict(int)            # logical qubit -> 2q gate count
+    interaction_weight = defaultdict(dict)  # lq -> {lq: interaction count}
+
+    for gate, qubits in sorted(self.access.items()):
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            two_qubit_gates.append(gate)
+            gate_freq[q1] += 1
+            gate_freq[q2] += 1
+            interaction_weight[q1][q2] = interaction_weight[q1].get(q2, 0) + 1
+            interaction_weight[q2][q1] = interaction_weight[q2].get(q1, 0) + 1
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Fallback: identity mapping when no gates exist
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ── Step 1: Build 2-qubit-only DAG (per-qubit sequential chains) ─────────
+    dag_succ = {g: set() for g in two_qubit_gates}
+    dag_pred = {g: set() for g in two_qubit_gates}
+    last_2q_on_qubit = {}  # qubit -> last 2q gate that touched it
+
+    for gate in two_qubit_gates:   # already sorted by program order
+        for q in self.access[gate]:
+            if q in last_2q_on_qubit:
+                pred = last_2q_on_qubit[q]
+                dag_succ[pred].add(gate)
+                dag_pred[gate].add(pred)
+            last_2q_on_qubit[q] = gate
+
+    # ── Step 2: Topological sort (Kahn's algorithm) ───────────────────────────
+    in_deg = {g: len(dag_pred[g]) for g in two_qubit_gates}
+    queue = deque(g for g in two_qubit_gates if in_deg[g] == 0)
+    topo_order = []
+    while queue:
+        g = queue.popleft()
+        topo_order.append(g)
+        for s in dag_succ[g]:
+            in_deg[s] -= 1
+            if in_deg[s] == 0:
+                queue.append(s)
+
+    # ── Step 3: dep_count[g] = longest dependency chain from g ───────────────
+    # Approximates the transitive successor count (dag_dependencies_count).
+    # Computed in reverse topological order: O(|V| + |E|).
+    dep_count = {g: 1 for g in two_qubit_gates}
+    for g in reversed(topo_order):
+        if dag_succ[g]:
+            dep_count[g] = 1 + max(dep_count[s] for s in dag_succ[g])
+
+    # ── Step 4: Weighted critical path DP ────────────────────────────────────
+    # dp[g] = dep_count[g] + max(dp[s] for s in succ[g], default=0)
+    # A path starting at argmax(dp) maximises the sum of dep_count values,
+    # preferring chains where each gate has a long downstream dependency tail.
+    dp = {g: dep_count[g] for g in two_qubit_gates}
+    next_gate = {g: None for g in two_qubit_gates}
+
+    for g in reversed(topo_order):
+        best_w, best_s = 0, None
+        for s in dag_succ[g]:
+            if dp[s] > best_w:
+                best_w, best_s = dp[s], s
+        dp[g] = dep_count[g] + best_w
+        next_gate[g] = best_s
+
+    # ── Step 5: Trace the weighted critical path ──────────────────────────────
+    cp_qubits_ordered = []
+    if two_qubit_gates:
+        start_gate = max(two_qubit_gates, key=lambda g: dp[g])
+        critical_path = []
+        cur = start_gate
+        while cur is not None:
+            critical_path.append(cur)
+            cur = next_gate[cur]
+
+        cp_qubits_set = set()
+        for gate in critical_path:
+            for q in self.access[gate]:
+                if q not in cp_qubits_set:
+                    cp_qubits_ordered.append(q)
+                    cp_qubits_set.add(q)
+
+    # ── Step 6: Hardware spine = BFS path between diameter endpoints ──────────
+    diameter, spine_src, spine_dst = -1, physical_qubits[0], physical_qubits[0]
+    for i, p1 in enumerate(physical_qubits):
+        for p2 in physical_qubits[i + 1:]:
+            d = self.distance_matrix[p1][p2]
+            if d != float('inf') and d > diameter:
+                diameter, spine_src, spine_dst = d, p1, p2
+
+    def bfs_path(src, dst):
+        if src == dst:
+            return [src]
+        parent = {src: None}
+        bfs_q = deque([src])
+        while bfs_q:
+            cur = bfs_q.popleft()
+            for nb in self.backend[cur]:
+                if nb not in parent:
+                    parent[nb] = cur
+                    if nb == dst:
+                        path, node = [], dst
+                        while node is not None:
+                            path.append(node)
+                            node = parent.get(node)
+                        return list(reversed(path))
+                    bfs_q.append(nb)
+        return [src]
+
+    spine = bfs_path(spine_src, spine_dst)
+
+    # ── Step 7: Zip critical-path qubits onto the hardware spine ─────────────
+    lq_to_phys = {}
+    placed_phys = set()
+    for i, lq in enumerate(cp_qubits_ordered):
+        if i >= len(spine):
+            break
+        lq_to_phys[lq] = spine[i]
+        placed_phys.add(spine[i])
+
+    # ── Step 8: Greedy BFS-nearest attachment for remaining qubits ───────────
+    # Sort by total 2q-gate frequency (descending): high-traffic qubits placed first.
+    unplaced = sorted(
+        [lq for lq in logical_qubits if lq not in lq_to_phys],
+        key=lambda lq: gate_freq[lq],
+        reverse=True,
+    )
+
+    while unplaced:
+        next_lq = unplaced.pop(0)  # highest frequency remaining qubit
+
+        # Find the already-placed logical qubit with most interactions to next_lq.
+        # Use its physical location as the BFS anchor.
+        anchor_phys = None
+        best_w = -1
+        for pl_lq, pl_phys in lq_to_phys.items():
+            w = interaction_weight[next_lq].get(pl_lq, 0)
+            if w > best_w:
+                best_w, anchor_phys = w, pl_phys
+
+        # BFS outward from anchor_phys to find the nearest free physical qubit.
+        free_phys = None
+        if anchor_phys is not None:
+            visited = {anchor_phys}
+            bfs_q = deque([anchor_phys])
+            while bfs_q:
+                cur = bfs_q.popleft()
+                if cur not in placed_phys:
+                    free_phys = cur
+                    break
+                for nb in self.backend[cur]:
+                    if nb not in visited:
+                        visited.add(nb)
+                        bfs_q.append(nb)
+
+        # Fallback: any free physical qubit (for isolated / no-interaction qubits)
+        if free_phys is None:
+            for p in physical_qubits:
+                if p not in placed_phys:
+                    free_phys = p
+                    break
+
+        if free_phys is None:
+            break  # should not happen: logical qubits <= physical qubits
+
+        lq_to_phys[next_lq] = free_phys
+        placed_phys.add(free_phys)
+
+    # ── Step 9: Build strict 1-to-1 bijection over all num_qubits indices ────
+    # Start from identity permutation; apply CPBSE assignments via in-place swaps.
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+You are an expert quantum computing researcher specializing in quantum circuit mapping, routing, and compiler optimization. 
+
+Above, you have been provided with the CURRENT BEST INITIAL MAPPING HEURISTIC discovered so far and its evaluation score (Mean Routing Swaps Required after mapping - lower is better). 
+
+Your task is to perform ITERATIVE REFINEMENT to create a superior initial mapping algorithm that results in fewer routing swaps. 
+
+Please follow these steps:
+1. CRITICAL ANALYSIS: Briefly analyze the provided current best mapping heuristic. Identify its strengths and pinpoint potential inefficiencies, topological features it ignores, or DAG depths it fails to look ahead into.
+2. EVOLUTION STRATEGY: Decide whether to:
+   - OPTION A (Refine): Make targeted improvements (e.g., adding deeper lookahead to the DAG, altering the tie-breaking criteria, adding subgraph isomorphism approximations).
+   - OPTION B (Mutate): Discard the current logic and attempt a completely novel approach if you suspect the current strategy has hit a local optimum.
+3. IMPLEMENTATION: Write the complete, updated Python code for the new `init_mapping` function. 
+
+Ensure your new code adheres strictly to the baseline constraints, uses only allowed libraries, guarantees a valid 1-to-1 mapping, and maintains the required function signature.
+REQUIRED OUTPUT FORMAT :
+
+```python
+def init_mapping(self):
+    # Your code here
+    # MUST populate self.mapping_dict and self.reverse_mapping_dict
+```
+Baseline Function (for reference, your solution must be different, not just a tweak)
+
+
+```python
+def init_mapping(self):
+        self.mapping = list(range(self.num_qubits))          # mapping[i] = i
+        self.reverse_mapping = list(range(self.num_qubits))  # reverse_mapping[i] = i
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```

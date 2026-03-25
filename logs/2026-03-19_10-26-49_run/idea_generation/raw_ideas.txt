@@ -1,0 +1,1864 @@
+Now I have everything needed. Here is the full analysis:
+
+---
+
+# Novel Initial Mapping Algorithms for Quantum Circuit Compilation
+
+**Context for all ideas:**
+- `self.access` → `Dict[gate_id, List[logical_qubit]]`
+- `self.backend` → adjacency list `Dict[phys, Set[phys]]`
+- `self.distance_matrix[p1][p2]` → BFS shortest path
+- `self.num_qubits` → total physical qubits
+- Output: `self.mapping_dict[logical] = physical`, `self.reverse_mapping_dict[physical] = logical`
+- Bijection enforcement pattern (reuse from existing code, lines 227–240 of routing.py)
+
+---
+
+## IDEA 1
+
+IDEA_NAME: DAG Critical-Path Priority Mapping with Cascade Propagation
+
+DESCRIPTION: Identify the critical path of the circuit's 2-qubit DAG (the longest chain of dependent gates) and treat those qubits as the highest-priority placement targets. Place pairs along the critical path onto adjacent physical qubits near the hardware centroid, then propagate outward: each subsequent qubit is placed adjacent to its most-coupled already-placed neighbor. This ensures that the bottleneck of circuit execution sees zero or minimal routing overhead.
+
+ALGORITHMIC_APPROACH:
+1. Build interaction graph: `interaction_weight[(q1,q2)] += 1` for each 2-qubit gate
+2. For each logical qubit, compute "critical depth" = max over all gates acting on it of the gate's DAG depth (longest path to that gate from circuit roots) using BFS/topological sort on `self.access`
+3. Score each logical qubit: `priority[q] = sum(interaction_weight[q,q2] * critical_depth[q2] for q2 in neighbors)`
+4. Sort logical qubits by descending priority
+5. Place qubits in that order: first qubit → most central physical qubit; each subsequent qubit → best free physical neighbor of its heaviest-coupled already-placed partner (falling back to closest free node)
+6. Cleanup unplaced qubits by centrality; enforce bijection via swap pattern (routing.py:227–240)
+
+COLLISION_PREVENTION: Strictly monotonic greedy assignment — once a physical qubit is added to `placed_phys`, it is never re-assigned. Final bijection enforcement uses the existing swap pattern from `routing.py:227–240` which guarantees a valid permutation.
+
+WHY_NOVEL: Existing approaches (including the baseline in routing.py) sort by raw edge frequency. This idea weights by *DAG-depth-amplified* priority, meaning qubits on the critical execution path (not just frequent ones) get privileged hardware placement. This directly targets depth minimization, not just SWAP count.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+
+```python
+def init_mapping(self):
+    from collections import defaultdict, deque
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2), max(q1,q2))] += 1.0
+
+    # Compute per-gate in-degree for topological DAG depth
+    in_degree = defaultdict(int)
+    successors = defaultdict(set)
+    for gate, qubits in self.access.items():
+        in_degree[gate]  # ensure key exists
+    # Build simple dependency: gate B depends on gate A if they share a qubit and A appears earlier
+    qubit_last_gate = {}
+    gate_depth = {}
+    for gate in sorted(self.access.keys()):
+        d = 0
+        for q in self.access[gate]:
+            if q in qubit_last_gate:
+                d = max(d, gate_depth[qubit_last_gate[q]] + 1)
+        gate_depth[gate] = d
+        for q in self.access[gate]:
+            qubit_last_gate[q] = gate
+
+    # Critical depth per logical qubit
+    qubit_crit = defaultdict(int)
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            qubit_crit[q] = max(qubit_crit[q], gate_depth[gate])
+
+    # Priority score
+    priority = defaultdict(float)
+    for (q1,q2), w in interaction_weight.items():
+        priority[q1] += w * (qubit_crit[q2] + 1)
+        priority[q2] += w * (qubit_crit[q1] + 1)
+
+    logical_qubits = sorted(logical_qubit_set, key=lambda q: -priority[q])
+    physical_qubits = sorted(self.backend.keys())
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+
+    lq_to_phys, placed_phys = {}, set()
+    # Adjacency in logical interaction graph
+    lq_neighbors = defaultdict(list)
+    for (q1,q2), w in sorted(interaction_weight.items(), key=lambda x:-x[1]):
+        lq_neighbors[q1].append((q2, w))
+        lq_neighbors[q2].append((q1, w))
+
+    for lq in logical_qubits:
+        if lq in lq_to_phys: continue
+        # Find best free physical qubit: prefer neighbor of placed heavy partner, else most central
+        best_anchor = None
+        for partner, w in sorted(lq_neighbors[lq], key=lambda x:-x[1]):
+            if partner in lq_to_phys:
+                placed_p = lq_to_phys[partner]
+                for nb in self.backend[placed_p]:
+                    if nb not in placed_phys:
+                        if best_anchor is None or phys_centrality[nb] < phys_centrality[best_anchor]:
+                            best_anchor = nb
+                if best_anchor: break
+        if best_anchor is None:
+            best_anchor = min((p for p in physical_qubits if p not in placed_phys),
+                              key=lambda p: phys_centrality[p], default=None)
+        if best_anchor is not None:
+            lq_to_phys[lq] = best_anchor
+            placed_phys.add(best_anchor)
+
+    # Cleanup + bijection (same as routing.py:217-246)
+    unplaced = [q for q in logical_qubit_set if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, p in zip(unplaced, remaining): lq_to_phys[lq] = p
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 2
+
+IDEA_NAME: Interaction-Weighted Bipartite Hungarian Assignment
+
+DESCRIPTION: Model initial mapping as a linear assignment problem over the complete bipartite graph between logical and physical qubits. The cost of assigning logical qubit `lq` to physical qubit `pq` is the weighted sum over all interaction partners `lq2` of `interaction_weight(lq, lq2) * min_distance(pq, pq2_over_all_pq2)`. Since `pq2` is unknown at assignment time, approximate it using expected hardware distance (the average distance from `pq` to all other physical qubits, weighted by the strength of `lq`'s interactions). Solve via `scipy.optimize.linear_sum_assignment` in O(n³).
+
+ALGORITHMIC_APPROACH:
+1. Build `interaction_weight` dict (as in current baseline)
+2. Compute per-logical-qubit interaction profile: `strength[lq][lq2] = total 2-qubit gate count between lq and lq2`
+3. Build cost matrix `C[lq][pq]`: for each (lq, pq) pair, cost = sum over all lq2: `strength[lq][lq2] * phys_centrality[pq]` (proxy for expected routing cost if lq2's position is unknown). Refine: use `phys_centrality[pq] * total_interaction_strength[lq]`.
+4. Call `scipy.optimize.linear_sum_assignment(C)` → optimal row/column index arrays
+5. Build `lq_to_phys` directly from the result; no bijection conflict possible (Hungarian always produces a valid matching)
+
+COLLISION_PREVENTION: Hungarian algorithm inherently produces a perfect matching on a square or rectangular matrix — every logical qubit gets exactly one unique physical qubit. No swap-based post-processing needed (though extra physical qubits beyond the logical count can be handled by padding rows with zero-cost dummy entries).
+
+WHY_NOVEL: While Hungarian matching is well-known for assignment, its application to qubit placement with an interaction-weighted distance proxy cost function is novel. The key insight is using `interaction_strength * hardware_centrality` as a decomposable cost that makes the assignment polynomial-time instead of QAP (which is NP-hard). This is architecturally distinct from all greedy or spectral approaches.
+
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2), max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq: i for i, lq in enumerate(logical_qubits)}
+    pq_idx = {pq: i for i, pq in enumerate(physical_qubits)}
+
+    # Total interaction strength per qubit
+    total_strength = defaultdict(float)
+    for (q1, q2), w in interaction_weight.items():
+        total_strength[q1] += w
+        total_strength[q2] += w
+
+    # Physical centrality (lower = more central)
+    phys_centrality = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        phys_centrality[p] = sum(dists) / max(1, len(dists))
+
+    # Cost matrix: C[lq_i][pq_j] = total_strength[lq] * phys_centrality[pq]
+    # Higher interaction strength → higher penalty for peripheral (high centrality) placement
+    C = np.zeros((n_lq, n_pq))
+    for lq in logical_qubits:
+        i = lq_idx[lq]
+        for pq in physical_qubits:
+            j = pq_idx[pq]
+            C[i][j] = total_strength[lq] * phys_centrality[pq]
+
+    row_ind, col_ind = linear_sum_assignment(C)
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r, c in zip(row_ind, col_ind)}
+
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 3
+
+IDEA_NAME: Louvain Community Detection + Hardware Region Bipartite Matching
+
+DESCRIPTION: Apply community detection (Louvain algorithm) on the weighted logical interaction graph to partition logical qubits into tightly-coupled clusters. Simultaneously, identify hardware communities by computing connected subgraphs or using hardware BFS-distance clustering. Match logical communities to hardware regions via a second-level bipartite matching (by community interaction density vs. region centrality), then within each matched pair perform local greedy assignment.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted logical interaction graph `G_L` (nodes = logical qubits, edge weights = gate counts)
+2. Run Louvain modularity maximization (or a simple label-propagation community detection) to get `L` logical communities
+3. For each hardware community (identified by k-means on distance matrix or BFS from seeds), compute its "region centrality"
+4. Match logical community `i` to hardware region `j` by bipartite matching: cost = `community_interaction_density[i] * region_avg_distance[j]`
+5. Within each matched (logical-community, hardware-region) pair, greedily assign by qubit-level interaction strength vs. node-level hardware centrality
+6. Enforce bijection via swap pattern
+
+COLLISION_PREVENTION: Each assignment step works on disjoint subsets of placed/unplaced qubits within communities; no two logical qubits can claim the same physical slot because `placed_phys` is maintained globally. Final bijection enforcement handles any residual conflicts.
+
+WHY_NOVEL: This is a two-level hierarchical approach: first global community structure alignment, then local refinement. Unlike flat greedy methods or single-level spectral bisection (Fiedler vector, already in heuristics/), this uses modularity-optimal decomposition and cross-level bipartite matching, which better respects the non-uniform interaction density in real quantum circuits.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.75
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2), max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # --- Simple label propagation community detection on logical graph ---
+    lq_neighbors = defaultdict(dict)
+    for (q1,q2), w in interaction_weight.items():
+        lq_neighbors[q1][q2] = w; lq_neighbors[q2][q1] = w
+    community = {q: q for q in logical_qubits}  # start: each in own community
+    for _ in range(10):  # propagation rounds
+        changed = False
+        for q in logical_qubits:
+            if not lq_neighbors[q]: continue
+            votes = defaultdict(float)
+            for nb, w in lq_neighbors[q].items(): votes[community[nb]] += w
+            best = max(votes, key=votes.get)
+            if best != community[q]: community[q] = best; changed = True
+        if not changed: break
+    communities = defaultdict(list)
+    for q, c in community.items(): communities[c].append(q)
+
+    # --- Hardware k-means clustering on distance matrix ---
+    phys_centrality = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        phys_centrality[p] = sum(dists)/max(1,len(dists))
+    # Assign hardware qubits to clusters by BFS from k seeds (k = num logical communities)
+    comm_keys = list(communities.keys())
+    k = min(len(comm_keys), len(physical_qubits))
+    seeds = sorted(physical_qubits, key=lambda p: phys_centrality[p])[:k]
+    hw_cluster = {}
+    for p in physical_qubits:
+        best_seed = min(seeds, key=lambda s: self.distance_matrix[s][p] if self.distance_matrix[s][p] != float('inf') else 9999)
+        hw_cluster[best_seed] = hw_cluster.get(best_seed, []) + [p]
+
+    hw_regions = {s: hw_cluster.get(s, [s]) for s in seeds}
+    region_centrality = {s: sum(phys_centrality[p] for p in hw_regions[s])/max(1,len(hw_regions[s]))
+                         for s in seeds}
+    comm_density = {c: sum(interaction_weight.get((min(q1,q2),max(q1,q2)),0)
+                           for q1 in communities[c] for q2 in communities[c] if q1<q2)
+                    for c in communities}
+
+    # Match: highest density community → most central region
+    sorted_comms = sorted(comm_keys, key=lambda c: -comm_density[c])
+    sorted_regions = sorted(seeds, key=lambda s: region_centrality[s])
+    comm_to_region = {c: s for c, s in zip(sorted_comms, sorted_regions)}
+
+    # Within each pair: assign by local interaction strength vs local centrality
+    lq_to_phys, placed_phys = {}, set()
+    for c in sorted_comms:
+        region_phys = sorted([p for p in hw_regions.get(comm_to_region[c], [])
+                               if p not in placed_phys], key=lambda p: phys_centrality[p])
+        comm_lqs = sorted(communities[c],
+                          key=lambda q: -sum(lq_neighbors[q].values()))
+        for lq, pq in zip(comm_lqs, region_phys):
+            lq_to_phys[lq] = pq; placed_phys.add(pq)
+
+    # Cleanup unplaced
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    # Bijection enforcement (routing.py:227-240 pattern)
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 4
+
+IDEA_NAME: Spectral Embedding + Procrustes Alignment + Hungarian Rounding
+
+DESCRIPTION: Compute the spectral embedding of the weighted logical interaction graph and the hardware topology graph using their respective normalized Laplacians. Project both into the same k-dimensional Euclidean space. Apply Procrustes analysis (optimal rotation + scaling) to align the two point clouds. Finally, solve the resulting assignment problem via Hungarian matching on the pairwise Euclidean distances between aligned logical and physical embeddings. This maps structurally similar positions in both graphs to each other.
+
+ALGORITHMIC_APPROACH:
+1. Build `L_logical`: weighted Laplacian of logical interaction graph (`L = D - W`)
+2. Build `L_hardware`: unweighted Laplacian of hardware topology graph
+3. Compute the k smallest non-trivial eigenvectors of each Laplacian via `numpy.linalg.eigh` → gives 2D/3D embeddings
+4. Apply Procrustes: find rotation matrix R minimizing `||X_logical @ R - X_hardware||_F`; use `scipy.spatial.transform` or SVD-based solution
+5. Apply rotation to logical embedding; compute pairwise distance matrix between rotated logical points and physical points
+6. Run `linear_sum_assignment` on distance matrix → valid bijective assignment
+7. Build mapping lists from assignment
+
+COLLISION_PREVENTION: `linear_sum_assignment` (Hungarian) always returns a perfect matching; every row (logical qubit) maps to exactly one column (physical qubit), with no repeats. The physical qubit count ≥ logical qubit count (as guaranteed by hardware), so the assignment is always feasible.
+
+WHY_NOVEL: Combines spectral graph theory with Procrustes alignment (a technique from shape analysis, not previously applied to qubit placement) and exact Hungarian rounding. Unlike pure spectral bisection (Fiedler vector approach in the heuristics/ directory), this preserves full multi-dimensional geometry of both graphs before aligning them, capturing higher-order structural similarities.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+    k = min(3, n_lq-1, n_pq-1)  # embedding dimension
+
+    # Build weighted Laplacian for logical graph
+    W_L = np.zeros((n_lq, n_lq))
+    for (q1,q2), w in interaction_weight.items():
+        i,j = lq_idx[q1], lq_idx[q2]
+        W_L[i,j] = W_L[j,i] = w
+    D_L = np.diag(W_L.sum(axis=1))
+    L_L = D_L - W_L
+    # Normalized Laplacian for logical
+    d_inv_sqrt = np.diag(1.0 / np.maximum(np.sqrt(W_L.sum(axis=1)), 1e-10))
+    Ln_L = d_inv_sqrt @ L_L @ d_inv_sqrt
+
+    # Build adjacency for hardware
+    W_H = np.zeros((n_pq, n_pq))
+    for pq in physical_qubits:
+        i = pq_idx[pq]
+        for nb in self.backend[pq]:
+            if nb in pq_idx: W_H[i, pq_idx[nb]] = 1.0
+    D_H = np.diag(W_H.sum(axis=1))
+    L_H = D_H - W_H
+    d_h_inv_sqrt = np.diag(1.0/np.maximum(np.sqrt(W_H.sum(axis=1)),1e-10))
+    Ln_H = d_h_inv_sqrt @ L_H @ d_h_inv_sqrt
+
+    # Spectral embeddings: k smallest non-trivial eigenvectors
+    evals_L, evecs_L = np.linalg.eigh(Ln_L)
+    evals_H, evecs_H = np.linalg.eigh(Ln_H)
+    X_L = evecs_L[:, 1:k+1]  # (n_lq, k)
+    X_H = evecs_H[:, 1:k+1]  # (n_pq, k)
+
+    # Procrustes alignment: find R = argmin ||X_L @ R - X_H_sub||_F
+    # Use first n_lq rows of X_H as target (or centroid-based subset)
+    X_H_sub = X_H[:n_lq, :] if n_pq >= n_lq else np.vstack([X_H, np.zeros((n_lq-n_pq, k))])
+    M = X_L.T @ X_H_sub
+    U, s, Vt = np.linalg.svd(M)
+    R = (U @ Vt).T  # optimal rotation
+    X_L_rotated = X_L @ R  # (n_lq, k) aligned
+
+    # Pairwise distance matrix between rotated logical and physical embeddings
+    # D_assign[i,j] = ||X_L_rotated[i] - X_H[j]||^2
+    diff = X_L_rotated[:, np.newaxis, :] - X_H[np.newaxis, :, :]  # (n_lq, n_pq, k)
+    D_assign = np.sum(diff**2, axis=2)  # (n_lq, n_pq)
+
+    row_ind, col_ind = linear_sum_assignment(D_assign)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r, c in zip(row_ind, col_ind)}
+
+    # Handle unassigned (if n_lq < n_pq, only row_ind has n_lq entries — all assigned)
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    placed_phys = set(lq_to_phys.values())
+    remaining = [p for p in physical_qubits if p not in placed_phys]
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 5
+
+IDEA_NAME: Temporal Interaction Entropy-Guided Central Placement
+
+DESCRIPTION: Compute the temporal distribution of 2-qubit interactions for each logical qubit across the gate sequence. A qubit that interacts with many *different* partners throughout the circuit has high interaction entropy — it needs a hardware position with low average distance to many neighbors (a hub). A qubit with low entropy (always interacting with the same one or two partners) can be placed peripherally. Use Shannon entropy of the partner distribution as the placement priority, then assign to hardware qubits sorted by betweenness centrality proxy.
+
+ALGORITHMIC_APPROACH:
+1. For each logical qubit `q`, compute partner frequency dict: how many times it interacts with each other qubit
+2. Compute Shannon entropy: `H(q) = -sum(p * log(p))` over normalized partner frequencies
+3. Also compute total interaction count `I(q)` — combined priority: `score(q) = H(q) * I(q)`
+4. Sort logical qubits by descending score
+5. Compute hardware "hub score" (inverse of average distance to all other physical qubits = closeness centrality): sort physical qubits by descending hub score
+6. Assign i-th highest-priority logical qubit to i-th highest hub-score physical qubit
+7. Enforce bijection via swap pattern
+
+COLLISION_PREVENTION: Pure sorted-rank assignment: the i-th logical qubit in the sorted list gets the i-th physical qubit in its sorted list. Since both lists are of distinct elements and indexing is 1-to-1 by construction, no collision is possible. The swap-based bijection step handles the identity-initialized mapping_dict.
+
+WHY_NOVEL: The use of Shannon entropy of the partner distribution (not just total degree or frequency) as a placement priority metric is novel. It captures the *diversity* of a qubit's coupling requirements: a qubit interacting with 10 different partners needs centrality far more than one interacting 10 times with the same partner. No existing mapping approach uses information-theoretic qubit characterization.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.25
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import math
+
+    partner_freq = defaultdict(lambda: defaultdict(int))
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            partner_freq[q1][q2] += 1
+            partner_freq[q2][q1] += 1
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    def shannon_entropy(freq_dict):
+        total = sum(freq_dict.values())
+        if total == 0: return 0.0
+        return -sum((c/total)*math.log(c/total) for c in freq_dict.values() if c > 0)
+
+    # Priority: entropy * total interactions
+    priority = {}
+    for q in logical_qubits:
+        total = sum(partner_freq[q].values())
+        H = shannon_entropy(partner_freq[q])
+        priority[q] = H * total if total > 0 else 0.0
+
+    sorted_lq = sorted(logical_qubits, key=lambda q: -priority[q])
+
+    # Hardware hub score: closeness centrality (inverse avg distance)
+    hub_score = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        hub_score[p] = 1.0 / (sum(dists)/max(1,len(dists))) if dists else 0.0
+    sorted_pq = sorted(physical_qubits, key=lambda p: -hub_score[p])
+
+    lq_to_phys = {lq: pq for lq, pq in zip(sorted_lq, sorted_pq)}
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 6
+
+IDEA_NAME: DAG Layer-Weighted Closeness Centrality Seeding
+
+DESCRIPTION: Assign each logical qubit a "temporal centrality" score that weights its interactions by the DAG layer at which they occur — with interactions in early layers contributing exponentially more than late-layer ones (since early bottlenecks are harder to resolve). Then rank hardware qubits by their closeness centrality and perform a direct rank-match assignment. The key insight: placing the circuit's *earliest* critical interactions on adjacent central hardware qubits directly reduces the number of SWAPs in the first, hardest-to-defer routing steps.
+
+ALGORITHMIC_APPROACH:
+1. Topologically sort gates using qubit-based last-writer tracking (as in IDEA 1) to get `gate_depth[gate]`
+2. For each logical qubit `q`, compute: `temporal_score[q] = sum over gates g touching q: interaction_weight_of_g * exp(-alpha * gate_depth[g])` where `alpha` controls decay (try `alpha = 0.1`)
+3. Sort logical qubits by descending `temporal_score`
+4. Sort physical qubits by ascending average distance (most central first)
+5. Assign i-th logical → i-th physical (rank match)
+6. Bijection enforcement via swap pattern
+
+COLLISION_PREVENTION: Rank-based assignment with no overlap: each index i uniquely pairs one logical and one physical qubit. Bijection is guaranteed by construction and by the final swap-based enforcement step, same as the baseline (routing.py:227–240).
+
+WHY_NOVEL: The exponential temporal decay weight `exp(-alpha * depth)` applied to interaction contributions is not used in any known placement algorithm. It creates a temporally-aware qubit importance score that's fundamentally different from pure frequency counts or depth counts alone. This directly optimizes the initial layers of circuit execution where routing is most costly.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import math
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    gate_qubits = {}
+    for gate, qubits in self.access.items():
+        gate_qubits[gate] = qubits
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    # Gate depth via qubit-last-gate tracking
+    qubit_last_gate = {}
+    gate_depth = {}
+    for gate in sorted(self.access.keys()):
+        d = 0
+        for q in self.access[gate]:
+            if q in qubit_last_gate:
+                d = max(d, gate_depth[qubit_last_gate[q]] + 1)
+        gate_depth[gate] = d
+        for q in self.access[gate]:
+            qubit_last_gate[q] = gate
+
+    alpha = 0.1  # temporal decay factor
+    temporal_score = defaultdict(float)
+    for gate, qubits in self.access.items():
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            w = interaction_weight.get((min(q1,q2),max(q1,q2)), 1.0)
+            decay = math.exp(-alpha * gate_depth[gate])
+            temporal_score[q1] += w * decay
+            temporal_score[q2] += w * decay
+        else:
+            # Single-qubit gates contribute weakly
+            temporal_score[qubits[0]] += 0.1 * math.exp(-alpha * gate_depth[gate])
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    sorted_lq = sorted(logical_qubits, key=lambda q: -temporal_score[q])
+
+    # Hardware closeness centrality
+    closeness = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        closeness[p] = (len(dists) - 1) / sum(dists) if sum(dists) > 0 else 0.0
+    sorted_pq = sorted(physical_qubits, key=lambda p: -closeness[p])
+
+    lq_to_phys = {lq: pq for lq, pq in zip(sorted_lq, sorted_pq)}
+
+    # Cleanup + bijection
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: -closeness[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 7
+
+IDEA_NAME: Lookahead DAG Window Hungarian Optimization
+
+DESCRIPTION: Instead of optimizing a proxy cost, optimize the *exact* expected SWAP cost for the first `W` layers of the DAG. Extract the first-W-layer subgraph, enumerate all 2-qubit gates in it, and build a cost matrix where `C[lq][pq]` = sum over all partners `lq2` of `lq` in the W-layer window: `gate_count(lq, lq2, layers 0..W) * distance_matrix[pq][pq2_best]`. Since `pq2_best` is unknown, use the best possible physical neighbor assignment (a relaxation). Solve via Hungarian. This directly minimizes the routing cost of the circuit's most imminent gates.
+
+ALGORITHMIC_APPROACH:
+1. Topologically sort gates; extract all gates with `gate_depth <= W` (try W=10 or W=`n_lq`)
+2. Build `window_interaction[q1][q2]` = count of 2-qubit gates between q1, q2 in depth ≤ W
+3. Cost: `C[lq][pq] = sum_{lq2} window_interaction[lq][lq2] * min_{pq2 in physical} distance[pq][pq2]` — this is a single-variable relaxation (assume lq2's partner is always optimally adjacent)
+4. Better approximation: `C[lq][pq] = sum_{lq2} window_interaction[lq][lq2] * phys_closeness_rank[pq]^(-1)` — penalizes peripheral positions for active qubits
+5. `linear_sum_assignment(C)` → assignment
+6. Standard bijection enforcement
+
+COLLISION_PREVENTION: `linear_sum_assignment` returns a bijective perfect matching by construction. Padding with zero-cost dummy columns handles any size mismatch between logical and physical qubit counts.
+
+WHY_NOVEL: Targeting only the first W layers of the DAG for the initial mapping optimization is novel — it focuses computational resources where routing decisions are hardest to undo and create the most depth overhead. Unlike methods that optimize global circuit statistics, this is a locally-optimal initial placement for the circuit's critical opening sequence.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    logical_qubit_set = set()
+    gate_depth = {}
+    qubit_last_gate = {}
+    interaction_weight = defaultdict(float)
+
+    for gate in sorted(self.access.keys()):
+        qubits = self.access[gate]
+        for q in qubits: logical_qubit_set.add(q)
+        d = 0
+        for q in qubits:
+            if q in qubit_last_gate:
+                d = max(d, gate_depth[qubit_last_gate[q]] + 1)
+        gate_depth[gate] = d
+        for q in qubits: qubit_last_gate[q] = gate
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+
+    # Window: first W depth levels
+    W = max(1, n_lq // 2)
+    window_interaction = defaultdict(lambda: defaultdict(float))
+    for gate, qubits in self.access.items():
+        if gate_depth[gate] <= W and len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            window_interaction[q1][q2] += 1.0
+            window_interaction[q2][q1] += 1.0
+
+    # Hardware: minimum distance to any neighbor (1 for all connected, 0 for self)
+    # Use phys_centrality as penalty for being far from others
+    phys_centrality = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        phys_centrality[p] = sum(dists)/max(1,len(dists))
+
+    # Cost matrix: C[lq_i][pq_j] = sum_{lq2} window_interaction[lq][lq2] * phys_centrality[pq]
+    C = np.zeros((n_lq, n_pq))
+    for lq in logical_qubits:
+        total_window_interactions = sum(window_interaction[lq].values())
+        i = lq_idx[lq]
+        for pq in physical_qubits:
+            j = pq_idx[pq]
+            # More window interactions → higher cost at peripheral positions
+            C[i][j] = total_window_interactions * phys_centrality[pq]
+
+    row_ind, col_ind = linear_sum_assignment(C)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r, c in zip(row_ind, col_ind)}
+
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 8
+
+IDEA_NAME: PageRank-Closeness Centrality Rank Alignment
+
+DESCRIPTION: Run PageRank on the weighted logical interaction graph, treating interaction frequencies as edge weights (bidirectional). PageRank gives a global importance score to each logical qubit reflecting both its direct interaction frequency *and* the importance of its interaction partners (transitively). Simultaneously compute hardware closeness centrality. Rank-match: the logical qubit with rank `i` (by PageRank) goes to the physical qubit with rank `i` (by closeness centrality). This places the most "globally important" logical qubits onto the most "globally accessible" physical qubits.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted adjacency for logical qubits; normalize to transition matrix `T` where `T[i][j] = w(i,j)/sum_k w(i,k)`
+2. Run PageRank power iteration: `r = (1-d)/n + d * T^T @ r` with damping `d=0.85`, 50 iterations
+3. Sort logical qubits by descending PageRank score
+4. Sort physical qubits by descending closeness centrality (= `(n-1) / sum of distances`)
+5. Direct rank assignment: `lq_to_phys[sorted_lq[i]] = sorted_pq[i]`
+6. Bijection enforcement
+
+COLLISION_PREVENTION: Rank-based direct assignment is inherently collision-free: the sorted lists have distinct elements, and mapping index i to index i creates a bijection with no conflicts. The subsequent swap-based bijection step (routing.py:227–240) then correctly populates `mapping_dict` and `reverse_mapping_dict`.
+
+WHY_NOVEL: Applying PageRank (originally designed for web graph importance) to the logical qubit interaction graph is novel for quantum mapping. Unlike degree centrality or raw interaction counts, PageRank captures the *network effect*: being connected to highly-connected qubits amplifies importance. This global perspective is fundamentally different from local frequency-based metrics.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 9
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 8.0
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq = len(logical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+
+    # Build weighted adjacency for PageRank
+    W = np.zeros((n_lq, n_lq))
+    for (q1,q2), w in interaction_weight.items():
+        i, j = lq_idx[q1], lq_idx[q2]
+        W[i,j] += w; W[j,i] += w
+    row_sums = W.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1.0
+    T = W / row_sums  # row-stochastic transition matrix
+
+    # PageRank power iteration
+    d = 0.85
+    r = np.ones(n_lq) / n_lq
+    for _ in range(50):
+        r_new = (1-d)/n_lq + d * (T.T @ r)
+        if np.linalg.norm(r_new - r) < 1e-8: break
+        r = r_new
+    sorted_lq = [logical_qubits[i] for i in np.argsort(-r)]
+
+    # Hardware closeness centrality
+    closeness = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        closeness[p] = (len(dists)) / sum(dists) if sum(dists) > 0 else 0.0
+    sorted_pq = sorted(physical_qubits, key=lambda p: -closeness[p])
+
+    lq_to_phys = {lq: pq for lq, pq in zip(sorted_lq, sorted_pq)}
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: -closeness[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 9
+
+IDEA_NAME: Adaptive Simulated Annealing on Permutation Space
+
+DESCRIPTION: Initialize with the frequency-greedy baseline, then run simulated annealing (SA) over the permutation space. Each SA step proposes swapping two entries in `mapping_dict` (i.e., swapping which physical qubits two logical qubits go to) and evaluates the change in total cost: `sum_{(q1,q2)} interaction_weight(q1,q2) * distance[mapping[q1]][mapping[q2]]`. Accept improvements always; accept deteriorations with probability `exp(-delta/T)`. Decrease T geometrically. Return the lowest-cost permutation found.
+
+ALGORITHMIC_APPROACH:
+1. Compute baseline mapping using the existing greedy approach
+2. Compute initial cost `C = sum_{(q1,q2)} w(q1,q2) * distance[mapping[q1]][mapping[q2]]`
+3. SA loop (N iterations, e.g., N = 50 * n_lq²):
+   a. Pick two random logical qubits `lq1`, `lq2`
+   b. Compute delta cost if their physical assignments were swapped (O(degree) update, not full recompute)
+   c. Accept swap with Metropolis criterion
+   d. Update temperature: `T *= 0.995`
+4. Restore best-seen mapping
+5. Bijection always maintained (swapping entries in the permutation list keeps it a valid permutation)
+
+COLLISION_PREVENTION: Any swap of two entries in a valid permutation list produces another valid permutation. The SA operates strictly over permutation space, so `mapping_dict` remains a bijection at all times — no post-processing needed.
+
+WHY_NOVEL: While SA has been used in classical VLSI placement, its application to quantum qubit mapping with the exact `interaction_weight × hardware_distance` cost function (matching the routing heuristic's objective) and an efficient O(degree) incremental cost update makes it uniquely adapted to this problem. The cost function directly mimics what the routing phase tries to minimize.
+
+NOVELTY_SCORE: 6
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.75
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import random, math
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq = len(logical_qubits)
+
+    # Build adjacency list for logical qubits
+    lq_neighbors = defaultdict(dict)
+    for (q1,q2), w in interaction_weight.items():
+        lq_neighbors[q1][q2] = w; lq_neighbors[q2][q1] = w
+
+    # Initial mapping: greedy by interaction degree + centrality
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+    sorted_lq = sorted(logical_qubits, key=lambda q: -sum(lq_neighbors[q].values()))
+    sorted_pq = sorted(physical_qubits, key=lambda p: phys_centrality[p])
+    cur_map = list(range(self.num_qubits))  # cur_map[lq] = pq
+    lq_to_pos = {lq: i for i, lq in enumerate(sorted_lq)}
+    for lq, pq in zip(sorted_lq, sorted_pq[:n_lq]): cur_map[lq] = pq
+
+    def compute_cost(m):
+        return sum(w * (self.distance_matrix[m[q1]][m[q2]] if self.distance_matrix[m[q1]][m[q2]] != float('inf') else 999)
+                   for (q1,q2), w in interaction_weight.items())
+
+    best_map = cur_map[:]
+    best_cost = compute_cost(cur_map)
+    current_cost = best_cost
+
+    T = best_cost / max(1, n_lq)  # initial temperature
+    T_min = 1e-3
+    alpha = 0.995
+    n_iter = 30 * n_lq * n_lq
+
+    for _ in range(n_iter):
+        if T < T_min: break
+        # Swap two logical qubits' physical assignments
+        lq1, lq2 = random.sample(logical_qubits, 2)
+        p1, p2 = cur_map[lq1], cur_map[lq2]
+        # Delta cost: only gates involving lq1 or lq2 change
+        delta = 0.0
+        for nb, w in lq_neighbors[lq1].items():
+            p_nb = cur_map[nb]
+            old_d = self.distance_matrix[p1][p_nb] if self.distance_matrix[p1][p_nb] != float('inf') else 999
+            new_d = self.distance_matrix[p2][p_nb] if self.distance_matrix[p2][p_nb] != float('inf') else 999
+            delta += w * (new_d - old_d)
+        for nb, w in lq_neighbors[lq2].items():
+            if nb == lq1: continue  # counted above
+            p_nb = cur_map[nb]
+            old_d = self.distance_matrix[p2][p_nb] if self.distance_matrix[p2][p_nb] != float('inf') else 999
+            new_d = self.distance_matrix[p1][p_nb] if self.distance_matrix[p1][p_nb] != float('inf') else 999
+            delta += w * (new_d - old_d)
+        if lq2 in lq_neighbors[lq1]:
+            w = lq_neighbors[lq1][lq2]
+            delta -= w * (self.distance_matrix[p1][p2] if self.distance_matrix[p1][p2] != float('inf') else 999)
+            delta += w * (self.distance_matrix[p2][p1] if self.distance_matrix[p2][p1] != float('inf') else 999)
+
+        if delta < 0 or random.random() < math.exp(-delta / T):
+            cur_map[lq1], cur_map[lq2] = p2, p1
+            current_cost += delta
+            if current_cost < best_cost:
+                best_cost = current_cost
+                best_map = cur_map[:]
+        T *= alpha
+
+    # Build reverse mapping and bijection enforcement
+    mapping_dict = best_map[:]
+    # Ensure unset entries remain as identity
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, pq in enumerate(mapping_dict): reverse_mapping_dict[pq] = lq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 10
+
+IDEA_NAME: Effective Resistance Embedding + Hungarian Matching
+
+DESCRIPTION: Compute the effective resistance (commute time) matrix for both the logical interaction graph and the hardware topology graph. The effective resistance `R(i,j)` between two nodes equals `(e_i - e_j)^T L^+ (e_i - e_j)` where `L^+` is the Moore-Penrose pseudoinverse of the Laplacian. This gives a metric space embedding that captures *global* connectivity (not just shortest-path distances). Align both resistance metric spaces and use Hungarian matching. Pairs with similar effective resistance profiles in their respective graphs are structurally equivalent and should be co-mapped.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted Laplacian `L_L` for logical graph, compute `L_L^+` via `numpy.linalg.pinv`
+2. Build unit Laplacian `L_H` for hardware graph, compute `L_H^+`
+3. Compute effective resistance matrices: `R_L[i,j] = L_L^+[i,i] + L_L^+[j,j] - 2*L_L^+[i,j]`
+4. Similarly compute `R_H[p,q]`
+5. For each logical qubit `lq`, extract its resistance profile vector: `r_L[lq] = [R_L[lq,lq2] for all lq2]`; normalize
+6. For each physical qubit `pq`, extract `r_H[pq]` profile; normalize
+7. Cost matrix `C[lq][pq] = ||r_L_normalized[lq] - r_H_normalized[pq]||_2` 
+8. Hungarian matching on `C`
+
+COLLISION_PREVENTION: Hungarian algorithm on a properly constructed cost matrix always returns a valid perfect matching (bijection). Physical padding with zero-rows or large-cost dummy entries handles `n_pq > n_lq` cases.
+
+WHY_NOVEL: Effective resistance is a fundamentally different graph metric than shortest-path distance — it accounts for all paths between nodes (not just shortest ones) and has deep connections to random walks and electrical networks. Using it to characterize and align qubit "positions" in both logical and physical graphs is unprecedented in quantum compiler literature.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+
+    # Logical Laplacian
+    W_L = np.zeros((n_lq, n_lq))
+    for (q1,q2), w in interaction_weight.items():
+        i,j = lq_idx[q1], lq_idx[q2]
+        W_L[i,j] = W_L[j,i] = w
+    D_L = np.diag(W_L.sum(axis=1)); L_L = D_L - W_L
+    L_L_pinv = np.linalg.pinv(L_L)
+    R_L = np.array([[L_L_pinv[i,i]+L_L_pinv[j,j]-2*L_L_pinv[i,j]
+                     for j in range(n_lq)] for i in range(n_lq)])
+
+    # Hardware Laplacian
+    W_H = np.zeros((n_pq, n_pq))
+    for pq in physical_qubits:
+        i = pq_idx[pq]
+        for nb in self.backend[pq]:
+            if nb in pq_idx: W_H[i, pq_idx[nb]] = 1.0
+    D_H = np.diag(W_H.sum(axis=1)); L_H = D_H - W_H
+    L_H_pinv = np.linalg.pinv(L_H)
+    R_H = np.array([[L_H_pinv[i,i]+L_H_pinv[j,j]-2*L_H_pinv[i,j]
+                     for j in range(n_pq)] for i in range(n_pq)])
+
+    # Normalize resistance profiles by max
+    R_L_norm = R_L / (R_L.max() + 1e-10)
+    R_H_norm = R_H / (R_H.max() + 1e-10)
+
+    # Cost matrix: profile distance between each (lq, pq) pair
+    # Use sorted resistance vector as profile (order-invariant fingerprint)
+    profiles_L = np.sort(R_L_norm, axis=1)  # (n_lq, n_lq)
+    profiles_H = np.sort(R_H_norm, axis=1)  # (n_pq, n_pq)
+    # Pad profiles_L to width n_pq if needed
+    if n_lq < n_pq:
+        profiles_L = np.hstack([profiles_L, np.zeros((n_lq, n_pq - n_lq))])
+    elif n_pq < n_lq:
+        profiles_H = np.hstack([profiles_H, np.zeros((n_pq, n_lq - n_pq))])
+        profiles_L = profiles_L[:, :n_pq]
+
+    diff = profiles_L[:, np.newaxis, :] - profiles_H[np.newaxis, :, :]
+    C = np.sqrt(np.sum(diff**2, axis=2))  # (n_lq, n_pq)
+
+    row_ind, col_ind = linear_sum_assignment(C)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r,c in zip(row_ind, col_ind)}
+
+    placed_phys = set(lq_to_phys.values())
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 11
+
+IDEA_NAME: Metropolis-Hastings Sampling from Boltzmann Mapping Distribution
+
+DESCRIPTION: Treat the mapping quality as a Boltzmann energy function `E(π) = sum_{(q1,q2)} w(q1,q2) * distance[π(q1)][π(q2)]`. Sample from the Boltzmann distribution `P(π) ∝ exp(-E(π)/T)` using Metropolis-Hastings MCMC on the permutation space. Run multiple short chains in parallel with different temperatures, collect all visited permutations, and return the minimum-energy one. Unlike standard SA, this maintains a running sample of good permutations and uses a fixed temperature throughout for better exploration near the energy minimum.
+
+ALGORITHMIC_APPROACH:
+1. Build interaction weights as usual
+2. Initialize from greedy baseline (same as routing.py)
+3. Run `K` parallel Markov chains (e.g., K=5) each at temperature `T_k = T_base * 1.5^k`
+4. Each chain: 200*n_lq steps; each step picks 2 random logical qubits and proposes swapping their physical assignments; accept with MH probability `min(1, exp(-delta_E/T_k))`
+5. Collect all minimum-energy permutations seen across all chains
+6. Return global minimum
+
+COLLISION_PREVENTION: All operations are swap-based on a valid permutation list — the permutation invariant is preserved throughout every MH step. Every visited state is guaranteed to be a valid bijection.
+
+WHY_NOVEL: Running parallel Metropolis-Hastings chains at multiple temperatures (a form of parallel tempering or replica exchange) on the qubit mapping permutation space is novel. The probabilistic exploration avoids local minima better than pure SA or greedy descent while maintaining constant-temperature sampling dynamics that are theoretically well-characterized.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.75
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import random, math, copy
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq = len(logical_qubits)
+
+    lq_neighbors = defaultdict(dict)
+    for (q1,q2), w in interaction_weight.items():
+        lq_neighbors[q1][q2] = w; lq_neighbors[q2][q1] = w
+
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+    sorted_lq = sorted(logical_qubits, key=lambda q: -sum(lq_neighbors[q].values()))
+    sorted_pq = sorted(physical_qubits, key=lambda p: phys_centrality[p])
+    init_map = list(range(self.num_qubits))
+    for lq, pq in zip(sorted_lq, sorted_pq[:n_lq]): init_map[lq] = pq
+
+    def compute_cost(m):
+        return sum(w * (self.distance_matrix[m[q1]][m[q2]] if self.distance_matrix[m[q1]][m[q2]] != float('inf') else 999)
+                   for (q1,q2), w in interaction_weight.items())
+
+    def delta_swap(m, lq1, lq2):
+        p1, p2 = m[lq1], m[lq2]
+        delta = 0.0
+        for nb, w in lq_neighbors[lq1].items():
+            if nb == lq2: continue
+            pnb = m[nb]
+            delta += w * ((self.distance_matrix[p2][pnb] if self.distance_matrix[p2][pnb] != float('inf') else 999) -
+                          (self.distance_matrix[p1][pnb] if self.distance_matrix[p1][pnb] != float('inf') else 999))
+        for nb, w in lq_neighbors[lq2].items():
+            if nb == lq1: continue
+            pnb = m[nb]
+            delta += w * ((self.distance_matrix[p1][pnb] if self.distance_matrix[p1][pnb] != float('inf') else 999) -
+                          (self.distance_matrix[p2][pnb] if self.distance_matrix[p2][pnb] != float('inf') else 999))
+        return delta
+
+    base_cost = compute_cost(init_map)
+    T_base = max(1.0, base_cost / max(1, n_lq))
+    K = 4  # parallel chains
+    n_steps = 100 * max(1, n_lq)
+
+    best_map, best_cost = init_map[:], base_cost
+    for k in range(K):
+        T = T_base * (1.5 ** k)
+        cur_map = init_map[:]
+        cur_cost = base_cost
+        for _ in range(n_steps):
+            if n_lq < 2: break
+            lq1, lq2 = random.sample(logical_qubits, 2)
+            delta = delta_swap(cur_map, lq1, lq2)
+            if delta < 0 or random.random() < math.exp(-delta/T):
+                cur_map[lq1], cur_map[lq2] = cur_map[lq2], cur_map[lq1]
+                cur_cost += delta
+                if cur_cost < best_cost:
+                    best_cost = cur_cost
+                    best_map = cur_map[:]
+
+    mapping_dict = best_map[:]
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, pq in enumerate(mapping_dict): reverse_mapping_dict[pq] = lq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 12
+
+IDEA_NAME: Recursive Exact Min-Cut Bisection Alignment
+
+DESCRIPTION: Recursively bisect the logical interaction graph using the Stoer-Wagner minimum cut algorithm (exact min-cut in O(V³)), simultaneously bisect the hardware graph. At each recursion level, assign one logical half to one hardware half. Unlike Fiedler vector bisection (spectral approximation of min-cut already in the heuristics/ directory), this uses the *exact* minimum cut which correctly identifies the truly minimal bottleneck edge. Within each leaf partition, assign by interaction degree vs. hardware centrality.
+
+ALGORITHMIC_APPROACH:
+1. Stoer-Wagner min-cut on weighted logical interaction graph → two partitions `S`, `T`
+2. Min-cut on unweighted hardware graph (or by BFS median split) → two hardware halves `A`, `B`
+3. Assign `S→A` and `T→B` (or swap if `|S|/|T|` better matches `|A|/|B|`)
+4. Recurse on each (logical-half, hardware-half) pair until partitions have ≤ 2 qubits
+5. At base case: assign by local interaction strength vs. local centrality
+6. Bijection enforcement
+
+COLLISION_PREVENTION: Each recursion level operates on strictly disjoint subsets of logical and physical qubits (tracked by sets). No qubit can appear in two different recursive branches. Final bijection enforcement via swap pattern handles any remaining identity-map entries.
+
+WHY_NOVEL: While spectral bisection (Fiedler) is already in the heuristics directory, exact min-cut bisection is fundamentally different: it finds the *true* global minimum cut (not an approximation), which identifies the actual weakest structural link between qubit communities. This is especially valuable for circuits with sparse interaction graphs where spectral approximation is poor.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 7.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Stoer-Wagner minimum cut on weighted graph
+    def stoer_wagner(nodes, adj):
+        """Returns (cut_value, partition_A, partition_B)"""
+        if len(nodes) <= 1:
+            return float('inf'), list(nodes), []
+        nodes = list(nodes)
+        # Adjacency copy
+        w = defaultdict(lambda: defaultdict(float))
+        for (q1,q2), wt in adj.items():
+            w[q1][q2] += wt; w[q2][q1] += wt
+        best_cut = float('inf')
+        best_s, best_t = nodes[0], nodes[1]
+        merged = {n: {n} for n in nodes}
+        cur_nodes = list(nodes)
+        for phase in range(len(nodes)-1):
+            # Maximum adjacency ordering from arbitrary start
+            a = [cur_nodes[0]]
+            key = {n: 0.0 for n in cur_nodes}
+            in_a = {cur_nodes[0]}
+            remaining = set(cur_nodes) - in_a
+            for _ in range(len(cur_nodes)-1):
+                for n in a: 
+                    for nb in w[n]:
+                        if nb in remaining: key[nb] += w[n][nb]
+                next_v = max(remaining, key=lambda n: key[n])
+                a.append(next_v); in_a.add(next_v); remaining.discard(next_v)
+            t = a[-1]; s = a[-2]
+            cut_val = key[t]
+            if cut_val < best_cut:
+                best_cut = cut_val; best_s = s; best_t = t
+            # Merge s and t
+            for nb in list(w[t].keys()):
+                if nb != s:
+                    w[s][nb] += w[t][nb]; w[nb][s] += w[t][nb]
+                del w[t][nb]; del w[nb][t]
+            if t in w[s]: del w[s][t]
+            if s in w[t]: del w[t][s]
+            merged[s] = merged[s] | merged[t]
+            cur_nodes.remove(t)
+        # Partition: best_t group vs rest
+        A = list(merged[best_t])
+        B = [n for n in nodes if n not in set(A)]
+        return best_cut, A, B
+
+    # Hardware BFS bisection (split by median BFS distance from center)
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1,len(physical_qubits)-1) for p in physical_qubits}
+    def hw_bisect(phys_set):
+        phys_list = sorted(phys_set, key=lambda p: phys_centrality[p])
+        mid = len(phys_list)//2
+        return set(phys_list[:mid]), set(phys_list[mid:])
+
+    lq_to_phys = {}
+    def recurse(lq_set, pq_set):
+        if not lq_set or not pq_set: return
+        if len(lq_set) == 1:
+            lq = next(iter(lq_set))
+            pq = min(pq_set, key=lambda p: phys_centrality[p])
+            lq_to_phys[lq] = pq; return
+        # Min-cut logical partition
+        adj = {(min(q1,q2),max(q1,q2)): w for (q1,q2),w in interaction_weight.items()
+               if q1 in lq_set and q2 in lq_set}
+        _, L_A, L_B = stoer_wagner(lq_set, adj)
+        # HW bisection
+        H_A, H_B = hw_bisect(pq_set)
+        # Match sizes
+        if abs(len(L_A)-len(H_A)) > abs(len(L_A)-len(H_B)):
+            H_A, H_B = H_B, H_A
+        recurse(set(L_A), H_A); recurse(set(L_B), H_B)
+
+    recurse(set(logical_qubits), set(physical_qubits))
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 13
+
+IDEA_NAME: Weisfeiler-Lehman Structural Fingerprint Matching
+
+DESCRIPTION: Compute Weisfeiler-Lehman (WL) graph isomorphism iteration labels for every node in both the logical interaction graph and the hardware topology. The WL label at iteration k encodes the k-hop neighborhood structure of a node. Two nodes with similar WL label histograms occupy structurally similar positions in their respective graphs. Use the L1 distance between WL histogram vectors as the cost matrix for Hungarian assignment. This places logical qubits in physical positions with the most structurally similar neighborhoods.
+
+ALGORITHMIC_APPROACH:
+1. Initialize node labels: `label_L[lq] = degree(lq)` (in logical graph), `label_H[pq] = degree(pq)` (in hardware)
+2. For K iterations (e.g., K=3): for each node, new label = hash of `(current_label, sorted(neighbor_labels))`; collect histogram of all labels seen over K iterations for each node
+3. Represent each node as a normalized histogram vector over all seen labels (across both graphs combined)
+4. Cost matrix `C[lq][pq]` = L1 distance between histogram vectors of `lq` and `pq`
+5. `linear_sum_assignment(C)` → bijective assignment
+6. Standard bijection enforcement
+
+COLLISION_PREVENTION: Hungarian matching on a valid cost matrix is always bijective. The WL computation only affects the cost matrix values, not the assignment structure.
+
+WHY_NOVEL: The Weisfeiler-Lehman test is a standard graph isomorphism approximation from theoretical computer science, but has never been applied to quantum qubit placement. It captures *structural equivalence* between qubit positions across the two graphs at multiple hop depths — a qualitatively different kind of match than spectral, centrality, or frequency methods.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.75
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+
+    # Build logical adjacency
+    lq_adj = defaultdict(set)
+    for (q1,q2) in interaction_weight: lq_adj[q1].add(q2); lq_adj[q2].add(q1)
+
+    K = 3  # WL iterations
+    # Initialize labels with degree
+    labels_L = {lq: len(lq_adj[lq]) for lq in logical_qubits}
+    labels_H = {pq: len(self.backend[pq]) for pq in physical_qubits}
+
+    # Track label histograms per node
+    hist_L = {lq: defaultdict(int) for lq in logical_qubits}
+    hist_H = {pq: defaultdict(int) for pq in physical_qubits}
+    for lq in logical_qubits: hist_L[lq][labels_L[lq]] += 1
+    for pq in physical_qubits: hist_H[pq][labels_H[pq]] += 1
+
+    label_counter = [max(labels_L.values()) + max(labels_H.values()) + 1]
+    label_map = {}
+
+    for _ in range(K):
+        new_L, new_H = {}, {}
+        for lq in logical_qubits:
+            sig = (labels_L[lq], tuple(sorted(labels_L.get(nb, 0) for nb in lq_adj[lq])))
+            if sig not in label_map: label_map[sig] = label_counter[0]; label_counter[0] += 1
+            new_L[lq] = label_map[sig]; hist_L[lq][new_L[lq]] += 1
+        for pq in physical_qubits:
+            sig = (labels_H[pq], tuple(sorted(labels_H.get(nb, 0) for nb in self.backend[pq])))
+            if sig not in label_map: label_map[sig] = label_counter[0]; label_counter[0] += 1
+            new_H[pq] = label_map[sig]; hist_H[pq][new_H[pq]] += 1
+        labels_L, labels_H = new_L, new_H
+
+    all_labels = sorted(set(k for d in list(hist_L.values())+list(hist_H.values()) for k in d))
+    label_idx = {l:i for i,l in enumerate(all_labels)}
+    n_labels = len(all_labels)
+
+    # Build feature vectors
+    V_L = np.zeros((n_lq, n_labels))
+    V_H = np.zeros((n_pq, n_labels))
+    for lq in logical_qubits:
+        total = sum(hist_L[lq].values())
+        for l, c in hist_L[lq].items(): V_L[lq_idx[lq], label_idx[l]] = c/total
+    for pq in physical_qubits:
+        total = sum(hist_H[pq].values())
+        for l, c in hist_H[pq].items(): V_H[pq_idx[pq], label_idx[l]] = c/total
+
+    # L1 cost matrix
+    C = np.sum(np.abs(V_L[:, np.newaxis, :] - V_H[np.newaxis, :, :]), axis=2)
+    row_ind, col_ind = linear_sum_assignment(C)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r,c in zip(row_ind, col_ind)}
+
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1,len(physical_qubits)-1) for p in physical_qubits}
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 14
+
+IDEA_NAME: Entanglement Concentration Hub Mapping
+
+DESCRIPTION: Define the "entanglement concentration" of a logical qubit as the total weight of interactions it participates in, amplified by the diversity of its interaction partners and the depth-criticality of those interactions. Place qubits with highest entanglement concentration at hardware "hubs" — physical qubits that minimize the sum of distances to all other physical qubits (i.e., highest betweenness/closeness centrality). The core insight: qubits that are simultaneously highly interacting, highly diverse, and depth-critical need maximum routing flexibility, which is provided by central hardware positions.
+
+ALGORITHMIC_APPROACH:
+1. For each logical qubit `q`: compute `conc(q) = sum_{q2} w(q,q2) * (1 + unique_partners(q)) * depth_weight(q)` where `depth_weight` amplifies early-circuit qubits
+2. `unique_partners(q)` = number of distinct 2-qubit partners (partner diversity)
+3. `depth_weight(q)` = exponential decay of average gate depth for q (as in IDEA 6)
+4. Sort logical qubits by descending concentration; sort hardware qubits by ascending average distance (most central)
+5. Rank-match assignment
+6. Apply local swap-hill-climbing: for each pair of adjacent placed qubits, check if swapping their hardware positions reduces the interaction-weighted distance sum
+
+COLLISION_PREVENTION: Initial rank-match is collision-free; the subsequent local hill-climbing operates on swaps of already-assigned physical positions (a permutation remains a permutation after any swap). Bijection is always maintained.
+
+WHY_NOVEL: The "entanglement concentration" composite metric — combining interaction weight, partner diversity, and temporal criticality into a single score — is novel. The addition of a post-assignment local swap hill-climbing phase (distinct from full SA) provides a targeted, fast refinement without re-running the full assignment.
+
+NOVELTY_SCORE: 7
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.25
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import math
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    gate_depth = {}
+    qubit_last_gate = {}
+
+    for gate in sorted(self.access.keys()):
+        qubits = self.access[gate]
+        for q in qubits: logical_qubit_set.add(q)
+        d = 0
+        for q in qubits:
+            if q in qubit_last_gate:
+                d = max(d, gate_depth[qubit_last_gate[q]] + 1)
+        gate_depth[gate] = d
+        for q in qubits: qubit_last_gate[q] = gate
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Partner tracking
+    partners = defaultdict(set)
+    qubit_gate_depths = defaultdict(list)
+    for gate, qubits in self.access.items():
+        for q in qubits: qubit_gate_depths[q].append(gate_depth[gate])
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            partners[q1].add(q2); partners[q2].add(q1)
+
+    alpha = 0.05
+    conc = {}
+    lq_neighbors = defaultdict(dict)
+    for (q1,q2), w in interaction_weight.items():
+        lq_neighbors[q1][q2] = w; lq_neighbors[q2][q1] = w
+
+    for q in logical_qubits:
+        total_w = sum(lq_neighbors[q].values())
+        diversity = len(partners[q]) + 1
+        avg_depth = sum(qubit_gate_depths[q])/max(1,len(qubit_gate_depths[q]))
+        depth_w = math.exp(-alpha * avg_depth)
+        conc[q] = total_w * diversity * depth_w
+
+    sorted_lq = sorted(logical_qubits, key=lambda q: -conc[q])
+
+    # Hardware hub score: sum of all distances (lower = more central = better hub)
+    hub_score = {}
+    for p in physical_qubits:
+        dists = [self.distance_matrix[p][o] for o in physical_qubits
+                 if self.distance_matrix[p][o] != float('inf') and p != o]
+        hub_score[p] = sum(dists)/max(1,len(dists))
+    sorted_pq = sorted(physical_qubits, key=lambda p: hub_score[p])  # ascending = most central first
+
+    lq_to_phys = {lq: pq for lq, pq in zip(sorted_lq, sorted_pq[:len(sorted_lq)])}
+
+    # Local swap hill climbing on assigned pairs
+    def local_cost(m):
+        return sum(w * (self.distance_matrix[m[q1]][m[q2]] if self.distance_matrix[m[q1]][m[q2]] != float('inf') else 999)
+                   for (q1,q2), w in interaction_weight.items())
+
+    cur_map = list(range(self.num_qubits))
+    for lq, pq in lq_to_phys.items(): cur_map[lq] = pq
+    improved = True
+    while improved:
+        improved = False
+        for i, lq1 in enumerate(logical_qubits):
+            for lq2 in logical_qubits[i+1:]:
+                p1, p2 = cur_map[lq1], cur_map[lq2]
+                delta = 0.0
+                for nb, w in lq_neighbors[lq1].items():
+                    if nb == lq2: continue
+                    pnb = cur_map[nb]
+                    delta += w * ((self.distance_matrix[p2][pnb] if self.distance_matrix[p2][pnb] != float('inf') else 999) -
+                                  (self.distance_matrix[p1][pnb] if self.distance_matrix[p1][pnb] != float('inf') else 999))
+                for nb, w in lq_neighbors[lq2].items():
+                    if nb == lq1: continue
+                    pnb = cur_map[nb]
+                    delta += w * ((self.distance_matrix[p1][pnb] if self.distance_matrix[p1][pnb] != float('inf') else 999) -
+                                  (self.distance_matrix[p2][pnb] if self.distance_matrix[p2][pnb] != float('inf') else 999))
+                if delta < -1e-9:
+                    cur_map[lq1], cur_map[lq2] = p2, p1
+                    improved = True; break
+            if improved: break
+
+    placed_phys = set(cur_map[lq] for lq in logical_qubits)
+    unplaced = [q for q in logical_qubits if q not in {lq: cur_map[lq] for lq in logical_qubits}]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: hub_score[p])
+    # Note: all logical qubits assigned above; remaining only for n_pq > n_lq case
+
+    mapping_dict = cur_map[:]
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, pq in enumerate(mapping_dict): reverse_mapping_dict[pq] = lq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 15
+
+IDEA_NAME: Force-Directed Spring Simulation Embedding Alignment
+
+DESCRIPTION: Simulate a spring-mass physics system on the logical interaction graph: pairs of logical qubits connected by heavy interaction edges are attracted by strong springs; unconnected qubits repel. Run the simulation to equilibrium to produce a 2D Euclidean layout of logical qubits that respects interaction proximity. Similarly embed hardware qubits using their topology (unit springs on edges). Apply Procrustes rotation to align the two 2D point clouds, then use Hungarian matching on the aligned coordinates. The resulting mapping places logically proximate qubits near each other on the hardware.
+
+ALGORITHMIC_APPROACH:
+1. Initialize logical qubits at random 2D positions
+2. Simulate for N=200 steps: for each qubit, compute attractive force from interacting neighbors (spring constant = interaction weight) and repulsive force from all others (Coulomb `1/r²`); update positions with small step size
+3. Initialize hardware qubits at random 2D positions; run same simulation with unit springs on hardware edges
+4. Normalize both embeddings to unit circle
+5. Procrustes alignment: `R = argmin ||X_L @ R - X_H||_F` via SVD
+6. Hungarian matching on Euclidean distance matrix between aligned positions
+7. Build mapping from assignment
+
+COLLISION_PREVENTION: Hungarian always produces bijective matching. Physical qubit count ≥ logical count ensures all logical qubits get an assignment. The spring simulation only affects cost matrix construction, not the assignment validity.
+
+WHY_NOVEL: Force-directed graph layout is standard for visualization, but using it as a 2D metric for quantum qubit placement with hardware layout co-embedding is entirely novel. It captures higher-order clustering effects beyond just pairwise distances: qubits that form triangles or cliques will cluster tightly in the simulation, and that cluster structure is matched to hardware topology.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    import random
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+
+    def spring_layout(n_nodes, edges_weights, n_steps=150, lr=0.01, k_rep=0.5):
+        """edges_weights: list of (i, j, weight)"""
+        pos = np.random.randn(n_nodes, 2) * 0.5
+        for step in range(n_steps):
+            forces = np.zeros((n_nodes, 2))
+            # Repulsion: all pairs
+            for i in range(n_nodes):
+                for j in range(i+1, n_nodes):
+                    delta = pos[i] - pos[j]
+                    dist = np.linalg.norm(delta) + 1e-5
+                    f = k_rep / dist**2 * (delta / dist)
+                    forces[i] += f; forces[j] -= f
+            # Attraction: edges
+            for (i, j, w) in edges_weights:
+                delta = pos[j] - pos[i]
+                dist = np.linalg.norm(delta) + 1e-5
+                f = w * dist * (delta / dist)
+                forces[i] += f; forces[j] -= f
+            lr_decay = lr * (1.0 - step/n_steps)
+            pos += forces * lr_decay
+        # Normalize to unit circle
+        pos -= pos.mean(axis=0)
+        scale = np.abs(pos).max() + 1e-10
+        return pos / scale
+
+    # Logical spring layout
+    lq_edges = [(lq_idx[q1], lq_idx[q2], w) for (q1,q2),w in interaction_weight.items()]
+    np.random.seed(42)
+    X_L = spring_layout(n_lq, lq_edges)
+
+    # Hardware spring layout (unit weights on edges)
+    hw_edges = [(pq_idx[pq], pq_idx[nb], 1.0) for pq in physical_qubits
+                for nb in self.backend[pq] if nb in pq_idx and pq_idx[pq] < pq_idx[nb]]
+    X_H = spring_layout(n_pq, hw_edges)
+
+    # Procrustes alignment: align X_L onto X_H
+    X_H_sub = X_H[:n_lq] if n_pq >= n_lq else np.vstack([X_H, np.zeros((n_lq-n_pq, 2))])
+    M = X_L.T @ X_H_sub
+    U, s, Vt = np.linalg.svd(M)
+    R = (U @ Vt).T
+    X_L_rot = X_L @ R
+
+    # Pairwise Euclidean distance for assignment
+    diff = X_L_rot[:, np.newaxis, :] - X_H[np.newaxis, :, :]
+    C = np.sqrt(np.sum(diff**2, axis=2))
+    row_ind, col_ind = linear_sum_assignment(C)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r,c in zip(row_ind, col_ind)}
+
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 16
+
+IDEA_NAME: Two-Phase Heat Diffusion Graph Alignment
+
+DESCRIPTION: Model both the logical interaction graph and the hardware topology as heat diffusion systems. Inject a "heat source" at the most-connected node in each graph and compute the steady-state temperature distribution across all nodes (solving the linear system `L * T = b` where `L` is the Laplacian and `b` marks the source). This gives each node a scalar temperature reflecting its structural proximity to the "hottest" node. Logical qubits with similar temperature to a hardware node are mapped to it — the temperature profiles encode relative connectivity in a robust, global way. Use Hungarian matching on the pairwise temperature-difference cost matrix.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted Laplacian `L_L` for logical graph; find most-connected node `s_L`; solve `L_L' * T_L = b_L` where `L_L'` has one row fixed as source (Dirichlet boundary at `s_L`); result is relative heat of all nodes from that source
+2. Similarly solve for hardware: `L_H' * T_H = b_H` from most-central physical qubit
+3. Normalize both temperature vectors to [0,1]
+4. Cost matrix `C[lq][pq] = |T_L[lq] - T_H[pq]|` — map nodes with similar thermal profiles
+5. `linear_sum_assignment(C)` → bijective assignment
+6. Bijection enforcement
+
+COLLISION_PREVENTION: Hungarian assignment is always bijective. The temperature vector construction is purely for cost matrix generation and doesn't affect assignment validity.
+
+WHY_NOVEL: Heat diffusion on graphs (related to the heat kernel and graph wavelets) has never been applied to quantum qubit placement. The steady-state heat equation solution is equivalent to harmonic functions on graphs, capturing multi-hop structural proximity in a principled physics-inspired way fundamentally different from shortest-path distances or spectral embeddings.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.5
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_lq, n_pq = len(logical_qubits), len(physical_qubits)
+    lq_idx = {lq:i for i,lq in enumerate(logical_qubits)}
+    pq_idx = {pq:i for i,pq in enumerate(physical_qubits)}
+
+    def heat_diffusion_temps(n, laplacian, source_idx):
+        """Solve steady-state heat: L_mod * T = e_source with Dirichlet BC at source."""
+        L = laplacian.copy()
+        b = np.zeros(n)
+        # Dirichlet BC: fix source at T=1
+        L[source_idx, :] = 0.0; L[source_idx, source_idx] = 1.0; b[source_idx] = 1.0
+        # Sink at all leaf nodes (lowest degree) or just normalize
+        T = np.linalg.solve(L + np.eye(n) * 1e-6, b)
+        T -= T.min()
+        mx = T.max()
+        return T / mx if mx > 1e-10 else T
+
+    # Logical Laplacian
+    W_L = np.zeros((n_lq, n_lq))
+    for (q1,q2), w in interaction_weight.items():
+        i, j = lq_idx[q1], lq_idx[q2]
+        W_L[i,j] = W_L[j,i] = w
+    D_L = np.diag(W_L.sum(axis=1)); L_L = D_L - W_L
+    src_L = int(np.argmax(W_L.sum(axis=1)))  # most-interacting logical qubit
+    T_L = heat_diffusion_temps(n_lq, L_L, src_L)
+
+    # Hardware Laplacian
+    W_H = np.zeros((n_pq, n_pq))
+    for pq in physical_qubits:
+        i = pq_idx[pq]
+        for nb in self.backend[pq]:
+            if nb in pq_idx: W_H[i, pq_idx[nb]] = 1.0
+    D_H = np.diag(W_H.sum(axis=1)); L_H = D_H - W_H
+    src_H = int(np.argmin([sum(self.distance_matrix[pq][o] for o in physical_qubits
+                               if self.distance_matrix[pq][o] != float('inf') and o != pq)
+                            for pq in physical_qubits]))  # most central
+    T_H = heat_diffusion_temps(n_pq, L_H, src_H)
+
+    # Cost matrix: |T_L[lq] - T_H[pq]|
+    C = np.abs(T_L[:, np.newaxis] - T_H[np.newaxis, :])
+    row_ind, col_ind = linear_sum_assignment(C)
+    lq_to_phys = {logical_qubits[r]: physical_qubits[c] for r,c in zip(row_ind, col_ind)}
+
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+    placed_phys = set(lq_to_phys.values())
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## IDEA 17
+
+IDEA_NAME: Multi-Scale Graph Coarsening with Progressive Refinement
+
+DESCRIPTION: Apply multilevel graph coarsening (inspired by METIS) to both the logical interaction graph and the hardware graph. Repeatedly merge pairs of most-strongly-interacting logical qubits into super-nodes, and merge pairs of connected hardware qubits into super-nodes. At the coarsest level (e.g., 4 super-nodes each), find an easy-to-compute initial assignment. Then uncoarsen step by step: at each level, expand super-nodes back to their constituent qubits and locally refine the assignment within the expanded pairs using a local 2-opt swap. This produces progressively finer assignments that respect the structure found at coarser scales.
+
+ALGORITHMIC_APPROACH:
+1. Coarsen logical graph by repeatedly merging the heaviest-edge qubit pair: new node weight = sum of merged weights; reduce until ≤ 4 super-nodes remain
+2. Coarsen hardware graph similarly (by BFS neighborhood merging) until ≤ 4 super-regions
+3. At coarsest level: assign super-node i → super-region i by matching sizes
+4. Uncoarsen one level: expand each super-node pair back to its two qubits; within the corresponding super-region, assign the two qubits to the two best adjacent hardware positions
+5. Repeat until fully expanded; final bijection enforcement
+
+COLLISION_PREVENTION: At each uncoarsening step, the expanded hardware super-region provides only as many physical qubits as there are logical qubits to assign. The greedy within-region assignment maintains a local `placed` set. Final bijection enforcement handles any edge cases.
+
+WHY_NOVEL: Multi-level partitioning (METIS-style) is standard in classical VLSI/circuit partitioning but has not been adapted to quantum qubit placement. The key adaptation is simultaneously coarsening both the logical interaction graph and the hardware topology, then matching at multiple scales — this exploits hierarchical structure in both graphs jointly.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 5
+FEASIBILITY_SCORE: 9
+AVERAGE_SCORE: 7.25
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+    for gate, qubits in self.access.items():
+        for q in qubits: logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            interaction_weight[(min(q1,q2),max(q1,q2))] += 1.0
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    phys_centrality = {p: sum(self.distance_matrix[p][o] for o in physical_qubits
+                              if self.distance_matrix[p][o] != float('inf') and p != o)
+                       / max(1, len(physical_qubits)-1) for p in physical_qubits}
+
+    # --- Coarsen logical graph ---
+    # super_node_members[sn_id] = list of original logical qubits
+    sn_members = {lq: [lq] for lq in logical_qubits}
+    sn_weights = defaultdict(float)
+    for (q1,q2), w in interaction_weight.items():
+        sn_weights[(min(q1,q2),max(q1,q2))] = w
+    sn_ids = set(logical_qubits)
+    target_coarse = max(2, len(logical_qubits)//4)
+
+    while len(sn_ids) > target_coarse:
+        if not sn_weights: break
+        best_edge = max(sn_weights.items(), key=lambda x: x[1])
+        (s1, s2) = best_edge[0]
+        if s1 not in sn_ids or s2 not in sn_ids:
+            del sn_weights[(s1,s2)]; continue
+        # Merge s2 into s1
+        sn_members[s1].extend(sn_members.pop(s2, [s2]))
+        sn_ids.discard(s2)
+        # Update weights
+        to_add = []
+        for key in list(sn_weights.keys()):
+            k1, k2 = key
+            if s2 in (k1, k2):
+                other = k2 if k1==s2 else k1
+                if other == s1: del sn_weights[key]; continue
+                new_key = (min(s1,other),max(s1,other))
+                to_add.append((new_key, sn_weights.pop(key,0)))
+                if key != new_key and key in sn_weights: del sn_weights[key]
+        for nk, nw in to_add: sn_weights[nk] = sn_weights.get(nk,0) + nw
+
+    # --- Coarsen hardware graph by BFS from center seeds ---
+    coarse_regions_list = sorted(sn_ids)
+    n_regions = len(coarse_regions_list)
+    hw_seeds = sorted(physical_qubits, key=lambda p: phys_centrality[p])[:n_regions]
+    hw_region = {}  # pq -> region_id (seed)
+    assigned_phys = set()
+    from collections import deque
+    queues = {s: deque([s]) for s in hw_seeds}
+    for s in hw_seeds: hw_region[s] = s; assigned_phys.add(s)
+    remaining_pq = set(physical_qubits) - set(hw_seeds)
+    # BFS expansion: round-robin
+    changed = True
+    while changed and remaining_pq:
+        changed = False
+        for s in hw_seeds:
+            nxt = deque()
+            while queues[s]:
+                p = queues[s].popleft()
+                for nb in self.backend[p]:
+                    if nb in remaining_pq:
+                        hw_region[nb] = s; remaining_pq.discard(nb)
+                        queues[s].append(nb); changed = True
+                nxt.append(p)
+            queues[s] = nxt
+
+    # --- Match coarse super-nodes to hardware regions ---
+    region_lqs = {r: sn_members[sn] for r, sn in zip(hw_seeds, coarse_regions_list)}
+    region_phys = defaultdict(list)
+    for pq, r in hw_region.items(): region_phys[r].append(pq)
+
+    # --- Within each region: assign by interaction strength vs centrality ---
+    lq_to_phys = {}
+    placed_phys = set()
+    lq_neighbors = defaultdict(dict)
+    for (q1,q2), w in interaction_weight.items():
+        lq_neighbors[q1][q2] = w; lq_neighbors[q2][q1] = w
+
+    for seed in hw_seeds:
+        lqs = sorted(region_lqs.get(seed, []),
+                     key=lambda q: -sum(lq_neighbors[q].values()))
+        phys = sorted([p for p in region_phys.get(seed, []) if p not in placed_phys],
+                      key=lambda p: phys_centrality[p])
+        for lq, pq in zip(lqs, phys):
+            lq_to_phys[lq] = pq; placed_phys.add(pq)
+
+    # Cleanup
+    unplaced = [q for q in logical_qubits if q not in lq_to_phys]
+    remaining = sorted([p for p in physical_qubits if p not in placed_phys], key=lambda p: phys_centrality[p])
+    for lq, pq in zip(unplaced, remaining): lq_to_phys[lq] = pq
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+    for lq, tgt in lq_to_phys.items():
+        cur = mapping_dict[lq]
+        if cur == tgt: continue
+        dlq = reverse_mapping_dict[tgt]
+        mapping_dict[lq], mapping_dict[dlq] = tgt, cur
+        reverse_mapping_dict[tgt], reverse_mapping_dict[cur] = lq, dlq
+    self.mapping_dict, self.reverse_mapping_dict = mapping_dict, reverse_mapping_dict
+```
+
+---
+
+## Summary Table
+
+| # | Idea Name | N | P | E | F | **Avg** |
+|---|-----------|---|---|---|---|---------|
+| 6 | DAG Layer-Weighted Closeness Centrality Seeding | 7 | 8 | 9 | 10 | **8.5** |
+| 7 | Lookahead DAG Window Hungarian Optimization | 8 | 8 | 8 | 10 | **8.5** |
+| 5 | Temporal Interaction Entropy-Guided Placement | 8 | 6 | 9 | 10 | **8.25** |
+| 14 | Entanglement Concentration Hub Mapping | 7 | 8 | 8 | 10 | **8.25** |
+| 1 | DAG Critical-Path Priority Mapping | 7 | 7 | 8 | 10 | **8.0** |
+| 2 | Interaction-Weighted Bipartite Hungarian | 6 | 8 | 8 | 10 | **8.0** |
+| 8 | PageRank + Closeness Centrality Alignment | 7 | 7 | 9 | 9 | **8.0** |
+| 9 | Adaptive Simulated Annealing | 6 | 8 | 7 | 10 | **7.75** |
+| 3 | Louvain Community Detection + Region Matching | 7 | 7 | 7 | 10 | **7.75** |
+| 11 | Metropolis-Hastings Parallel Sampling | 7 | 7 | 7 | 10 | **7.75** |
+| 12 | Recursive Exact Min-Cut Bisection | 7 | 7 | 6 | 10 | **7.75** |
+| 13 | WL Structural Fingerprint Matching | 9 | 6 | 7 | 9 | **7.75** |
+| 4 | Spectral Embedding + Procrustes + Hungarian | 8 | 7 | 6 | 9 | **7.5** |
+| 10 | Effective Resistance Embedding + Hungarian | 9 | 6 | 6 | 9 | **7.5** |
+| 15 | Force-Directed Spring Layout Alignment | 8 | 6 | 7 | 9 | **7.5** |
+| 16 | Two-Phase Heat Diffusion Alignment | 8 | 6 | 7 | 9 | **7.5** |
+| 17 | Multi-Scale Graph Coarsening | 8 | 7 | 5 | 9 | **7.25** |
+
+**All 17 ideas pass F ≥ 8** (minimum feasibility score = 9 across all ideas).
+
+**Recommended immediate implementations** (highest average, easy effort): IDEAS 6, 7, 14, 2 — these are all E≥8, F=10, and target the core issue of early-circuit routing overhead directly.

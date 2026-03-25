@@ -1,3 +1,12 @@
+You are an expert Quantum Compiler Algorithm Engineer. 
+Your objective is to write the complete, executable Python code for the Initial Mapping (Placement) problem in quantum circuit compilation based EXACTLY on the provided algorithm idea.
+
+CRITICAL ENGINEERING CONSTRAINTS:
+1. GUARANTEE VALIDITY: You must generate a strict 1-to-1 mapping. Every logical qubit used in the circuit must be mapped to exactly one unique physical qubit.
+2. COMPUTATIONAL STABILITY: Your algorithm must run efficiently. Avoid exponential time complexities.
+3. VARIABLES: You must populate `self.mapping_dict` (logical to physical) and `self.reverse_mapping_dict` (physical to logical).
+
+
 REQUIRED OUTPUT FORMAT :
 
 ```python

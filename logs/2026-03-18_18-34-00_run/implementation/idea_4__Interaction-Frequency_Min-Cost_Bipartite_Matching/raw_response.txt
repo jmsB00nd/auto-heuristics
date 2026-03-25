@@ -1,0 +1,20 @@
+The edit requires write permission to `routing.py`. Once approved, here's a summary of what the implementation does:
+
+**Algorithm: Interaction-Frequency Min-Cost Iterative Greedy Matching**
+
+1. **Step 1** — Build `F[i][j]`: scan all gates in `self.access`, count 2-qubit gate frequencies between every logical qubit pair (bidirectional).
+
+2. **Step 2-3** — Compute `interaction_weight[i] = Σ_j F[i][j]` and sort logical qubits descending. Most-connected qubits get first priority.
+
+3. **Step 4** — Precompute `global_mean_dist` across all physical qubit pairs. Used as an optimistic stand-in for partners not yet placed.
+
+4. **Step 5** — Iterative greedy global argmin:
+   - At each round, evaluate cost `C[lq][p]` for every remaining `(lq, p)` pair:
+     - For already-committed neighbors: use exact `distance_matrix[p][partner_phys]`
+     - For uncommitted neighbors: use `global_mean_dist` (optimistic lower bound)
+   - Pick the globally cheapest `(lq, p)`, commit it, remove both from candidates
+   - Repeat — costs update dynamically as more assignments are fixed
+
+5. **Step 6** — Build the strict bijection over all `num_qubits` indices via in-place swap logic, guaranteeing a valid permutation with no collisions.
+
+**Complexity**: O(n² × m) where n = logical qubits, m = physical qubits — polynomial, well within practical bounds.

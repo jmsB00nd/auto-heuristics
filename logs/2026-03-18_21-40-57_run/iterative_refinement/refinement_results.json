@@ -1,0 +1,119 @@
+{
+  "Dependency-Weight Seed Greedy BFS Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "DAG-Critical-Path Seed with Transitive-Weight Greedy Fill": {
+    "mean_swaps": 319.6666666666667,
+    "mean_depth": 502.42857142857144,
+    "error": null,
+    "failures": []
+  },
+  "Interaction-Frequency Bipartite Min-Cost Matching": {
+    "mean_swaps": 475.85714285714283,
+    "mean_depth": 567.4285714285714,
+    "error": null,
+    "failures": []
+  },
+  "Interaction Pressure Propagation (Diffusion-Based Placement)": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Multi-Eigenvector Hungarian Assignment": {
+    "mean_swaps": 431.6666666666667,
+    "mean_depth": 542.0952380952381,
+    "error": null,
+    "failures": []
+  },
+  "Temporal-Decay Interaction Weighted Spectral Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Betweenness-Centrality Bottleneck Alignment": {
+    "mean_swaps": 532.0,
+    "mean_depth": 595.7619047619048,
+    "error": null,
+    "failures": []
+  },
+  "Topological Sort + Hardware Centrality BFS Co-Scheduling": {
+    "mean_swaps": 571.7619047619048,
+    "mean_depth": 602.7142857142857,
+    "error": null,
+    "failures": []
+  },
+  "Multi-Level Graph Coarsening Placement": {
+    "mean_swaps": 486.57142857142856,
+    "mean_depth": 559.2857142857143,
+    "error": null,
+    "failures": []
+  },
+  "Interaction-Chain MST Hardware-Path Alignment": {
+    "mean_swaps": 384.3809523809524,
+    "mean_depth": 532.952380952381,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_1": {
+    "mean_swaps": 302.9047619047619,
+    "mean_depth": 505.8095238095238,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_2": {
+    "mean_swaps": 308.5238095238095,
+    "mean_depth": 503.14285714285717,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_3": {
+    "mean_swaps": 310.42857142857144,
+    "mean_depth": 504.3333333333333,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_4": {
+    "mean_swaps": 317.7142857142857,
+    "mean_depth": 505.95238095238096,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_5": {
+    "mean_swaps": 321.14285714285717,
+    "mean_depth": 511.5238095238095,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_6": {
+    "mean_swaps": 301.8095238095238,
+    "mean_depth": 503.95238095238096,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_7": {
+    "mean_swaps": 312.23809523809524,
+    "mean_depth": 501.1904761904762,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_8": {
+    "mean_swaps": 301.7142857142857,
+    "mean_depth": 498.8095238095238,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_9": {
+    "mean_swaps": 292.42857142857144,
+    "mean_depth": 494.4761904761905,
+    "error": null,
+    "failures": []
+  },
+  "Refined_Idea_Round_10": {
+    "mean_swaps": 301.0,
+    "mean_depth": 500.0,
+    "error": null,
+    "failures": []
+  }
+}

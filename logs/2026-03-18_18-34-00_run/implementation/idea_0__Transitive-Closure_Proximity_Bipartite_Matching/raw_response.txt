@@ -1,0 +1,27 @@
+Here is a precise breakdown of every design decision:
+
+---
+
+**Step 1 — P_L construction**
+
+`P_L[i][j]` counts raw 2-qubit gate co-occurrences between logical qubit `i` and `j`. This is computed directly from `self.access`, which is available before the DAG is built. It is a sound proxy for transitive interaction pressure: pairs that share many gates will have many data-flow dependencies. Normalized to `[0,1]` so it is scale-compatible with P_H.
+
+**Step 2 — P_H construction**
+
+`P_H[i][j] = 1 / distance_matrix[p_i][p_j]` (0 on diagonal, 0 for disconnected pairs). Direct neighbors get proximity 1.0, two-hop neighbors 0.5, etc. Normalized to `[0,1]`.
+
+**Step 3 — Sorted profile matching (QAP linearization)**
+
+The true objective `Σ_{i,j} |P_L[i][j] − P_H[f(i)][f(j)]|` is QAP (NP-hard). The linearization used here: for a candidate assignment `li → pi`, the maximum achievable interaction-to-proximity alignment assumes that the `k`-th strongest logical interaction partner lands on the `k`-th closest physical neighbor. The dot product `Σ_k sorted_interactions[k] * sorted_proximities[k]` is the Rearrangement Inequality upper bound on how well the pair `(li, pi)` can be served by the remaining assignment. Minimizing `-dot` drives high-interaction logical qubits to physically central nodes.
+
+**Step 4 — Hungarian (O(n³))**
+
+`scipy.optimize.linear_sum_assignment` on the `(n_logical × n_physical)` cost matrix. Returns a strict injection by construction — no collision is possible.
+
+**Step 5 — Isolated qubit fallback**
+
+Logical qubits with zero 2-qubit gates have a flat cost row; they are assigned last to remaining physical slots.
+
+**Step 6 — Bijection via swap-in-place**
+
+Same pattern as the existing code: start from identity, apply each `lq → target_phys` via a safe displacement swap that keeps both `mapping_dict` and `reverse_mapping_dict` consistent throughout.

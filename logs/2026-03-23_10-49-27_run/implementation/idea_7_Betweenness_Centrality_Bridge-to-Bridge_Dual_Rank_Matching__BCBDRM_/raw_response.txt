@@ -1,0 +1,23 @@
+Please grant write permission to create the new heuristic file in the `heuristics/` directory. Once approved, the file will be created at:
+
+`heuristics/Betweenness_Centrality_Bridge_to_Bridge_Dual_Rank_Matching__BCBDRM_.py`
+
+Here's a summary of what the implementation does and why it's novel compared to the existing `Betweenness-Centrality_Bottleneck_Alignment.py`:
+
+---
+
+**Existing approach** (already in codebase): unweighted BC on QIG → rank sort → zip.
+
+**BCBDRM novelties:**
+
+**1. Interaction-Frequency Weighted BC on QIG**
+Edge `(q1, q2)` carries weight = number of 2-qubit gates between them. During Brandes' traversal, `sigma[w] += sigma[v] * edge_weight(v, w)`, so qubits bridging *heavily-used* paths accumulate more centrality than topologically-equivalent qubits on lighter edges.
+
+**2. Dual Rank with degree tiebreaker**
+Sort key is `(BC, degree)` for both logical and physical — when two qubits have equal BC, higher-degree ones rank higher, matching hardware hubs to circuit hubs.
+
+**3. Two-Phase Bridge-to-Bridge Placement**
+- **Phase 1 (Bridge Seeding):** Logical qubits with `BC > 0` (true structural bridges) are matched rank-to-rank against physical bridges. This anchors the mediation skeleton.
+- **Phase 2 (Neighbor-Aware Fill):** Logical qubits with `BC == 0` (graph leaves/isolates) are placed on the *closest available physical qubit* to their already-placed QIG neighbors, minimising distance for pairs that interact but aren't bridges — without any exponential search.
+
+**Complexity:** O(V·E) for Brandes' + O(n²) for Phase 2 fill → well within polynomial bounds.

@@ -1,0 +1,28 @@
+It seems permission wasn't granted. Please approve the file write to `src/mapping/routing.py` — the edit replaces the existing `init_mapping` method with the SA implementation. Once you approve, the change will be applied.
+
+Here's a summary of the implementation before you approve:
+
+---
+
+**`init_mapping` — Simulated Annealing with DAG-Lookahead Energy**
+
+**Phase 0 — Local DAG construction** (mirrors what `run()` does later):
+- Calls `generate_dag` + `compute_transitive_closure_bitset` to get dependency counts (`dag_deps_count`) — same weights used by `qlosure_poly_heuristic`.
+
+**Phase 1 — Static front & extended layers**:
+- Front layer = all gates with 0 predecessors in the full DAG (filtered to 2-qubit only for energy).
+- Extended layer = BFS lookahead from front layer via `create_leveled_extended_successor_set`.
+
+**Phase 2 — Degree-sorted initial state**:
+- Logical qubits sorted by total 2-qubit interaction count (descending) → assigned to physical qubits sorted by hardware degree (descending).
+
+**Phase 3 — Precomputed gate cost tables**:
+- Gate data arrays `(q1, q2, weight)` / `(q1, q2, weight, layer_factor)` with reverse index `lq → [gate_indices]`.
+- Enables `O(affected_gates)` incremental delta-energy instead of full `O(|front| + |extended|)` recomputation.
+
+**Phase 4 — SA loop** (`N = min(1000, 10·n²)`, `T: 1.0 → 0.01` exponential):
+- Proposes random logical-qubit pair swap → updates only affected gate distances.
+- Accepts by `ΔE < 0` or `exp(-ΔE/T)`.
+- Tracks global best mapping; restores it at end.
+
+**Bijectivity guarantee**: Only swap operations on `(mapping, reverse_mapping)` are used — the permutation invariant is never broken.

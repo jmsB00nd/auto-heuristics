@@ -1,0 +1,126 @@
+Now I have a clear picture of the data structures:
+- `mapping_dict` is a list: `mapping[logical] = physical`
+- `reverse_mapping_dict` is a list: `reverse_mapping[physical] = logical` (-1 if unused)
+- `self.backend` is an adjacency list dict
+- `self.access` maps gate_id -> list of qubits it acts on
+
+Here's the GWPFAP implementation:
+
+```python
+def init_mapping(self):
+    # --- Step 1: Compute interaction weights between all logical qubit pairs ---
+    pair_weights = {}
+    for gate, qubits in self.access.items():
+        if len(qubits) == 2:
+            lq1, lq2 = qubits[0], qubits[1]
+            if lq1 > lq2:
+                lq1, lq2 = lq2, lq1
+            pair_weights[(lq1, lq2)] = pair_weights.get((lq1, lq2), 0) + 1
+
+    # Sort pairs by weight descending: highest-interaction pairs first
+    sorted_pairs = sorted(pair_weights.items(), key=lambda x: -x[1])
+
+    # --- Step 2: Initialize mapping arrays ---
+    num_physical = self.num_qubits
+    mapping = [-1] * num_physical           # mapping[logical] = physical
+    reverse_mapping = [-1] * num_physical   # reverse_mapping[physical] = logical
+    used_physical = set()
+
+    # Pre-build hardware edge list once
+    hardware_edges = []
+    for p1 in self.backend:
+        for p2 in self.backend[p1]:
+            if p1 < p2:
+                hardware_edges.append((p1, p2))
+
+    def free_neighbor_count(p, exclude=None):
+        """Count free physical neighbors of p (excluding a specific node)."""
+        return sum(
+            1 for n in self.backend.get(p, [])
+            if n not in used_physical and n != exclude
+        )
+
+    # --- Step 3: Place high-weight pairs onto adjacent hardware edges ---
+    for (lq1, lq2), _ in sorted_pairs:
+        placed1 = mapping[lq1] != -1
+        placed2 = mapping[lq2] != -1
+
+        if placed1 and placed2:
+            continue
+
+        if placed1:
+            # lq1 is anchored at p1 — place lq2 on the best free neighbor of p1
+            p1 = mapping[lq1]
+            best, best_score = None, -1
+            for nb in self.backend.get(p1, []):
+                if nb not in used_physical:
+                    score = free_neighbor_count(nb, exclude=p1)
+                    if score > best_score:
+                        best_score, best = score, nb
+            if best is not None:
+                mapping[lq2] = best
+                reverse_mapping[best] = lq2
+                used_physical.add(best)
+
+        elif placed2:
+            # lq2 is anchored at p2 — place lq1 on the best free neighbor of p2
+            p2 = mapping[lq2]
+            best, best_score = None, -1
+            for nb in self.backend.get(p2, []):
+                if nb not in used_physical:
+                    score = free_neighbor_count(nb, exclude=p2)
+                    if score > best_score:
+                        best_score, best = score, nb
+            if best is not None:
+                mapping[lq1] = best
+                reverse_mapping[best] = lq1
+                used_physical.add(best)
+
+        else:
+            # Neither placed: find the best free hardware edge
+            # Score = combined free degree of both endpoints (maximizes future flexibility)
+            best_edge, best_score = None, -1
+            for p1, p2 in hardware_edges:
+                if p1 not in used_physical and p2 not in used_physical:
+                    score = free_neighbor_count(p1, exclude=p2) + free_neighbor_count(p2, exclude=p1)
+                    if score > best_score:
+                        best_score, best_edge = score, (p1, p2)
+            if best_edge is not None:
+                p1, p2 = best_edge
+                mapping[lq1] = p1
+                mapping[lq2] = p2
+                reverse_mapping[p1] = lq1
+                reverse_mapping[p2] = lq2
+                used_physical.add(p1)
+                used_physical.add(p2)
+
+    # --- Step 4: Assign remaining unmapped logical qubits to free physical qubits ---
+    free_physical = (p for p in range(num_physical) if p not in used_physical)
+    for lq in range(num_physical):
+        if mapping[lq] == -1:
+            p = next(free_physical, None)
+            if p is None:
+                break
+            mapping[lq] = p
+            reverse_mapping[p] = lq
+
+    self.mapping_dict = mapping
+    self.reverse_mapping_dict = reverse_mapping
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+**Algorithm walkthrough:**
+
+| Phase | Action |
+|---|---|
+| **Weight collection** | Scan `self.access` once — O(G) where G = gate count — building a `(lq1, lq2) → count` dict |
+| **Sort** | O(P² log P) worst case but pairs ≤ (num_logical)²/2 |
+| **Pair placement** | For each pair, iterate over one node's neighbors (degree-bounded by hardware graph) |
+| **Remainder fill** | Single linear pass over unmapped logical qubits |
+
+**Key design decisions:**
+- **Edge selection score** = sum of free neighbor degrees of both endpoints. This prefers hardware edges that keep surrounding physical qubits accessible for future high-weight pairs, avoiding "dead-end" placements.
+- **One-anchored placement** (one qubit already placed) extends the existing cluster rather than starting a disconnected island, which would increase inter-cluster distances.
+- **Guarantees validity**: every logical qubit in `range(num_qubits)` gets a unique physical assignment — the `used_physical` set enforces injectivity throughout.

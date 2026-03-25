@@ -1,0 +1,19 @@
+The edit requires your approval to write to `routing.py`. Please allow it and I'll proceed.
+
+While waiting, here's a summary of the TGDWSM implementation:
+
+**Algorithm flow:**
+
+1. **ASAP scheduling** — assigns integer timestamps to every gate via per-qubit `last_time_on_qubit` tracking (`O(G)`)
+
+2. **Sliding-window density** — sorts 2Q gates by timestamp, slides a window of width ~10% of circuit depth using `bisect`, and identifies the slice with the maximum gate count (`O(G log G)`)
+
+3. **Hot-stripe pair scoring** — counts each `(q1,q2)` pair's frequency in the hottest window, processes them highest-frequency first
+
+4. **Adjacent-HW placement** — for each hot pair:
+   - Both unplaced → scan all HW edges `(p1,p2)` and score by weighted interaction distance + centrality tiebreak
+   - One placed → extend to the best adjacent free HW node
+
+5. **Interaction-weighted BFS expansion** — seeds from the most central HW node if nothing was placed, then greedily expands remaining qubits by choosing the unplaced logical qubit with highest interaction weight to already-placed qubits and the best frontier HW candidate
+
+6. **In-place swap bijection** — identical to the proven bijection pattern already in the codebase, guaranteeing a strict 1-to-1 mapping

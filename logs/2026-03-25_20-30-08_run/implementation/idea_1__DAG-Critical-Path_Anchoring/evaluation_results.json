@@ -1,0 +1,20 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: unhashable type: 'slice'",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "unhashable type: 'slice'"
+    }
+  ],
+  "description": "** Identify the critical path (longest chain of dependent 2-qubit gates) in the DAG, then anchor the logical qubits on that critical path to a shortest physical path in the hardware graph. Remaining qubits are placed to minimize distance to their nearest critical-path neighbor.\n\n**ALGORITHMIC_APPROACH:**\n1. Compute longest path in 2-qubit DAG using topological sort + DP (already have `dag_forward_dependencies_count`).\n2. Extract the critical path as an ordered sequence of gates and their logical qubits.\n3. Find a path in the hardware graph of matching length (or closest) using BFS/DFS from high-centrality nodes.\n4. Map critical-path logical qubits to this physical path in order.\n5. For remaining logical qubits, greedily assign to the nearest unoccupied physical qubit that minimizes total weighted distance to all their interaction partners already placed.\n\n**COLLISION_PREVENTION:** Critical-path qubits are placed sequentially on distinct physical qubits along a hardware path. Remaining qubits use greedy assignment to unoccupied slots only, maintaining a `used` set.\n\n**WHY_NOVEL:** Prioritizes the bottleneck (critical path) rather than treating all qubits equally. This directly targets depth minimization, which most placement heuristics ignore in favor of aggregate SWAP count.\n\n**NOVELTY_SCORE:** 7\n**PROBABILITY_SCORE:** 7\n**EFFORT_SCORE:** 8\n**FEASIBILITY_SCORE:** 10\n**AVERAGE_SCORE:** 8.0"
+}

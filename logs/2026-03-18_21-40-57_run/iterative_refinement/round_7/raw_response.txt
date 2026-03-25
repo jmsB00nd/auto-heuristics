@@ -1,0 +1,454 @@
+Looking at the current best (Round 6), I'll perform a critical analysis and targeted evolution:
+
+**Critical Analysis:**
+- **Strengths**: Layer-decay interaction weights, critical-path awareness, triplet seeding, greedy BFS fill, pairwise hill-climbing
+- **Weaknesses**:
+  1. ILS perturbation is purely random — doesn't target the worst-contributing qubits
+  2. Single incumbent restart: all ILS restarts from the same solution; no diversity
+  3. No Large Neighborhood Search (LNS) — re-filling a sub-set via greedy is stronger than shuffling
+  4. `ils_start` is computed but never used (dead code)
+  5. Other top seeds never get hill-climbed, wasting diversity
+
+**Evolution Strategy: Option A (Refine)**
+Key improvements:
+1. **Population-based ILS**: Maintain top-3 solutions; cycle restarts through population members
+2. **LNS perturbation**: Unplace the K worst-cost qubits and re-fill them via greedy (principled, not random)
+3. **4-type perturbation schedule**: LNS → worst-K shuffle → random small → random large
+4. **Increase restarts**: 14 → 20
+5. **Pre-ILS population seeding**: Hill-climb all population members before ILS begins
+
+```python
+def init_mapping(self):
+    from collections import defaultdict, deque
+    import math
+    import random
+
+    rng = random.Random(42)
+    all_gates = sorted(self.access.keys())
+    two_qubit_gates = [g for g in all_gates if len(self.access[g]) == 2]
+
+    # ------------------------------------------------------------------ #
+    # Step 1 – Build DAG                                                  #
+    # ------------------------------------------------------------------ #
+    last_gate_on_qubit = {}
+    successors_dag = defaultdict(set)
+    predecessors_dag = defaultdict(set)
+    for g in all_gates:
+        for q in self.access[g]:
+            if q in last_gate_on_qubit:
+                pred = last_gate_on_qubit[q]
+                successors_dag[pred].add(g)
+                predecessors_dag[g].add(pred)
+            last_gate_on_qubit[q] = g
+    for g in all_gates:
+        successors_dag.setdefault(g, set())
+        predecessors_dag.setdefault(g, set())
+
+    # ------------------------------------------------------------------ #
+    # Step 2 – Gate layer via Kahn BFS                                   #
+    # ------------------------------------------------------------------ #
+    in_degree = {g: len(predecessors_dag[g]) for g in all_gates}
+    gate_layer = {g: 0 for g in all_gates}
+    temp_in = dict(in_degree)
+    queue = deque(g for g in all_gates if in_degree[g] == 0)
+    topo_order = []
+    while queue:
+        g = queue.popleft()
+        topo_order.append(g)
+        for s in successors_dag[g]:
+            gate_layer[s] = max(gate_layer[s], gate_layer[g] + 1)
+            temp_in[s] -= 1
+            if temp_in[s] == 0:
+                queue.append(s)
+
+    # ------------------------------------------------------------------ #
+    # Step 3 – Critical path (remaining depth from each gate)            #
+    # ------------------------------------------------------------------ #
+    critical_path = {g: 0 for g in all_gates}
+    for g in reversed(topo_order):
+        for s in successors_dag[g]:
+            if critical_path[s] + 1 > critical_path[g]:
+                critical_path[g] = critical_path[s] + 1
+
+    # ------------------------------------------------------------------ #
+    # Step 4 – Logical / physical qubits                                 #
+    # ------------------------------------------------------------------ #
+    logical_qubit_set = set()
+    for qubits in self.access.values():
+        logical_qubit_set.update(qubits)
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits or not two_qubit_gates:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 5 – Layer-decay-weighted interaction matrix                   #
+    # w(g) = (critical_path[g]+1) × exp(-alpha × gate_layer[g])         #
+    # ------------------------------------------------------------------ #
+    max_layer = max((gate_layer[g] for g in two_qubit_gates), default=1)
+    alpha = math.log(10.0) / (max_layer + 1)
+
+    interaction_neighbors = defaultdict(dict)
+    for g in two_qubit_gates:
+        q1, q2 = self.access[g]
+        w = (critical_path[g] + 1) * math.exp(-alpha * gate_layer[g])
+        interaction_neighbors[q1][q2] = interaction_neighbors[q1].get(q2, 0.0) + w
+        interaction_neighbors[q2][q1] = interaction_neighbors[q2].get(q1, 0.0) + w
+
+    weighted_degree = {q: sum(interaction_neighbors[q].values()) for q in logical_qubits}
+
+    # ------------------------------------------------------------------ #
+    # Step 6 – Hardware structures                                        #
+    # ------------------------------------------------------------------ #
+    def _centrality(p):
+        finite = [self.distance_matrix[p][o] for o in physical_qubits
+                  if o != p and self.distance_matrix[p][o] != float('inf')]
+        return sum(finite) / len(finite) if finite else float('inf')
+
+    cent = {p: _centrality(p) for p in physical_qubits}
+    phys_degree = {p: len(self.backend[p]) for p in physical_qubits}
+
+    # ------------------------------------------------------------------ #
+    # Step 7 – Cost functions                                            #
+    # ------------------------------------------------------------------ #
+    def mapping_cost(m):
+        lqs = list(m.keys())
+        total = 0.0
+        for i in range(len(lqs)):
+            for j in range(i + 1, len(lqs)):
+                w = interaction_neighbors[lqs[i]].get(lqs[j], 0.0)
+                if w > 0.0:
+                    d = self.distance_matrix[m[lqs[i]]][m[lqs[j]]]
+                    total += w * (d if d != float('inf') else 1e9)
+        return total
+
+    def qubit_cost(m, lq):
+        """Weighted distance cost for one logical qubit against all placed partners."""
+        p = m[lq]
+        cost = 0.0
+        for other_lq, w in interaction_neighbors[lq].items():
+            if other_lq in m and w > 0.0:
+                d = self.distance_matrix[p][m[other_lq]]
+                cost += w * (d if d != float('inf') else 1e9)
+        return cost
+
+    # ------------------------------------------------------------------ #
+    # Step 8 – Greedy BFS-frontier fill from a seed assignment           #
+    # ------------------------------------------------------------------ #
+    def greedy_fill(seed_assignment):
+        lq_to_phys = dict(seed_assignment)
+        placed_phys = set(lq_to_phys.values())
+        unplaced = [lq for lq in logical_qubits if lq not in lq_to_phys]
+
+        while unplaced:
+            unplaced_set = set(unplaced)
+            next_lq = max(
+                unplaced,
+                key=lambda lq: (
+                    sum(interaction_neighbors[lq].get(pl, 0.0) for pl in lq_to_phys),
+                    weighted_degree.get(lq, 0.0),
+                )
+            )
+            candidates = list({
+                nb for phys in placed_phys
+                for nb in self.backend[phys]
+                if nb not in placed_phys
+            })
+            if not candidates:
+                candidates = [p for p in physical_qubits if p not in placed_phys]
+            if not candidates:
+                break
+
+            future_nb = sum(1 for nb in interaction_neighbors[next_lq] if nb in unplaced_set)
+
+            def _score(phys_c, _lq=next_lq, _fn=future_nb):
+                dist_cost = 0.0
+                for placed_lq, placed_phys_q in lq_to_phys.items():
+                    w = interaction_neighbors[_lq].get(placed_lq, 0.0)
+                    if w > 0.0:
+                        d = self.distance_matrix[phys_c][placed_phys_q]
+                        dist_cost += w * (d if d != float('inf') else 1e9)
+                empty_nb = sum(1 for nb in self.backend[phys_c] if nb not in placed_phys)
+                return (dist_cost, max(0, _fn - empty_nb), -empty_nb)
+
+            best_phys = min(candidates, key=_score)
+            lq_to_phys[next_lq] = best_phys
+            placed_phys.add(best_phys)
+            unplaced.remove(next_lq)
+
+        return lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # Step 9 – Pairwise hill-climbing local search                       #
+    # ------------------------------------------------------------------ #
+    def hill_climb(lq_to_phys, max_rounds=6):
+        lq_list = logical_qubits[:]
+        n_lq = len(lq_list)
+        for _ in range(max_rounds):
+            improved = False
+            for i in range(n_lq):
+                for j in range(i + 1, n_lq):
+                    lq1, lq2 = lq_list[i], lq_list[j]
+                    p1 = lq_to_phys.get(lq1)
+                    p2 = lq_to_phys.get(lq2)
+                    if p1 is None or p2 is None:
+                        continue
+                    delta = 0.0
+                    for other_lq, other_phys in lq_to_phys.items():
+                        if other_lq == lq1 or other_lq == lq2:
+                            continue
+                        w1 = interaction_neighbors[lq1].get(other_lq, 0.0)
+                        w2 = interaction_neighbors[lq2].get(other_lq, 0.0)
+                        if w1 == 0.0 and w2 == 0.0:
+                            continue
+                        d1o = self.distance_matrix[p1][other_phys]
+                        d2o = self.distance_matrix[p2][other_phys]
+                        d1o = d1o if d1o != float('inf') else 1e9
+                        d2o = d2o if d2o != float('inf') else 1e9
+                        delta += (w1 * d2o + w2 * d1o) - (w1 * d1o + w2 * d2o)
+                    if delta < -1e-9:
+                        lq_to_phys[lq1] = p2
+                        lq_to_phys[lq2] = p1
+                        improved = True
+            if not improved:
+                break
+        return lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # Step 10 – Seeds: pairs + triplet chains                            #
+    # ------------------------------------------------------------------ #
+    pair_weights = {}
+    for q1 in logical_qubits:
+        for q2, w in interaction_neighbors[q1].items():
+            if q1 < q2:
+                pair_weights[(q1, q2)] = w
+    top_logic_pairs = sorted(pair_weights, key=lambda p: pair_weights[p], reverse=True)[:4]
+    if not top_logic_pairs and len(logical_qubits) >= 2:
+        top_logic_pairs = [(logical_qubits[0], logical_qubits[1])]
+
+    hw_adj_pairs = sorted(
+        [(cent[p1] + cent[p2], p1, p2)
+         for p1 in physical_qubits for p2 in self.backend[p1] if p1 < p2]
+    )
+    top_phys_pairs = [(p1, p2) for _, p1, p2 in hw_adj_pairs[:4]]
+
+    triplet_seeds = []
+    for q_mid in logical_qubits:
+        nbs = list(interaction_neighbors[q_mid].items())
+        for i in range(len(nbs)):
+            for j in range(i + 1, len(nbs)):
+                q_a, w_a = nbs[i]
+                q_b, w_b = nbs[j]
+                w_ab = interaction_neighbors[q_a].get(q_b, 0.0)
+                score = w_a + w_b + 0.3 * w_ab
+                triplet_seeds.append((score, q_a, q_mid, q_b))
+    triplet_seeds.sort(reverse=True)
+    top_triplets = triplet_seeds[:3]
+
+    central_phys = sorted(physical_qubits, key=lambda p: (cent[p], -phys_degree[p]))[:50]
+    hw_paths_3 = []
+    for p_mid in central_phys:
+        nbs = list(self.backend[p_mid])
+        for i in range(len(nbs)):
+            for j in range(i + 1, len(nbs)):
+                p_a, p_b = nbs[i], nbs[j]
+                score = cent[p_mid] + cent[p_a] + cent[p_b]
+                hw_paths_3.append((score, p_a, p_mid, p_b))
+    hw_paths_3.sort()
+    top_hw_paths_3 = [(p_a, p_mid, p_b) for _, p_a, p_mid, p_b in hw_paths_3[:4]]
+
+    if not top_phys_pairs or not top_logic_pairs:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 11 – Evaluate all seeds; track population of top solutions   #
+    # ------------------------------------------------------------------ #
+    rem_phys_pool = sorted(physical_qubits, key=lambda p: phys_degree[p], reverse=True)
+    best_cost = float('inf')
+    best_lq_to_phys = None
+    POP_SIZE = 3
+    population = []  # list of (cost, mapping_dict)
+
+    def _population_insert(c, m):
+        entry = (c, dict(m))
+        if len(population) < POP_SIZE:
+            population.append(entry)
+            population.sort(key=lambda x: x[0])
+        elif c < population[-1][0]:
+            population[-1] = entry
+            population.sort(key=lambda x: x[0])
+
+    def evaluate_seed(seed_assignment):
+        nonlocal best_cost, best_lq_to_phys
+        candidate = greedy_fill(seed_assignment)
+        placed_phys_set = set(candidate.values())
+        rem_phys = [p for p in rem_phys_pool if p not in placed_phys_set]
+        rem_lqs = [lq for lq in logical_qubits if lq not in candidate]
+        for lq, phys in zip(rem_lqs, rem_phys):
+            candidate[lq] = phys
+        c = mapping_cost(candidate)
+        if c < best_cost:
+            best_cost = c
+            best_lq_to_phys = dict(candidate)
+        _population_insert(c, candidate)
+
+    # Pair seeds
+    for sq1, sq2 in top_logic_pairs:
+        for sp1, sp2 in top_phys_pairs:
+            for a, b in [(sq1, sq2), (sq2, sq1)]:
+                evaluate_seed({a: sp1, b: sp2})
+
+    # Triplet chain seeds
+    for _, tq_a, tq_mid, tq_b in top_triplets:
+        for tp_a, tp_mid, tp_b in top_hw_paths_3:
+            for la, lm, lb in [(tq_a, tq_mid, tq_b), (tq_b, tq_mid, tq_a)]:
+                evaluate_seed({la: tp_a, lm: tp_mid, lb: tp_b})
+
+    if best_lq_to_phys is None:
+        best_lq_to_phys = {lq: phys for lq, phys in zip(logical_qubits, physical_qubits)}
+
+    # ------------------------------------------------------------------ #
+    # Step 12 – Hill-climb best seed; then hill-climb all population     #
+    # members to ensure every diversity candidate is locally optimal     #
+    # ------------------------------------------------------------------ #
+    hill_climb(best_lq_to_phys, max_rounds=6)
+    best_cost = mapping_cost(best_lq_to_phys)
+    _population_insert(best_cost, best_lq_to_phys)
+
+    # Hill-climb secondary population members (they were only greedy-filled)
+    for idx in range(len(population)):
+        pc, pm = population[idx]
+        hill_climb(pm, max_rounds=4)
+        nc = mapping_cost(pm)
+        population[idx] = (nc, pm)
+    population.sort(key=lambda x: x[0])
+    # Refresh best from hill-climbed population
+    if population[0][0] < best_cost:
+        best_cost, best_lq_to_phys = population[0][0], dict(population[0][1])
+
+    # ------------------------------------------------------------------ #
+    # Step 13 – ILS with population restart + 4-type perturbation       #
+    #                                                                      #
+    # Type 0 (LNS):      Unplace worst-K qubits, re-fill via greedy.     #
+    #                    Principled: keeps well-placed qubits as anchors. #
+    # Type 1 (targeted): Shuffle physical slots of worst-K qubits only.  #
+    # Type 2 (random-S): Random small shuffle (~K qubits).               #
+    # Type 3 (random-L): Random large shuffle (~2K qubits) for escape.   #
+    #                                                                      #
+    # Restarts cycle through the population so diversity is exploited.   #
+    # ------------------------------------------------------------------ #
+    lq_list_ils = logical_qubits[:]
+    n_ils = len(lq_list_ils)
+    K_base = max(4, min(18, n_ils // 7))
+    RESTART_COUNT = 20
+
+    for restart_idx in range(RESTART_COUNT):
+        # Cycle through population for restart base
+        pop_idx = restart_idx % len(population)
+        _, base_map = population[pop_idx]
+        perturbed = dict(base_map)
+
+        pert_type = restart_idx % 4
+
+        if pert_type == 0:
+            # LNS: unplace worst-K qubits and re-place via greedy fill
+            K = max(3, min(K_base, n_ils // 6))
+            lq_costs = sorted(
+                [(qubit_cost(perturbed, lq), lq) for lq in perturbed],
+                reverse=True
+            )
+            worst_set = set(lq for _, lq in lq_costs[:K])
+            partial = {lq: p for lq, p in perturbed.items() if lq not in worst_set}
+            perturbed = greedy_fill(partial)
+            # Safety fill for any stragglers
+            placed_set = set(perturbed.values())
+            rem_p = [p for p in rem_phys_pool if p not in placed_set]
+            rem_l = [lq for lq in logical_qubits if lq not in perturbed]
+            for lq, ph in zip(rem_l, rem_p):
+                perturbed[lq] = ph
+
+        elif pert_type == 1:
+            # Targeted shuffle: shuffle only the worst-K physical slots
+            K = K_base
+            lq_costs = sorted(
+                [(qubit_cost(perturbed, lq), lq) for lq in perturbed],
+                reverse=True
+            )
+            worst_lqs = [lq for _, lq in lq_costs[:K]]
+            selected_phys = [perturbed[lq] for lq in worst_lqs]
+            rng.shuffle(selected_phys)
+            for lq, ph in zip(worst_lqs, selected_phys):
+                perturbed[lq] = ph
+
+        elif pert_type == 2:
+            # Random small shuffle (~K qubits)
+            K = max(4, K_base)
+            selected_lqs = rng.sample(lq_list_ils, min(K, n_ils))
+            selected_phys = [perturbed[lq] for lq in selected_lqs]
+            rng.shuffle(selected_phys)
+            for lq, ph in zip(selected_lqs, selected_phys):
+                perturbed[lq] = ph
+
+        else:
+            # Random large shuffle (~2K qubits) to escape deep local optima
+            K = max(4, min(n_ils // 4, K_base * 2))
+            selected_lqs = rng.sample(lq_list_ils, min(K, n_ils))
+            selected_phys = [perturbed[lq] for lq in selected_lqs]
+            rng.shuffle(selected_phys)
+            for lq, ph in zip(selected_lqs, selected_phys):
+                perturbed[lq] = ph
+
+        hill_climb(perturbed, max_rounds=5)
+        c = mapping_cost(perturbed)
+        _population_insert(c, perturbed)
+
+        if c < best_cost:
+            best_cost = c
+            best_lq_to_phys = dict(perturbed)
+
+    lq_to_phys = best_lq_to_phys
+
+    # ------------------------------------------------------------------ #
+    # Step 14 – Build strict 1-to-1 bijection via in-place swap chain   #
+    # ------------------------------------------------------------------ #
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+**Summary of key changes vs Round 6:**
+
+| Aspect | Round 6 | This Round |
+|---|---|---|
+| ILS perturbation | Random shuffle only | 4 types: LNS re-fill, worst-K shuffle, random-S, random-L |
+| Restart base | Always best solution | Cycles through population of 3 (diversity) |
+| ILS restarts | 14 | 20 |
+| Post-seed HC | Best only | All population members HC'd before ILS |
+| `qubit_cost` helper | Absent | Added for targeted perturbation |
+| Dead code | `ils_start` unused | Removed |
+
+The **LNS perturbation** (type 0) is the most novel addition: instead of randomly shuffling physical slots, it removes the K worst-placed logical qubits entirely and re-invokes the greedy frontier fill with all remaining qubits as fixed anchors. This exploits the greedy fill's interaction-guided placement rather than relying on chance.

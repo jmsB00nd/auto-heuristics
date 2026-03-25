@@ -1,0 +1,20 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: unhashable type: 'slice'",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "unhashable type: 'slice'"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "unhashable type: 'slice'"
+    }
+  ],
+  "description": "** Model each logical qubit as a mass and each physical qubit as a position in a force field. The \"mass\" of a logical qubit is proportional to its 2-qubit gate count (interaction degree). Qubits with heavy interactions exert gravitational attraction toward each other. Physical qubits in high-connectivity regions of the hardware graph act as \"gravity wells.\" Simulate a damped particle system where logical qubits settle into physical positions that minimize a potential energy function combining interaction proximity and hardware centrality.\n\n**ALGORITHMIC_APPROACH:**\n1. Build logical interaction graph: weight edges by number of 2-qubit gates between each pair of logical qubits.\n2. Compute hardware centrality scores (e.g., closeness centrality from `distance_matrix`).\n3. Initialize logical qubits at random physical positions (continuous relaxation on spectral coordinates of hardware graph).\n4. Iterate force simulation: attractive forces between interacting logical qubits scaled by gate count; repulsive forces to prevent overlap; gravity toward high-centrality hardware nodes.\n5. After convergence, snap each logical qubit to nearest unassigned physical qubit using greedy nearest-neighbor or Hungarian algorithm on Euclidean distances in the embedding space.\n\n**COLLISION_PREVENTION:** Final assignment uses Hungarian algorithm (linear sum assignment) on the distance matrix between converged continuous positions and physical qubit positions, guaranteeing a perfect 1-to-1 matching.\n\n**WHY_NOVEL:** Unlike spectral methods that embed and match statically, this uses a dynamic physics simulation where interaction weights directly shape the force landscape. The damped simulation naturally handles multi-body interactions that pairwise spectral methods miss.\n\n**NOVELTY_SCORE:** 7\n**PROBABILITY_SCORE:** 6\n**EFFORT_SCORE:** 7\n**FEASIBILITY_SCORE:** 10\n**AVERAGE_SCORE:** 7.5"
+}

@@ -1,0 +1,72 @@
+[
+  {
+    "name": "Dependency-Weight Seed Greedy BFS Placement",
+    "status": "KEPT",
+    "description": "Compute a \"criticality score\" for each logical qubit as the sum of `dag_dependencies_count`-like transitive dependency weights derived from interaction frequency and gate position (early-appearing, high-dependency qubits get priority). Place the most critical logical qubit pair first on the most central adjacent hardware pair, then BFS-expand outward on the hardware graph, greedily assigning each next most-connected unplaced logical qubit to the nearest available physical qubit.",
+    "average_score": 8.8,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "DAG-Critical-Path Seed with Transitive-Weight Greedy Fill",
+    "status": "KEPT",
+    "description": "Use the transitive dependency structure of the DAG (computable from `self.access` and `self.write_dict`) to identify the most \"critical\" qubit pair: the pair of qubits whose shared interaction gate has the most transitive successor gates (approximating which pair most blocks downstream execution). Seed that pair on hardware's most central adjacent qubit pair. Then greedily fill remaining logical qubits in order of decreasing transitive interaction weight using hardware BFS neighborhood from the seed.",
+    "average_score": 8.5,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Interaction-Frequency Bipartite Min-Cost Matching",
+    "status": "KEPT",
+    "description": "Directly model initial placement as a minimum-cost bipartite matching. Build a cost matrix where `cost[logical_q][physical_p]` = the expected SWAP overhead if logical qubit `q` is placed at physical position `p`. The cost is estimated as: for each interaction partner `q2` of `q`, multiply `W[q,q2]` by the minimum hardware distance achievable for `q2`'s best remaining position. Solve with the Hungarian algorithm for provably optimal assignment under this local cost model.",
+    "average_score": 8.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Interaction Pressure Propagation (Diffusion-Based Placement)",
+    "status": "KEPT",
+    "description": "Model circuit interactions as a \"pressure\" that propagates through the hardware graph. Assign each logical qubit a pressure vector over all physical qubits: `pressure[q][p]` = how much qubit `q` \"wants\" to be at physical position `p`. Initialize pressure based on direct interactions. Propagate: a qubit's pressure at position `p` increases if its interaction partners' pressures are high at `p`'s neighbors. After convergence, assign by maximum-pressure matching ensuring bijectivity.",
+    "average_score": 8.3,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Multi-Eigenvector Hungarian Assignment",
+    "status": "KEPT",
+    "description": "Extract the top-K Laplacian eigenvectors from both the weighted QIG and the hardware graph, treating each qubit as a K-dimensional spectral feature vector. Then apply the Hungarian algorithm to find the optimal bijective assignment minimizing total Euclidean distance in spectral feature space. This avoids the resolution loss of 1D Fiedler ordering while still running in polynomial time O(K\u00b7n\u00b2 + n\u00b3).",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Temporal-Decay Interaction Weighted Spectral Placement",
+    "status": "KEPT",
+    "description": "Build a QIG where each 2-qubit gate interaction is weighted not just by frequency but by exponential temporal decay: gates appearing earlier in circuit order receive exponentially higher weight. The intuition is that early high-interaction pairs create cascading routing overhead \u2014 placing them well benefits all subsequent routing. The weighted Laplacian's Fiedler vector then reflects temporal priority rather than just frequency.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Betweenness-Centrality Bottleneck Alignment",
+    "status": "KEPT",
+    "description": "Compute betweenness centrality for every logical qubit in the QIG (how often it lies on shortest paths between other qubit pairs) and for every physical qubit in the hardware graph. Map the highest-betweenness logical qubits to the highest-betweenness physical qubits. Qubits that are routing bottlenecks in the circuit should occupy hardware positions that are routing bottlenecks \u2014 this minimizes the expected number of SWAP paths that traverse these critical nodes.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Topological Sort + Hardware Centrality BFS Co-Scheduling",
+    "status": "KEPT",
+    "description": "Assign logical qubits to physical positions based on the order in which they *first appear* in a topological traversal of the DAG: qubits appearing in the earliest gates get placed at the most central hardware positions. The logic is that early-appearing qubits participate in the first scheduling bottleneck and benefit most from being centrally placed to allow flexible routing.",
+    "average_score": 8.0,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Multi-Level Graph Coarsening Placement",
+    "status": "KEPT",
+    "description": "Iteratively coarsen the QIG by merging the most strongly interacting qubit pair into a \"super-qubit\" until a manageable coarse graph remains. Find a placement for the coarse graph (trivially or via hardware matching), then uncoarsen step-by-step, at each level expanding each super-qubit back into its constituent qubits and assigning them to the nearest available adjacent hardware qubits. Borrowed from multilevel VLSI floorplanning but adapted for quantum placement.",
+    "average_score": 7.8,
+    "elimination_reason": "N/A"
+  },
+  {
+    "name": "Interaction-Chain MST Hardware-Path Alignment",
+    "status": "KEPT",
+    "description": "Compute the Maximum Spanning Tree (MST) of the QIG (edges weighted by interaction frequency), treating it as the \"skeleton\" of the circuit's communication structure. Compute the spanning tree of the hardware graph. Align the two trees by finding the best root-to-root mapping via tree isomorphism approximation: match the MST's heaviest path (interaction chain) to the hardware's longest diameter path, then recursively match subtrees using BFS.",
+    "average_score": 7.8,
+    "elimination_reason": "N/A"
+  }
+]

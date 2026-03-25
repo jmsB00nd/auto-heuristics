@@ -1,0 +1,192 @@
+def init_mapping(self):
+    """
+    Lookahead DAG Window Hungarian Optimization.
+
+    Builds a proper topological DAG, extracts the first-W-layer subgraph of
+    2-qubit gates, and iteratively solves a Linear Assignment Problem (LAP)
+    where the cost matrix C[lq][pq] converges from a relaxed avg-distance
+    estimate toward the exact expected SWAP cost for the circuit's most
+    imminent gates.
+    """
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from collections import defaultdict, deque
+
+    physical_qubits = sorted(self.backend.keys())
+    all_gates = sorted(self.access.keys())
+    two_q_gates = [g for g in all_gates if len(self.access[g]) == 2]
+
+    logical_qubit_set = set(q for qubits in self.access.values() for q in qubits)
+    logical_qubits = sorted(logical_qubit_set)
+
+    # Trivial fallback
+    if not logical_qubits or not two_q_gates:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 1: Build qubit-sequential DAG                                  #
+    # Each qubit wire induces predecessor edges between consecutive gates. #
+    # ------------------------------------------------------------------ #
+    last_gate_on_qubit = {}
+    successors_dag = defaultdict(set)
+    predecessors_dag = defaultdict(set)
+    for g in all_gates:
+        for q in self.access[g]:
+            if q in last_gate_on_qubit:
+                pred = last_gate_on_qubit[q]
+                successors_dag[pred].add(g)
+                predecessors_dag[g].add(pred)
+            last_gate_on_qubit[q] = g
+    for g in all_gates:
+        successors_dag.setdefault(g, set())
+        predecessors_dag.setdefault(g, set())
+
+    # ------------------------------------------------------------------ #
+    # Step 2: Topological sort -> assign each gate its longest-path layer #
+    # ------------------------------------------------------------------ #
+    in_degree = {g: len(predecessors_dag[g]) for g in all_gates}
+    gate_layer = {g: 0 for g in all_gates}
+    temp_in = dict(in_degree)
+    queue = deque(g for g in all_gates if in_degree[g] == 0)
+    while queue:
+        g = queue.popleft()
+        for s in successors_dag[g]:
+            if gate_layer[g] + 1 > gate_layer[s]:
+                gate_layer[s] = gate_layer[g] + 1
+            temp_in[s] -= 1
+            if temp_in[s] == 0:
+                queue.append(s)
+
+    # ------------------------------------------------------------------ #
+    # Step 3: Count exact pair interactions in the W-layer window         #
+    # ------------------------------------------------------------------ #
+    W = 20  # lookahead window size (number of DAG layers)
+    pair_count = defaultdict(int)
+    for g in two_q_gates:
+        if gate_layer.get(g, W + 1) < W:
+            lq1, lq2 = self.access[g]
+            pair_count[(min(lq1, lq2), max(lq1, lq2))] += 1
+
+    # If the window captured nothing, fall back to all 2-qubit gates
+    if not pair_count:
+        for g in two_q_gates:
+            lq1, lq2 = self.access[g]
+            pair_count[(min(lq1, lq2), max(lq1, lq2))] += 1
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Build per-qubit weighted interaction adjacency              #
+    # ------------------------------------------------------------------ #
+    lq_neighbors = defaultdict(dict)
+    for (lq1, lq2), count in pair_count.items():
+        lq_neighbors[lq1][lq2] = lq_neighbors[lq1].get(lq2, 0) + count
+        lq_neighbors[lq2][lq1] = lq_neighbors[lq2].get(lq1, 0) + count
+
+    active_lqs = [lq for lq in logical_qubits if lq in lq_neighbors]
+    inactive_lqs = [lq for lq in logical_qubits if lq not in lq_neighbors]
+
+    if not active_lqs or not physical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 5: Precompute avg distance per physical qubit (relaxation cost) #
+    # A central physical qubit has low avg_dist: better for busy lqs.    #
+    # ------------------------------------------------------------------ #
+    avg_dist = {}
+    for pq in physical_qubits:
+        dists = [
+            self.distance_matrix[pq][pq2]
+            for pq2 in physical_qubits
+            if pq2 != pq and self.distance_matrix[pq][pq2] != float('inf')
+        ]
+        avg_dist[pq] = sum(dists) / len(dists) if dists else 0.0
+
+    pq_list = physical_qubits
+    rows = len(active_lqs)
+    cols = len(pq_list)
+
+    # ------------------------------------------------------------------ #
+    # Step 6: Initial cost matrix via avg-distance relaxation             #
+    # C[i][j] = sum_{lq2 in partners(lq_i)} count * avg_dist(pq_j)      #
+    # Since we don't know where lq2 lands, avg_dist is the best-possible #
+    # placement lower bound (the relaxation described in the idea).       #
+    # ------------------------------------------------------------------ #
+    C = np.zeros((rows, cols))
+    for i, lq in enumerate(active_lqs):
+        total_count = sum(lq_neighbors[lq].values())
+        for j, pq in enumerate(pq_list):
+            C[i][j] = total_count * avg_dist[pq]
+
+    row_ind, col_ind = linear_sum_assignment(C)
+    current_asgn = {active_lqs[r]: pq_list[c] for r, c in zip(row_ind, col_ind)}
+
+    # ------------------------------------------------------------------ #
+    # Step 7: Iterative Hungarian refinement                              #
+    # Each round replaces the relaxed avg_dist term with the exact        #
+    # distance to the partner's current assignment when it is known.      #
+    # This drives the LAP solution toward the true QAP optimum without   #
+    # exponential search, converging in O(k * n^3) time.                 #
+    # ------------------------------------------------------------------ #
+    for _ in range(10):
+        C_new = np.zeros((rows, cols))
+        for i, lq in enumerate(active_lqs):
+            for j, pq in enumerate(pq_list):
+                cost = 0.0
+                for lq2, count in lq_neighbors[lq].items():
+                    if lq2 in current_asgn:
+                        # Exact distance to the partner's current physical position
+                        pq2 = current_asgn[lq2]
+                        d = self.distance_matrix[pq][pq2]
+                        cost += count * (d if d != float('inf') else 1e9)
+                    else:
+                        # Partner outside active set: use relaxed avg_dist
+                        cost += count * avg_dist[pq]
+                C_new[i][j] = cost
+
+        row_ind, col_ind = linear_sum_assignment(C_new)
+        new_asgn = {active_lqs[r]: pq_list[c] for r, c in zip(row_ind, col_ind)}
+
+        if new_asgn == current_asgn:
+            break
+        current_asgn = new_asgn
+
+    # ------------------------------------------------------------------ #
+    # Step 8: Assign inactive logical qubits to remaining physical slots  #
+    # Prefer central physical qubits for better routing flexibility.      #
+    # ------------------------------------------------------------------ #
+    used_phys = set(current_asgn.values())
+    available_phys = sorted(
+        [pq for pq in physical_qubits if pq not in used_phys],
+        key=lambda pq: avg_dist[pq]
+    )
+    for lq, pq in zip(inactive_lqs, available_phys):
+        current_asgn[lq] = pq
+
+    # ------------------------------------------------------------------ #
+    # Step 9: Build strict 1-to-1 bijection via in-place swap chain      #
+    # ------------------------------------------------------------------ #
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in current_asgn.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

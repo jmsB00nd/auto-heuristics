@@ -91,7 +91,7 @@ class OrchestratorV2:
             
             console.print(f"[bold]Implementing {idea_name}...[/bold]")
             
-            prompt = f"{self.prompts.system_generator}\nTASK: Implement Idea.\n{getattr(self.prompts, 'output_format', '')}\nIdea: {idea_name}\nDesc: {idea.get('description')}\n{getattr(self.prompts, 'code', '')}"
+            prompt = f"{self.prompts.output_format}\nALGORITHM IDEA TO IMPLEMENT: {idea_name}\nDescription: {idea.get('description')}\n{getattr(self.prompts, 'code', '')}"
             save_log(idea_dir, "prompt.txt", prompt)
             
             response = self.llm.query(prompt, reset_conversation=True)

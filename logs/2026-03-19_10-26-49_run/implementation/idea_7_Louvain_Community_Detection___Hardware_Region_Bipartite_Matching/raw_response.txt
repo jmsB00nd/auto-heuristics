@@ -1,0 +1,27 @@
+I need write permission to `src/mapping/routing.py`. Please approve, then I'll apply the edit.
+
+Once approved, here's what the algorithm does at each step:
+
+**Algorithm: Louvain Community Detection + Hardware Region Bipartite Matching**
+
+1. **Build weighted interaction graph** — edges between logical qubits weighted by 2-qubit gate count.
+
+2. **Louvain community detection** (Phase 1, greedy modularity maximization via Blondel et al. 2008):
+   - Each qubit starts in its own community
+   - Iteratively move each qubit to the neighbouring community that maximises modularity gain `ΔQ`
+   - Track `sigma_tot` per community for O(1) modularity delta computation (avoids O(n²) per move)
+
+3. **Hardware region identification** via farthest-point seeding:
+   - Seed 0 = most central physical qubit (lowest mean BFS distance)
+   - Each subsequent seed = physical qubit farthest from existing seeds (maximises coverage)
+   - Assign each physical qubit to its nearest seed → `k` balanced hardware regions
+
+4. **Bipartite matching** (greedy with size+compactness scoring):
+   - Score each (community, region) pair by `compactness(region) / (1 + |size_diff|)`
+   - Process communities in descending density order, greedily claiming best region
+
+5. **Local greedy assignment** within each matched pair:
+   - Anchor = highest-degree logical → most central physical in region
+   - BFS-style expansion: next logical is most strongly coupled to placed set; next physical prefers hardware neighbours of placed set, minimising interaction-weighted distance
+
+6. **Bijection finalisation** — same safe in-place swap technique as the existing code.

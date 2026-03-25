@@ -1,0 +1,30 @@
+The user needs to approve the file write. Once approved, here's what the implementation does:
+
+---
+
+## IWRDRM Implementation
+
+The algorithm replaces the existing `init_mapping` with a 5-step pipeline:
+
+### Step 1 — Circuit Interaction Graph
+Count 2-qubit gate co-occurrences to produce `interaction_weight[(lq1, lq2)]` for every logical qubit pair.
+
+### Step 2 — Hardware Effective Resistance
+Build the graph Laplacian `L` of the hardware coupling graph, then compute its Moore-Penrose pseudoinverse `L⁺` via `np.linalg.pinv`. The effective resistance between physical qubits `a` and `b` is:
+
+```
+R_eff(a, b) = L⁺[a,a] + L⁺[b,b] − 2·L⁺[a,b]
+```
+
+This is richer than BFS hop-count: it sums over all electrical paths, so a bottleneck edge (bridge) gives high resistance while a well-connected region gives low resistance — directly encoding routing difficulty.
+
+### Step 3 — Greedy Rank Matching
+- Sort logical pairs by **descending** interaction weight  
+- Sort physical pairs by **ascending** effective resistance  
+- Process logical pairs in order; assign both-unplaced pairs to the next-best unoccupied physical pair; if one is already placed, attach its partner to the nearest (lowest R_eff) unoccupied physical qubit
+
+### Step 4 — Isolated Qubit Placement
+Remaining logical qubits (those with no 2-qubit interactions) fill remaining physical slots ranked by ascending mean effective resistance — i.e., the most central/well-connected positions first.
+
+### Step 5 — Bijection Enforcement
+A swap-based in-place reconciliation over the identity permutation guarantees a strict 1-to-1 `mapping_dict` / `reverse_mapping_dict` covering all `num_qubits` indices.

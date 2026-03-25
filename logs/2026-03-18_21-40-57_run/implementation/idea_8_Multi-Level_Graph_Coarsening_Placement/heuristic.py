@@ -1,0 +1,219 @@
+def init_mapping(self):
+    from collections import defaultdict
+
+    # ── Phase 0: Build Qubit Interaction Graph (QIG) ──────────────────────
+    # Edge weight = interaction frequency + urgency bonus
+    # (gates earlier in the circuit receive a higher weight).
+    interaction_weight = defaultdict(float)
+    logical_qubit_set  = set()
+
+    two_q_gates = [
+        (i, qubits)
+        for i, (gate, qubits) in enumerate(self.access.items())
+        if len(qubits) == 2
+    ]
+    total_2q = len(two_q_gates)
+
+    for i, qubits in two_q_gates:
+        q1, q2 = qubits[0], qubits[1]
+        logical_qubit_set.add(q1)
+        logical_qubit_set.add(q2)
+        key    = (min(q1, q2), max(q1, q2))
+        weight = 1.0 + (2.0 * (total_2q - i) / total_2q if total_2q > 0 else 0)
+        interaction_weight[key] += weight
+
+    for qubits in self.access.values():
+        for q in qubits:
+            logical_qubit_set.add(q)
+
+    logical_qubits  = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict         = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ── Phase 1: Multi-Level Coarsening ───────────────────────────────────
+    # adj[node_id] = {neighbor_id: weight}   (updated as nodes are merged)
+    adj = {q: {} for q in logical_qubits}
+    for (q1, q2), w in interaction_weight.items():
+        adj[q1][q2] = adj[q1].get(q2, 0.0) + w
+        adj[q2][q1] = adj[q2].get(q1, 0.0) + w
+
+    node_members  = {q: [q] for q in logical_qubits}  # super-node → original qubits
+    merge_history = []                                  # (parent_id, child1_id, child2_id)
+    active_nodes  = set(logical_qubits)
+    next_id       = max(logical_qubits) + 1
+
+    # Coarsen until ~sqrt(n) super-nodes remain (small, manageable coarse graph).
+    target_size = max(2, int(len(logical_qubits) ** 0.5))
+
+    while len(active_nodes) > target_size:
+        # Find the maximum-weight edge in the current coarse graph.
+        best_w    = -1.0
+        best_pair = None
+        for n in active_nodes:
+            for nb, w in adj[n].items():
+                if nb in active_nodes and n < nb and w > best_w:
+                    best_w    = w
+                    best_pair = (n, nb)
+
+        if best_pair is None:
+            break   # No edges left; stop coarsening.
+
+        n1, n2 = best_pair
+        new_id  = next_id
+        next_id += 1
+
+        # Merge n1 ∪ n2 → new_id.  Sum adjacency weights to shared neighbors.
+        node_members[new_id] = node_members[n1] + node_members[n2]
+        new_adj = {}
+        for nb, w in adj[n1].items():
+            if nb != n2 and nb in active_nodes:
+                new_adj[nb] = new_adj.get(nb, 0.0) + w
+        for nb, w in adj[n2].items():
+            if nb != n1 and nb in active_nodes:
+                new_adj[nb] = new_adj.get(nb, 0.0) + w
+
+        adj[new_id] = new_adj
+        for nb, w in new_adj.items():
+            adj[nb][new_id] = w
+            adj[nb].pop(n1, None)
+            adj[nb].pop(n2, None)
+
+        active_nodes.discard(n1)
+        active_nodes.discard(n2)
+        active_nodes.add(new_id)
+        merge_history.append((new_id, n1, n2))
+
+    # ── Phase 2: Greedy Placement of the Coarse Graph ─────────────────────
+    # Place the most-connected super-node on the most-central physical qubit,
+    # then expand greedily, minimising weighted hardware distance.
+    def mean_dist(p):
+        vals = [self.distance_matrix[p][o] for o in physical_qubits
+                if o != p and self.distance_matrix[p][o] != float('inf')]
+        return sum(vals) / len(vals) if vals else float('inf')
+
+    anchor_phys  = min(physical_qubits, key=mean_dist)
+    anchor_node  = max(active_nodes, key=lambda n: sum(adj[n].values()))
+
+    coarse_placement = {anchor_node: anchor_phys}
+    placed_phys      = {anchor_phys}
+    remaining_coarse = [n for n in active_nodes if n != anchor_node]
+
+    while remaining_coarse:
+        next_node = max(
+            remaining_coarse,
+            key=lambda n: sum(adj[n].get(pn, 0.0) for pn in coarse_placement)
+        )
+
+        available = [p for p in physical_qubits if p not in placed_phys]
+        if not available:
+            break
+
+        def coarse_cost(p, _nn=next_node):
+            total = 0.0
+            for pn, pp in coarse_placement.items():
+                w = adj[_nn].get(pn, 0.0)
+                if w > 0:
+                    d = self.distance_matrix[p][pp]
+                    total += w * (d if d != float('inf') else 1e9)
+            return total
+
+        best_p = min(
+            available,
+            key=lambda p: (
+                coarse_cost(p),
+                -sum(1 for nb in self.backend[p] if nb not in placed_phys)
+            )
+        )
+        coarse_placement[next_node] = best_p
+        placed_phys.add(best_p)
+        remaining_coarse.remove(next_node)
+
+    # Safety: assign any unplaced coarse nodes (shouldn't happen on valid input).
+    for n in remaining_coarse:
+        free = [p for p in physical_qubits if p not in placed_phys]
+        if free:
+            coarse_placement[n] = free[0]
+            placed_phys.add(free[0])
+
+    # ── Phase 3: Uncoarsening ──────────────────────────────────────────────
+    # Replay merges in reverse.
+    #   child1  ← inherits the parent's physical qubit (locality preserved)
+    #   child2  ← placed on the best available hardware neighbor of child1,
+    #             minimising weighted distance to all currently-placed nodes.
+    node_phys = dict(coarse_placement)
+
+    for (parent_id, child1_id, child2_id) in reversed(merge_history):
+        if parent_id not in node_phys:
+            continue    # Parent was never placed; skip.
+
+        parent_phys = node_phys.pop(parent_id)
+        node_phys[child1_id] = parent_phys
+
+        already_used = set(node_phys.values())
+
+        # Prefer physically adjacent qubits (tight locality).
+        neighbors_avail = [nb for nb in self.backend[parent_phys]
+                           if nb not in already_used]
+        candidates = neighbors_avail or [p for p in physical_qubits
+                                         if p not in already_used]
+
+        if not candidates:
+            node_phys[child2_id] = parent_phys  # Degenerate fallback.
+            continue
+
+        child2_adj = adj.get(child2_id, {})
+
+        def child2_cost(p, _c2a=child2_adj, _pp=parent_phys):
+            # Distance to sibling (child1) is the primary driver.
+            total = float(self.distance_matrix[p][_pp])
+            for other_id, other_phys in node_phys.items():
+                w = _c2a.get(other_id, 0.0)
+                if w > 0.0:
+                    d = self.distance_matrix[p][other_phys]
+                    total += w * (d if d != float('inf') else 1e9)
+            return total
+
+        node_phys[child2_id] = min(candidates, key=child2_cost)
+
+    # ── Phase 4: Build strict 1-to-1 bijection ────────────────────────────
+    lq_to_phys = {lq: node_phys[lq] for lq in logical_qubits if lq in node_phys}
+
+    # Resolve conflicts: two logicals mapped to the same physical qubit.
+    used_phys = {}
+    conflicts  = []
+    for lq, p in lq_to_phys.items():
+        if p not in used_phys:
+            used_phys[p] = lq
+        else:
+            conflicts.append(lq)
+
+    free_phys = [p for p in physical_qubits if p not in used_phys]
+    for lq, p in zip(conflicts, free_phys):
+        lq_to_phys[lq] = p
+        used_phys[p]   = lq
+
+    # Apply via swap idiom — maintains a valid permutation at every step.
+    mapping_dict         = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq               = reverse_mapping_dict[target_phys]
+        mapping_dict[lq]           = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys]  = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

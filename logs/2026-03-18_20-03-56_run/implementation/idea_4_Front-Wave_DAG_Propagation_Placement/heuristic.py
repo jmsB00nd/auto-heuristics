@@ -1,0 +1,191 @@
+def init_mapping(self):
+    from collections import defaultdict, deque
+
+    # --- Step 1: Build a per-qubit sequential dependency DAG ---
+    # For each qubit, gates form a chain; each gate depends on the previous gate
+    # that touched the same qubit.
+    last_gate_on_qubit = {}               # qubit -> most recent gate id seen
+    successors_local = defaultdict(set)   # gate -> set of direct successor gates
+    predecessors_local = defaultdict(set) # gate -> set of direct predecessor gates
+
+    all_gates = sorted(self.access.keys())
+
+    for gate in all_gates:
+        for q in self.access[gate]:
+            if q in last_gate_on_qubit:
+                pred = last_gate_on_qubit[q]
+                successors_local[pred].add(gate)
+                predecessors_local[gate].add(pred)
+            last_gate_on_qubit[q] = gate
+        # Ensure every gate has an entry even if it has no predecessors/successors
+        if gate not in predecessors_local:
+            predecessors_local[gate] = set()
+        if gate not in successors_local:
+            successors_local[gate] = set()
+
+    # --- Collect all logical qubits that appear in the circuit ---
+    logical_qubit_set = set()
+    for qubits in self.access.values():
+        logical_qubit_set.update(qubits)
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    # Fallback: trivial identity mapping when the circuit has no gates
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # --- Step 2: Precompute hardware properties ---
+    phys_degree = {p: len(self.backend[p]) for p in physical_qubits}
+
+    # Mean BFS distance from each physical qubit to all others (centrality proxy)
+    def _mean_dist_to_all(p):
+        finite = [
+            self.distance_matrix[p][o]
+            for o in physical_qubits
+            if p != o and self.distance_matrix[p][o] != float('inf')
+        ]
+        return sum(finite) / len(finite) if finite else float('inf')
+
+    phys_centrality = {p: _mean_dist_to_all(p) for p in physical_qubits}
+
+    # --- Step 3: Placement state ---
+    lq_to_phys = {}     # logical qubit -> assigned physical qubit
+    placed_phys = set() # occupied physical qubits
+
+    def _mean_dist_to_placed(phys_c):
+        """Mean BFS distance from phys_c to all already-placed physical qubits."""
+        if not placed_phys:
+            return phys_centrality[phys_c]
+        dists = [
+            self.distance_matrix[phys_c][pp]
+            for pp in placed_phys
+            if self.distance_matrix[phys_c][pp] != float('inf')
+        ]
+        return sum(dists) / len(dists) if dists else float('inf')
+
+    def _assign(lq, preferred_neighbor_of=None):
+        """
+        Assign the best free physical qubit to logical qubit lq.
+        If preferred_neighbor_of is set, prefer hardware neighbors of that physical qubit
+        so the two qubits end up adjacent (distance 1) on the hardware graph.
+        Returns the assigned physical qubit, or None if no free qubit exists.
+        """
+        if lq in lq_to_phys:
+            return lq_to_phys[lq]
+
+        # Candidate pool: neighbors of preferred qubit first, then all free qubits
+        if preferred_neighbor_of is not None:
+            candidates = [
+                p for p in self.backend[preferred_neighbor_of]
+                if p not in placed_phys
+            ]
+        else:
+            candidates = []
+
+        if not candidates:
+            candidates = [p for p in physical_qubits if p not in placed_phys]
+
+        if not candidates:
+            return None
+
+        if preferred_neighbor_of is not None:
+            # All candidates are already adjacent; break ties by hardware degree
+            best = max(candidates, key=lambda p: phys_degree[p])
+        else:
+            # Prefer physical qubits close to the already-placed cluster
+            # (or most central when nothing is placed yet), then by degree
+            best = min(
+                candidates,
+                key=lambda p: (_mean_dist_to_placed(p), -phys_degree[p])
+            )
+
+        lq_to_phys[lq] = best
+        placed_phys.add(best)
+        return best
+
+    # --- Step 4: Wavefront BFS simulation ---
+    # pending_count[g] = number of unresolved direct predecessors of gate g
+    pending_count = {gate: len(predecessors_local[gate]) for gate in all_gates}
+    wavefront = deque(g for g in all_gates if pending_count[g] == 0)
+    visited = set()
+
+    while wavefront:
+        gate = wavefront.popleft()
+        if gate in visited:
+            continue
+        visited.add(gate)
+
+        qubits = self.access[gate]
+
+        if len(qubits) == 1:
+            _assign(qubits[0])
+
+        elif len(qubits) == 2:
+            lq1, lq2 = qubits
+            p1_exists = lq1 in lq_to_phys
+            p2_exists = lq2 in lq_to_phys
+
+            if p1_exists and p2_exists:
+                pass  # Both placed; distance handled by router if needed
+
+            elif p1_exists:
+                # Place lq2 adjacent to lq1's physical qubit
+                _assign(lq2, preferred_neighbor_of=lq_to_phys[lq1])
+
+            elif p2_exists:
+                # Place lq1 adjacent to lq2's physical qubit
+                _assign(lq1, preferred_neighbor_of=lq_to_phys[lq2])
+
+            else:
+                # Neither placed: anchor lq1 on the most central free physical qubit,
+                # then place lq2 adjacent to it so they start out connected.
+                phys1 = _assign(lq1)
+                if phys1 is not None:
+                    _assign(lq2, preferred_neighbor_of=phys1)
+                else:
+                    _assign(lq2)
+
+        # Advance the wavefront: unlock successors whose last dependency just resolved
+        for succ in successors_local[gate]:
+            if succ not in visited:
+                pending_count[succ] -= 1
+                if pending_count[succ] == 0:
+                    wavefront.append(succ)
+
+    # --- Step 5: Fill any remaining unplaced logical qubits ---
+    # These are qubits that never appeared in any gate (edge case)
+    remaining_phys = sorted(
+        [p for p in physical_qubits if p not in placed_phys],
+        key=lambda p: phys_degree[p],
+        reverse=True
+    )
+    unplaced_lq = [lq for lq in logical_qubits if lq not in lq_to_phys]
+    for lq, phys in zip(unplaced_lq, remaining_phys):
+        lq_to_phys[lq] = phys
+
+    # --- Step 6: Build strict 1-to-1 bijection over all num_qubits indices ---
+    # Start from identity permutation and apply placements via in-place swaps.
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        # Displace the logical qubit currently sitting at target_phys
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

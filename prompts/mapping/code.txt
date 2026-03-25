@@ -113,11 +113,17 @@ class Qlosure():
 
         return min_swaps, min_depth, exec_time
 
+################################################################################################################################################################
+#                                                                  Initial Mapping Function                                                                       #
+################################################################################################################################################################    
+
     def init_mapping(self):
         self.mapping = list(range(self.num_qubits))          # mapping[i] = i
         self.reverse_mapping = list(range(self.num_qubits))  # reverse_mapping[i] = i
         if self.use_isl:
             self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+
+################################################################################################################################################################    
 
 
     def init_front_layer(self):

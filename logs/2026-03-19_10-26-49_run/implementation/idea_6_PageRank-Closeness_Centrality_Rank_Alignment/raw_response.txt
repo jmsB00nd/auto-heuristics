@@ -1,0 +1,17 @@
+Please approve the file write and I'll apply the change.
+
+Here's a summary of what the implementation does:
+
+**PageRank-Closeness Centrality Rank Alignment** (`init_mapping`):
+
+1. **Weighted interaction graph** — counts 2-qubit gate co-occurrences as edge weights (bidirectional).
+
+2. **Weighted PageRank** (100 iterations, `d=0.85`) — rank distributed to each logical qubit proportional to the interaction weight of incoming edges. Captures not just raw interaction frequency, but *transitive global importance* (qubits interacting with "important" qubits rank higher).
+
+3. **Hardware closeness centrality** — `closeness(p) = reachable_count / sum_of_BFS_distances`, computed from the already-precomputed `distance_matrix`. Higher = physically more reachable from everywhere.
+
+4. **Rank alignment** — sort logical qubits by PageRank ↓, sort physical qubits by closeness ↓, then `logical_by_rank[i] → physical_by_rank[i]`. The most globally-active logical qubit lands on the most globally-accessible physical qubit.
+
+5. **Bijection construction** — same in-place swap technique as existing code to guarantee a valid 1-to-1 mapping over all `num_qubits` indices, with correct updates to both `mapping_dict` and `reverse_mapping_dict`.
+
+**Complexity**: O(100·E_logical) for PageRank + O(V²_physical) for closeness (distance matrix already computed) + O(n log n) sorting — well within polynomial bounds.

@@ -1,0 +1,187 @@
+def init_mapping(self):
+    from collections import defaultdict, deque
+
+    # ── 1. Collect all logical qubits & filter 2-qubit gates ───────────────
+    two_qubit_gates = {g: qs for g, qs in self.access.items() if len(qs) == 2}
+    logical_qubits  = sorted({q for qs in self.access.values() for q in qs})
+    num_logical     = len(logical_qubits)
+    phys_qubits     = sorted(self.backend.keys())
+
+    # Trivial fallback: no 2-qubit gates → identity mapping
+    if not two_qubit_gates:
+        self.mapping_dict         = {q: phys_qubits[i] for i, q in enumerate(logical_qubits)}
+        self.reverse_mapping_dict = {v: k for k, v in self.mapping_dict.items()}
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    # ── 2. Build gate dependency DAG (qubit-serial ordering) ───────────────
+    # For each qubit, gate list in program order; consecutive gates on the
+    # same qubit are dependent.
+    qubit_gate_list = defaultdict(list)
+    for gate in sorted(self.access.keys()):
+        for q in self.access[gate]:
+            qubit_gate_list[q].append(gate)
+
+    succ = defaultdict(set)
+    pred = defaultdict(set)
+    for q_gates in qubit_gate_list.values():
+        for i in range(len(q_gates) - 1):
+            g_prev, g_next = q_gates[i], q_gates[i + 1]
+            succ[g_prev].add(g_next)
+            pred[g_next].add(g_prev)
+
+    all_gates = list(self.access.keys())
+    for g in all_gates:
+        succ.setdefault(g, set())
+        pred.setdefault(g, set())
+
+    # ── 3. Topological level assignment (Kahn's + longest-path DP) ─────────
+    # level[g] = length of the longest dependency chain ending at g.
+    # Gates at the same level form an antichain (mutually incomparable).
+    in_deg = {g: len(pred[g]) for g in all_gates}
+    sources = [g for g in all_gates if in_deg[g] == 0]
+    queue   = deque(sources)
+    level   = {g: 0 for g in sources}
+
+    while queue:
+        g = queue.popleft()
+        for s in succ[g]:
+            level[s] = max(level.get(s, 0), level[g] + 1)
+            in_deg[s] -= 1
+            if in_deg[s] == 0:
+                queue.append(s)
+
+    # ── 4. Maximum antichain: level with the most 2-qubit gates ────────────
+    level_to_2q = defaultdict(list)
+    for g in two_qubit_gates:
+        level_to_2q[level.get(g, 0)].append(g)
+
+    best_level     = max(level_to_2q, key=lambda lv: len(level_to_2q[lv]))
+    antichain_gates = level_to_2q[best_level]
+
+    # ── 5. Extract "hot" qubits simultaneously active in the antichain ──────
+    hot_qubits = sorted({q for g in antichain_gates for q in two_qubit_gates[g]})
+    num_hot    = len(hot_qubits)
+
+    # ── 6. Find the densest hardware subgraph of size num_hot ──────────────
+    # Score each physical qubit by edge density in its closed 2-hop
+    # neighbourhood — the most densely packed region is where we want to
+    # place all hot qubits so they remain close to each other.
+    def edge_count_in(nodes):
+        """Undirected edge count (each pair counted once)."""
+        ns = set(nodes)
+        return sum(
+            1 for n in ns
+            for m in self.backend.get(n, set())
+            if m in ns and m > n
+        )
+
+    best_center  = phys_qubits[0]
+    best_density = -1
+    for pq in phys_qubits:
+        hop1  = self.backend.get(pq, set())
+        hop2  = {nb for n in hop1 for nb in self.backend.get(n, set())}
+        nbhd  = {pq} | hop1 | hop2
+        if len(nbhd) >= num_hot:
+            density = edge_count_in(nbhd)
+            if density > best_density:
+                best_density = density
+                best_center  = pq
+
+    # BFS-greedy expansion from best_center: at each step add the unvisited
+    # candidate most connected to the already-selected set (maximises clique
+    # density incrementally).
+    selected   = [best_center]
+    used_dense = {best_center}
+    frontier   = set(self.backend.get(best_center, set()))
+
+    while len(selected) < num_hot:
+        # Expand frontier when it runs dry (2-hop, then any remaining qubit)
+        if not frontier:
+            for p in selected:
+                for n in self.backend.get(p, set()):
+                    for nn in self.backend.get(n, set()):
+                        if nn not in used_dense:
+                            frontier.add(nn)
+        if not frontier:
+            frontier = {p for p in phys_qubits if p not in used_dense}
+        if not frontier:
+            break
+
+        # Pick candidate with the most connections to already-selected nodes
+        best_next = max(
+            frontier,
+            key=lambda p: sum(1 for n in self.backend.get(p, set()) if n in used_dense)
+        )
+        selected.append(best_next)
+        used_dense.add(best_next)
+        frontier.discard(best_next)
+        for n in self.backend.get(best_next, set()):
+            if n not in used_dense:
+                frontier.add(n)
+
+    dense_region = selected[:num_hot]  # guaranteed size == num_hot
+
+    # ── 7. Match hot qubits → dense region by interaction/degree rank ───────
+    # Most-interacting hot qubit goes to the most-connected physical qubit.
+    hot_degree = defaultdict(int)
+    for g in antichain_gates:
+        q1, q2 = two_qubit_gates[g]
+        hot_degree[q1] += 1
+        hot_degree[q2] += 1
+
+    sorted_hot   = sorted(hot_qubits,   key=lambda q: -hot_degree[q])
+    sorted_dense = sorted(dense_region, key=lambda p: -len(self.backend.get(p, set())))
+
+    mapping_dict         = {}
+    reverse_mapping_dict = {}
+    used_phys            = set()
+
+    for lq, pq in zip(sorted_hot, sorted_dense):
+        mapping_dict[lq]         = pq
+        reverse_mapping_dict[pq] = lq
+        used_phys.add(pq)
+
+    # ── 8. Map remaining logical qubits greedily by weighted proximity ──────
+    # Interaction weights between logical qubits (across all 2-qubit gates)
+    interact = defaultdict(int)
+    for qs in two_qubit_gates.values():
+        q1, q2 = qs
+        interact[(q1, q2)] += 1
+        interact[(q2, q1)] += 1
+
+    remaining_logical  = [q for q in logical_qubits if q not in mapping_dict]
+    remaining_physical = [p for p in phys_qubits    if p not in used_phys]
+
+    for lq in remaining_logical:
+        if not remaining_physical:
+            break
+
+        # Weighted sum of distances to already-mapped interacting partners
+        partners = [
+            (mapping_dict[nq], interact[(lq, nq)])
+            for nq in logical_qubits
+            if nq in mapping_dict and interact[(lq, nq)] > 0
+        ]
+
+        if partners:
+            def cost(pq, _partners=partners):
+                return sum(
+                    w * self.distance_matrix[pq][pp]
+                    for pp, w in _partners
+                )
+            best_pq = min(remaining_physical, key=cost)
+        else:
+            best_pq = remaining_physical[0]
+
+        mapping_dict[lq]          = best_pq
+        reverse_mapping_dict[best_pq] = lq
+        used_phys.add(best_pq)
+        remaining_physical.remove(best_pq)
+
+    self.mapping_dict         = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)

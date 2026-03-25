@@ -1,0 +1,15 @@
+The edit requires your permission to modify `routing.py`. Once approved, the implementation will be written. Here's a summary of what the DPRCP algorithm does:
+
+**Algorithm: Dual PageRank Rank-Correlation Placement**
+
+1. **Build weighted logical interaction graph** — edge weight = number of 2-qubit gate interactions between logical qubits.
+
+2. **Sparse PageRank on logical graph** — computes a global "importance" score per logical qubit based on weighted random-walk centrality. Handles dangling nodes (isolated qubits with no interactions) correctly by redistributing their rank uniformly.
+
+3. **Sparse PageRank on hardware graph** — computes a global "connectivity" score per physical qubit reflecting how reachable it is via random walks. Uses unweighted edges (topology only).
+
+4. **Rank-correlation matching** — sorts both lists by PageRank descending and zips them: the most important logical qubit → most central physical qubit, rank-for-rank.
+
+5. **Bijection enforcement** — applies assignments as in-place swaps on an identity permutation, guaranteeing a strict 1-to-1 mapping with no conflicts.
+
+**Complexity:** O(E·I) per PageRank call where E = edges and I ≤ 100 iterations, making it efficient for circuits with up to hundreds of qubits.

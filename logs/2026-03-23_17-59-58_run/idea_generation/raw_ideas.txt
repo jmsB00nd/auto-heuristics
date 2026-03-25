@@ -1,0 +1,960 @@
+Now I have a complete picture of what already exists. Let me generate the full analysis.
+
+---
+
+# Novel Initial Mapping Algorithms for Quantum Circuit Compilation
+
+## Catalog of Existing Approaches (Already Implemented — Excluded)
+
+Before generating new ideas, the following are already present in `heuristics/`:
+Spectral Procrustes Alignment, Fiedler Recursive Bisection, Multi-Level Graph Coarsening, Resistance Distance Matching, Betweenness Centrality, Hungarian variants (interaction-degree, interaction-weighted, multi-eigenvector), BFS co-scheduling, MST hardware-path alignment, Lookahead DAG window, Greedy pair-first adjacent, Fiedler bandwidth minimization, Critical chain path co-routing, DAG peak-density bottleneck, Critical path hardware spine, PageRank dual rank, Token sliding, DAG-layer stratified topology fill, Front-wave DAG propagation, Markov blanket locality, Degree-sequence histogram.
+
+All 15 ideas below are **fundamentally different** from these.
+
+---
+
+## PART 1 & 2: NOVEL IDEAS — EVALUATED AND SCORED
+
+---
+
+```
+IDEA_NAME: Gromov-Wasserstein Isometric Distance Embedding (GWIDE)
+
+DESCRIPTION:
+Frames initial mapping as a structure-preserving metric alignment problem.
+Given the shortest-path distance matrices D_C (circuit interaction graph,
+weighted by gate frequency) and D_H (hardware graph), find the permutation
+π: logical → physical that minimizes the Gromov-Wasserstein (GW) distortion:
+  GW(π) = Σ_{i,j} |D_C[i][j] − D_H[π(i)][π(j)]|² · w_i · w_j
+where w_i is the interaction degree of logical qubit i. This directly
+penalizes placing frequently-interacting qubits far apart on hardware.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted interaction matrix W_C: W_C[q1][q2] = number of 2-qubit
+   gates between logical qubits q1,q2 (from self.access).
+2. Compute D_C[i][j] = BFS shortest path on the interaction graph (treat
+   W_C as adjacency, invert weights for distances).
+3. D_H is self.distance_matrix (already precomputed).
+4. Normalize both distance matrices to [0,1].
+5. Initialize π via degree-sorted greedy: sort logical qubits by
+   Σ_j W_C[i][j] descending, sort physical qubits by hardware degree
+   descending, match rank-to-rank.
+6. Run projected gradient descent / alternating minimization on a
+   doubly-stochastic relaxation (Sinkhorn-based):
+   - T* = argmin_T <T⊗T, (D_C - D_H)²> s.t. T·1=μ, T^T·1=ν
+   - Use Frank-Wolfe iteration: 10–20 rounds with T initialized from
+     step 5 (fast convergence from good init).
+7. Round T* to a permutation via linear_sum_assignment (Hungarian).
+8. Apply bijection via in-place swap transposition to set mapping_dict.
+
+COLLISION_PREVENTION:
+Step 7 applies scipy.optimize.linear_sum_assignment on the soft assignment
+matrix T*, which is a classic linear assignment problem (LAP) guaranteed to
+return a perfect matching (bijection) since T* is n×n. The subsequent
+in-place swap transposition pattern preserves 1-to-1 at all times.
+Code pattern (from heuristics):
+  mapping_dict = list(range(self.num_qubits))
+  reverse_mapping_dict = list(range(self.num_qubits))
+  for lq, phys in lq_to_phys.items():
+      cur = mapping_dict[lq]
+      if cur == phys: continue
+      disp = reverse_mapping_dict[phys]
+      mapping_dict[lq] = phys; mapping_dict[disp] = cur
+      reverse_mapping_dict[phys] = lq; reverse_mapping_dict[cur] = disp
+  self.mapping_dict = mapping_dict
+  self.reverse_mapping_dict = reverse_mapping_dict
+
+WHY_NOVEL:
+All existing heuristics match individual qubit properties (centrality, degree,
+Fiedler coordinates) independently. GWIDE is the ONLY approach that
+simultaneously optimizes ALL pairwise distance relationships between the
+circuit's metric structure and the hardware's metric structure — the formal
+Gromov-Wasserstein distance. This is the mathematically correct objective
+for "structure-preserving mapping". No existing quantum compiler uses GW
+distance; it comes from optimal transport theory.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 5
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+```
+
+---
+
+```
+IDEA_NAME: Causal Cone Overlap Spectral Factorization (CCOSF)
+
+DESCRIPTION:
+For each logical qubit q, its "causal cone" in the DAG is the set of all
+gates it can transitively influence (forward cone) or be influenced by
+(backward cone). Two qubits that share large cone overlap MUST be spatially
+close, since their gates will compete for hardware resources in overlapping
+time windows. Build a Cone Overlap Matrix C[i][j] = |FC(i) ∩ FC(j)| +
+|BC(i) ∩ BC(j)| (where FC/BC are forward/backward cones in the 2-qubit DAG).
+Factorize C via eigendecomposition to embed qubits in low-dimensional space,
+then align to hardware positions.
+
+ALGORITHMIC_APPROACH:
+1. Build the 2-qubit gate DAG from self.access and self.write_dict using
+   generate_dag() (available in src/utils/circuit_utils.py).
+   Access: successors2q from generate_dag(self.access, self.write_dict, ...)
+2. Compute forward reachability sets FC[q]: for each 2-qubit gate g
+   touching qubit q, collect all gates reachable from g in successors2q
+   (BFS/DFS). Merge across all gates touching q.
+3. Compute backward reachability sets BC[q] symmetrically.
+4. Build C[i][j] = |FC(i)∩FC(j)| + |BC(i)∩BC(j)| for all qubit pairs.
+   (Use bit-set intersection for O(n/64) per pair — matches approach in
+   compute_transitive_closure_bitset from src/graph/graph.py.)
+5. Compute top-k eigenvectors of C (k=3 or 4) using numpy.linalg.eigh.
+6. Simultaneously compute top-k eigenvectors of the hardware Laplacian L_H
+   (L_H = degree_matrix - adjacency_matrix of self.backend).
+7. For each logical qubit, its position in eigenspace is row i of V_C·Λ_C^{1/2}.
+   For each physical qubit, its position is row j of V_H·Λ_H^{1/2}.
+8. Find minimum-cost bipartite matching between the two point clouds
+   using scipy.optimize.linear_sum_assignment on Euclidean distance matrix.
+
+COLLISION_PREVENTION:
+The final linear assignment step (step 8) on an n_logical × n_physical cost
+matrix is guaranteed to return an injective assignment (one logical qubit →
+one unique physical qubit). Unused physical qubits are identity-mapped.
+The in-place swap transposition pattern (see routing.py init_mapping template)
+constructs the final mapping_dict without collisions.
+
+WHY_NOVEL:
+Existing spectral methods (Fiedler Recursive Bisection, Spectral Procrustes)
+use eigenvectors of the circuit interaction graph's LAPLACIAN. CCOSF instead
+uses eigendecomposition of a CAUSAL CONE OVERLAP MATRIX — a fundamentally
+different object that encodes temporal-spatial dependencies of qubits in the
+DAG execution schedule, not just structural connectivity. Two qubits can
+have zero direct interaction but massive cone overlap (they share many
+transitive dependencies). This is invisible to all adjacency-based methods.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+```
+
+---
+
+```
+IDEA_NAME: Temporal Gate Density Window Stripe Mapping (TGDWSM)
+
+DESCRIPTION:
+Partitions the circuit's gate schedule into temporal "stripes" — contiguous
+time windows with high 2-qubit gate density — and optimizes hardware locality
+within each stripe independently, then resolves conflicts between stripes.
+The insight is that gates in the same dense stripe dominate SWAP overhead, so
+the qubit pairs active in the hottest stripes should be placed on adjacent
+hardware qubits. Uses a sliding-window density estimator on gate timestamps.
+
+ALGORITHMIC_APPROACH:
+1. Assign each gate g a topological timestamp ts[g] = depth in the DAG
+   (longest path from source to g). Compute using DP on successors_full
+   from generate_dag().
+   ts[g] = 1 + max(ts[pred] for pred in predecessors of g, default 0)
+2. Compute 2-qubit gate density D(t) = number of 2-qubit gates with
+   ts[g] ∈ [t, t+W] for window size W = max(3, total_depth // 10).
+3. Identify "hot stripes": contiguous time windows where D(t) > threshold
+   (e.g., mean + 0.5*std of D). These dominate routing.
+4. For the hottest stripe S*, extract the qubit interaction subgraph G_S:
+   nodes = all logical qubits active in S*, edges = 2-qubit gates in S*.
+5. Find the maximum-weight connected subgraph of G_S (greedy: start from
+   highest-degree node, expand by weight). This is the "hot core".
+6. Find the densest connected subgraph of the hardware graph with
+   |hot_core| nodes (BFS expansion from highest-degree hardware node).
+7. Use interaction-weighted bipartite matching (Hungarian) to map hot_core
+   logical → dense hardware subgraph.
+8. For remaining qubits, run interaction-weight-sorted BFS expansion:
+   assign unplaced logical qubits in decreasing interaction-with-placed order
+   to nearest unoccupied hardware neighbors.
+
+COLLISION_PREVENTION:
+Steps 7 and 8 both use explicit "occupied set" tracking. Step 7 uses
+linear_sum_assignment on the subgraph (injective by construction). Step 8
+uses a priority queue with physical qubit availability check before each
+assignment. Since we process each logical qubit exactly once, and each
+physical qubit is marked occupied on assignment, no collision is possible.
+
+WHY_NOVEL:
+No existing initial mapping method in the codebase or literature uses
+temporal density analysis of gate schedules to identify "hot windows".
+All existing methods treat the circuit as a static graph. TGDWSM recognizes
+that NOT all gates are equally important — gates in temporally concentrated
+bursts cause more routing pressure than sparse gates, and the mapping should
+preferentially serve these hot windows. This is analogous to cache-aware
+memory placement in classical compilers.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.8
+```
+
+---
+
+```
+IDEA_NAME: Discrete Ollivier-Ricci Curvature Profile Embedding (DORCPE)
+
+DESCRIPTION:
+Uses Ollivier-Ricci curvature — a discrete analog of Riemannian curvature —
+to characterize the "geometric environment" of each qubit in both the circuit
+interaction graph and hardware graph. Qubits with similar curvature profiles
+are structurally analogous and should be mapped to each other. Curvature
+captures local topology: a qubit at a "bottleneck" edge has negative
+curvature; a qubit in a dense cluster has positive curvature. Aligning
+curvature profiles ensures bottleneck logical qubits land on bottleneck
+hardware qubits.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted circuit interaction graph G_C: nodes = logical qubits,
+   edge weight w(i,j) = count of 2-qubit gates between i and j in
+   self.access. Normalize weights to [0,1].
+2. For each edge (i,j) in G_C, compute Ollivier-Ricci curvature:
+   κ(i,j) = 1 - W₁(μᵢ, μⱼ) / d(i,j)
+   where μᵢ = uniform distribution over neighbors of i (weighted by w),
+   W₁ = Wasserstein-1 distance (Earth Mover's Distance), d = hop distance.
+   Compute W₁ via LP (small: max ~10 neighbors) or use the Sinkhorn approx.
+3. For each logical qubit i, build its curvature signature vector:
+   σ_C[i] = sorted list of κ(i,j) for all edges incident to i.
+   Pad to fixed length k (max degree) with a sentinel value (e.g., -∞).
+4. Repeat steps 2–3 for the hardware graph G_H using self.backend
+   (unit edge weights, since hardware is unweighted). Get σ_H[p].
+5. Build cost matrix M[i][p] = ||σ_C[i] - σ_H[p]||₂ (L2 distance between
+   curvature signatures, after zero-padding to same length).
+6. Apply linear_sum_assignment(M) to get optimal bijective assignment.
+7. Apply in-place swap transposition to produce mapping_dict/reverse_mapping_dict.
+
+COLLISION_PREVENTION:
+linear_sum_assignment on the n_logical × n_physical matrix M is a classic
+assignment problem guaranteed to produce a perfect matching (injective map
+from logical to physical). Physical qubits not matched remain identity-mapped.
+
+WHY_NOVEL:
+Ricci curvature has been applied to complex network analysis (e.g., detecting
+bottlenecks in financial networks, brain connectomes) but NEVER to quantum
+circuit initial mapping. Unlike degree or betweenness centrality (which are
+also "bottleneck detectors"), Ricci curvature captures the ENTIRE LOCAL METRIC
+GEOMETRY of a qubit's neighborhood, not just its individual graph properties.
+Two qubits may have identical degree and betweenness but completely different
+curvature profiles — and DORCPE will correctly distinguish them.
+
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Gate Commutation Conflict Graph Independent Set Tiling (GCCGIST)
+
+DESCRIPTION:
+Exploits quantum gate commutation rules to partition logical qubits into
+groups that can execute simultaneously without ordering conflicts, then
+tiles these groups onto maximally independent hardware regions. The key
+insight: if two 2-qubit gates COMMUTE, they can be executed in any order,
+meaning their qubits need NOT be close (no urgency for SWAP). Non-commuting
+gates create hard sequential dependencies and are the true drivers of SWAP
+overhead. Map strongly non-commuting qubit pairs to adjacent hardware positions.
+
+ALGORITHMIC_APPROACH:
+1. Build the Non-Commutation Conflict Graph NCC: nodes = logical qubits.
+   For each pair of 2-qubit gates (g1, g2) sharing at least one qubit:
+   - If g1 and g2 do NOT commute (they share a qubit and are in dependency
+     order in the DAG), add edge to NCC between the non-shared qubits of
+     each gate with weight = urgency(g1,g2).
+   - urgency(g1,g2) = 1/(topological_distance(g1,g2)+1)·(deps[g1]+deps[g2])
+     (high urgency = sequential, deep in critical path)
+   - Access dag structure: self.dag2q (set after generate_dag())
+   - Use self.access[g] to get qubits of each gate
+2. Compute weighted NCC degree for each logical qubit:
+   conflict_degree[q] = Σ_{(q,q')} weight(q,q')
+3. Sort logical qubits descending by conflict_degree.
+4. Greedily find a maximum-weight Independent Set in NCC (since MIS is NP-hard,
+   use greedy: take highest-degree node, remove it and its neighbors, repeat).
+   These are qubits with NO non-commuting conflict — they can be placed freely.
+5. Assign the "conflict-free" IS qubits to hardware leaf nodes (degree-1 or
+   low-degree hardware nodes) using nearest-available assignment.
+6. For qubits NOT in the IS (high-conflict qubits), build a conflict
+   subgraph and find a minimum-weight vertex coloring (greedy Welsh-Powell).
+   Each color class → assign to a connected hardware subgraph via Hungarian.
+7. Final bijection via in-place swap transposition.
+
+COLLISION_PREVENTION:
+Color classes are disjoint by definition (graph coloring). Within each color
+class, Hungarian assignment produces a bijection. Since color classes are
+disjoint and hardware subgraphs are assigned non-overlappingly (track
+occupied hardware nodes across color classes), global injectivity holds.
+
+WHY_NOVEL:
+All existing methods treat qubits as passive entities to be "placed optimally."
+GCCGIST is the first method to use quantum-specific COMMUTATIVITY STRUCTURE
+to reason about placement. It recognizes that the true SWAP pressure comes
+from non-commuting sequential dependencies — a quantum-mechanical property
+with no classical analog. This is fundamentally different from interaction
+frequency (which treats all gates equally regardless of their commutation).
+
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Random Walk Commute Time Isometry Placement (RWCTIP)
+
+DESCRIPTION:
+Uses the "commute time" between nodes in a random walk on the circuit
+interaction graph as a distance measure for placement. Commute time
+C(i,j) = expected number of steps for a random walk to go from i to j and
+return. Crucially, commute time is related to electrical resistance distance
+by C(i,j) = 2m·R(i,j) (where m=edges, R=resistance distance), but computed
+differently — from the Moore-Penrose pseudoinverse of the Laplacian: 
+C(i,j) = Vol(G) · (L†[i][i] + L†[j][j] - 2·L†[i][j]).
+This provides a GLOBALLY consistent metric that captures long-range
+dependencies missed by hop-distance.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted circuit interaction graph G_C with weights = gate counts
+   from self.access.
+2. Compute normalized weighted Laplacian L_C = D - A (D=degree matrix,
+   A=adjacency). Compute pseudoinverse L†_C via numpy.linalg.pinv.
+3. Compute commute time embedding: embed logical qubit i as the i-th row
+   of the matrix Φ_C = Vol(G) · (diag(L†_C)·1^T + 1·diag(L†_C)^T - 2L†_C).
+   Each entry Φ_C[i][j] = commute time C_C(i,j).
+4. Extract per-qubit signature: s_C[i] = sorted row i of Φ_C
+   (commute times to all other qubits, sorted ascending).
+5. Compute commute times for hardware graph similarly: s_H[p] from L†_H.
+6. Compute pairwise signature distances: M[i][p] = ||s_C[i] - s_H[p]||₂.
+7. Apply linear_sum_assignment(M) to get bijective assignment.
+8. Apply in-place swap transposition to build mapping_dict.
+
+Note: For large circuits, use the top-k eigenspace approximation of L†
+instead of full pseudoinverse for efficiency.
+
+COLLISION_PREVENTION:
+Step 7 linear_sum_assignment guarantees bijection. The commute-time
+signatures are used purely for cost computation; the actual assignment is
+an LAP solution.
+
+WHY_NOVEL:
+The existing "Resistance Distance Matrix Matching" heuristic (_Resistance_
+Distance_Matrix_Matching.py) uses electrical resistance as a node similarity
+measure. RWCTIP differs in three ways: (1) it uses COMMUTE TIME (not
+resistance), which incorporates global graph volume; (2) it embeds each
+qubit as a SIGNATURE VECTOR (commute times to ALL other qubits) rather than
+a scalar; (3) it aligns signatures via L2 nearest-neighbor matching.
+Commute time captures the full random walk dynamics and is particularly
+sensitive to graph bottlenecks in a fundamentally different way than
+resistance distance.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.0
+```
+
+---
+
+```
+IDEA_NAME: Steiner Tree Hardware Packing with Interaction Forest Decomposition (STHPIFD)
+
+DESCRIPTION:
+Decomposes the circuit's weighted interaction graph into a set of "interaction
+trees" (Steiner trees connecting high-weight interaction clusters), then
+"packs" each tree into a connected subgraph of the hardware by solving a
+hardware Steiner tree embedding for each. The key insight: if a set of k
+logical qubits form a tightly connected interaction cluster, they should all
+be embedded into a minimal connected subgraph of hardware (a Steiner tree)
+to minimize routing distances within the cluster.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted interaction graph G_C with W[i][j] = gate count between
+   logical qubits i,j from self.access.
+2. Compute Maximum Spanning Forest of G_C (Kruskal's algorithm on negated
+   weights): this produces a set of Steiner trees (one per connected
+   component) that captures the heaviest interaction backbone.
+3. For each tree T_k in the forest (sorted by total weight descending):
+   a. Find the set of physical qubits already used by previously packed trees.
+   b. For each possible "anchor" physical qubit p (BFS over unoccupied
+      hardware nodes), compute the cost of embedding T_k rooted at p:
+      cost = sum of hardware distances between parent-child pairs when T_k
+      is embedded into BFS tree of hardware rooted at p.
+   c. Select the anchor with minimum embedding cost.
+   d. Embed T_k by BFS on hardware from anchor p, assigning logical qubits
+      in tree-DFS-order to BFS-order hardware qubits (nearest unoccupied).
+4. Remaining isolated logical qubits → assign to remaining unoccupied
+   physical qubits in descending interaction weight order.
+5. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Each logical qubit appears in exactly one tree (maximum spanning forest is
+a partition of vertices). Within each tree, hardware assignment uses an
+"occupied set" checked before each assignment. Since trees are processed
+sequentially with global occupied tracking, no two logical qubits can be
+assigned the same physical qubit.
+
+WHY_NOVEL:
+"Interaction-Chain MST Hardware-Path Alignment" (existing) builds an MST and
+maps a single path. STHPIFD differs fundamentally: it decomposes the ENTIRE
+graph into a FOREST of trees (not a single chain), and for each tree finds
+the globally optimal HARDWARE SUBTREE via anchor search — directly solving
+a hardware Steiner tree embedding. This handles circuits with multiple
+independent interaction clusters (e.g., quantum error correction circuits,
+modular circuits) which single-path methods cannot.
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: DAG Slack-Weighted Tension Network Spring Relaxation (DSTWNSR)
+
+DESCRIPTION:
+Models the quantum circuit mapping problem as a spring-force network where
+logical qubits are "particles" on the hardware graph and gate dependencies
+create "springs." The spring stiffness between two qubits is proportional to
+their interaction urgency (gate weight × inverse slack in the DAG schedule).
+Low-slack dependencies create stiff springs that force qubits close together.
+Springs relax on the hardware graph topology (not Euclidean space), so
+positions correspond to hardware node positions.
+
+ALGORITHMIC_APPROACH:
+1. Compute topological depths and slack for all gates:
+   earliest[g] = max(earliest[pred]+1 for pred in predecessors), default 0.
+   latest[g] = critical_path_length - max(latest[succ]+1 for succ in successors).
+   slack[g] = latest[g] - earliest[g].
+2. Build spring tension matrix: for each 2-qubit gate g with qubits (q1,q2):
+   tension[q1][q2] += self.dag_dependencies_count-based_weight / (slack[g]+1)
+   (Use self.access to get gate qubits, iterate over all gates.)
+3. Compute the weighted Laplacian of the tension matrix L_spring.
+4. Compute the hardware graph Laplacian L_hw from self.backend.
+5. Formulate as a generalized eigenvalue problem:
+   Find permutation π minimizing ||L_spring - P·L_hw·P^T||_F (Frobenius norm)
+   where P is the permutation matrix for mapping π.
+6. Approximate via: (a) Compute eigenvectors of L_spring and L_hw.
+   (b) Align them via orthogonal Procrustes: min ||U·V_spring - V_hw||_F
+   solved as SVD(V_hw^T · U · V_spring) → U* = V_R · V_L^T.
+   This gives a soft alignment; round to permutation via Hungarian.
+7. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Step 6 rounds to a permutation via linear_sum_assignment on the Procrustes-
+aligned distance matrix (n_logical × n_physical). Linear assignment
+guarantees bijection by construction.
+
+WHY_NOVEL:
+Existing spring/force methods in graph drawing (Kamada-Kawai, Fruchterman-
+Reingold) use symmetric repulsion + attraction. DSTWNSR is different in three
+ways: (1) spring stiffness is proportional to DAG SLACK — a temporal
+scheduling concept absent from all graph-theoretic methods; (2) relaxation
+happens on the HARDWARE GRAPH TOPOLOGY not Euclidean space; (3) alignment
+uses generalized Laplacian eigenvector Procrustes, not direct force simulation.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+```
+
+---
+
+```
+IDEA_NAME: Interaction Tensor CP Decomposition Latent Factor Placement (ITCPDLFP)
+
+DESCRIPTION:
+Builds a 3-dimensional tensor T[q1][q2][t] where t is the topological time
+layer of gates in the DAG. T[q1][q2][t] = 1 if there is a 2-qubit gate
+between logical qubits q1 and q2 at DAG layer t. Applies CANDECOMP/PARAFAC
+(CP) tensor decomposition to extract latent qubit "interaction profiles"
+across time. These profiles embed each logical qubit in a low-dimensional
+latent space that captures BOTH structural interactions AND temporal dynamics.
+
+ALGORITHMIC_APPROACH:
+1. Compute topological layer for each gate: layer[g] = longest path from
+   source to g (BFS/DP). Normalize to L bins (L = min(20, max_depth)).
+2. Build 3D tensor T (shape: n_logical × n_logical × L):
+   T[q1][q2][bin(t)] += 1 for each 2-qubit gate g with qubits {q1,q2} and
+   layer[g] in bin t. (Use self.access to iterate over gates.)
+3. Apply CP decomposition with rank R=4 using Alternating Least Squares (ALS):
+   T ≈ Σ_{r=1}^{R} a_r ⊗ b_r ⊗ c_r
+   Extract factor matrices A ∈ R^{n_logical×R}, B ∈ R^{n_logical×R}.
+   Since T is symmetric in first two dims: use A = B.
+   ALS is straightforward with numpy: 3–5 iterations suffice for low rank.
+4. Embed logical qubit i as: e_C[i] = A[i] (R-dimensional vector).
+   This captures both structural and temporal interaction patterns.
+5. Embed physical qubit p using hardware interaction tensor (unit-weight
+   edges, replicated across layers — or just use L_H eigenvectors as proxy):
+   e_H[p] = top-R Laplacian eigenvectors of hardware graph.
+6. Compute cost matrix M[i][p] = ||e_C[i] - e_H[p]||₂ after normalizing
+   both embeddings to unit L2 norm.
+7. Apply linear_sum_assignment(M) → bijective assignment.
+8. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Step 7 linear_sum_assignment on n × m matrix (n ≤ m) guarantees injective
+assignment. Factor matrices A, B contain real-valued embeddings; bijection
+is enforced purely by the LAP step, not by the tensor decomposition.
+
+WHY_NOVEL:
+All existing methods analyze either the STRUCTURAL graph (adjacency, Laplacian,
+distance matrix) OR the TEMPORAL schedule (DAG depth, critical path), but
+NEVER both simultaneously in a unified mathematical framework. The CP tensor
+decomposition factorizes the 3D space (qubit1 × qubit2 × time) to extract
+latent factors that are jointly informed by who interacts, how much, and WHEN.
+This is the first application of tensor decomposition to quantum circuit
+initial mapping.
+
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Progressive Analytical SWAP Expectation Minimization (PASEM)
+
+DESCRIPTION:
+Analytically computes the EXPECTED number of SWAPs required for the first K
+topological layers of the circuit as a function of the initial mapping, and
+minimizes this expectation to find the optimal initial placement. Unlike
+simulation-based approaches, PASEM derives a closed-form expression for
+expected SWAP count using the distance matrix and gate interaction structure.
+
+ALGORITHMIC_APPROACH:
+1. Extract the first K topological layers of gates (K = look_ahead parameter,
+   e.g., K=5). For each layer ℓ, extract the set of 2-qubit gates G_ℓ.
+   Use topological layer computation: layer 0 = gates with no predecessors
+   in the 2-qubit DAG (self.dag2q will be available after generate_dag(),
+   but approximate here by iterative predecessor counting).
+2. Define the Expected SWAP Cost for mapping π:
+   E[SWAP | π] = Σ_ℓ Σ_{g∈G_ℓ} λ^ℓ · (D[π(q1)][π(q2)] - 1) / 3
+   where D = self.distance_matrix, λ=0.7 (discount for future layers),
+   q1,q2 = logical qubits of gate g from self.access[g].
+   The factor /3 converts distance to expected SWAP count (each SWAP
+   reduces distance by ~1 on a path, needing ≈ (d-1) SWAPs).
+3. Starting from a greedy initial assignment (sort qubits by total
+   interaction weight, assign to highest-degree hardware nodes):
+4. Apply coordinate descent: for each pair of logical qubits (i,j),
+   compute the gain from swapping their physical assignments:
+   ΔE(i,j) = E[SWAP | π∘swap(i,j)] - E[SWAP | π]
+   (O(K·|gates_in_K_layers|) per pair evaluation — very fast)
+5. Greedily apply the swap (i,j) with most negative ΔE.
+   Repeat until no improvement (typically <n² iterations).
+6. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+The algorithm operates on a permutation π at all times. Step 4 only
+considers transpositions of the current permutation (swapping two
+positions in a bijection yields another bijection). The in-place swap
+transposition pattern is used throughout, guaranteeing 1-to-1.
+
+WHY_NOVEL:
+All existing simulation-based methods (SABRE, Qlosure itself) evaluate
+mappings by RUNNING the router. PASEM is the first method that derives an
+ANALYTIC formula for expected SWAP count, enabling efficient gradient-free
+coordinate descent without any routing simulation. The analytical form
+uses the distance matrix and layer structure — making it orders of magnitude
+faster to evaluate than any simulation-based scorer. No quantum compiler
+paper has formulated initial placement as explicit expected-SWAP minimization
+with an analytic objective.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 9
+EFFORT_SCORE: 8
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 9.0
+```
+
+---
+
+```
+IDEA_NAME: Normalized Recursive Spectral Co-Bisection Alignment (NRSCBA)
+
+DESCRIPTION:
+Recursively bi-partitions BOTH the circuit interaction graph and the hardware
+graph using their respective normalized spectral bisections (Fiedler vectors),
+then aligns corresponding partitions at each level. Unlike the existing
+"Fiedler Recursive Bisection" heuristic (which only bisects the CIRCUIT graph
+and maps to hardware greedily), NRSCBA performs SIMULTANEOUS bisection of
+BOTH graphs and finds the globally consistent cross-graph alignment.
+
+ALGORITHMIC_APPROACH:
+1. Build weighted circuit interaction graph G_C from self.access.
+2. Let G_H = hardware graph from self.backend.
+3. Define ALIGN(G_C_sub, G_H_sub):
+   a. If |G_C_sub| ≤ 2: match nodes directly via interaction degree vs
+      hardware degree (1:1 assignment).
+   b. Compute Fiedler vector v_C of normalized Laplacian of G_C_sub.
+      Bisect: A_C = {i: v_C[i] < median}, B_C = rest.
+   c. Compute Fiedler vector v_H of normalized Laplacian of G_H_sub.
+      Bisect: A_H = {p: v_H[p] < median}, B_H = rest.
+   d. Compute cost of alignment option 1: ALIGN(A_C→A_H) + ALIGN(B_C→B_H)
+      (cross-alignment cost = cut weight between A_C,B_C mapped across A_H,B_H
+      boundary: Σ_{(i,j)∈cut} w(i,j)·d_H(assigned(i)-from-A_H,assigned(j)-from-B_H))
+   e. Compute cost of alignment option 2: ALIGN(A_C→B_H) + ALIGN(B_C→A_H)
+   f. Choose the option with lower cross-boundary distance cost.
+   g. Recursively call ALIGN on each sub-problem.
+4. The recursion produces a complete mapping. Apply in-place swap transposition.
+
+Note: For efficiency, use numpy's eigenvector computation on sparse Laplacians.
+Memoize Fiedler vectors. Depth ≤ log₂(n) ≈ 5-7 for 127 qubits.
+
+COLLISION_PREVENTION:
+Each recursive call works on disjoint subsets of both logical and physical
+qubits (partitioning is disjoint). Leaf-level assignment uses 1-to-1
+matching. Since no qubit appears in two different partitions, and leaf
+matching is injective, global injectivity is guaranteed by structural induction.
+
+WHY_NOVEL:
+The existing "Fiedler Recursive Bisection Alignment" heuristic recursively
+bisects ONLY the circuit graph. NRSCBA co-bisects BOTH graphs simultaneously
+and at each level makes an alignment DECISION (which partition of the circuit
+goes to which partition of the hardware) by minimizing cross-boundary
+distance cost. This alignment decision is absent from all existing recursive
+bisection approaches and is the key mathematical contribution — it solves a
+binary assignment problem at each level of the recursion tree (O(log n) levels).
+
+NOVELTY_SCORE: 8
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Mutual Information Qubit Coupling Entropy Minimization (MIQCEM)
+
+DESCRIPTION:
+Uses information-theoretic measures to quantify qubit coupling. For each
+pair of logical qubits (q1,q2), computes the MUTUAL INFORMATION of their
+joint gate activity across DAG layers: I(q1;q2) = H(q1) + H(q2) - H(q1,q2),
+where H(q) is the entropy of qubit q's activity distribution over time.
+High mutual information indicates temporally correlated, hard-to-decouple
+interactions. Maps high-MI qubit pairs to hardware neighbors.
+
+ALGORITHMIC_APPROACH:
+1. Assign each gate a topological layer bin b ∈ {0,...,B-1} (B=20 bins).
+   For each logical qubit q, compute its activity distribution over bins:
+   P(q, b) = fraction of gates touching q that fall in bin b.
+   Marginal entropy: H(q) = -Σ_b P(q,b) log P(q,b).
+2. For each qubit pair (q1,q2), compute joint distribution:
+   P(q1,q2,b) = fraction of 2-qubit gates between q1,q2 in bin b.
+   (Normalize by total 2-qubit gates between q1,q2.)
+   Joint entropy: H(q1,q2) = -Σ_b P(q1,q2,b) log P(q1,q2,b).
+3. Mutual information: MI[q1][q2] = H(q1)+H(q2)-H(q1,q2).
+   This is zero for independent qubits; high for temporally synchronized qubits.
+4. Build MI-weighted circuit graph G_MI. Compute D_MI (shortest path distances
+   on G_MI, using 1/MI[i][j] as edge lengths — high MI = short effective distance).
+5. Build hardware distance matrix D_H = self.distance_matrix.
+6. Find permutation π minimizing the rank correlation (Kendall tau) between
+   D_MI[i][j] and D_H[π(i)][π(j)] for all pairs:
+   τ = Σ_{i<j,k<l} sign(D_MI[i][j]-D_MI[k][l])·sign(D_H[π(i)][π(j)]-D_H[π(k)][π(l)])
+7. Optimize τ via greedy pairwise swaps initialized from degree-sorted matching.
+8. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Operates entirely on a permutation π throughout. Pairwise swap optimization
+preserves bijectivity (swapping positions in a permutation yields another
+permutation). Final in-place swap transposition maintains 1-to-1 mapping.
+
+WHY_NOVEL:
+Information-theoretic circuit analysis has been used for COMPRESSION and
+SYNTHESIS (e.g., entropy-based gate scheduling), but NEVER for initial
+mapping in a quantum compiler. MIQCEM introduces a fundamentally new notion
+of "qubit coupling strength" based on temporal mutual information of
+activity distributions — this captures SYNCHRONIZED qubits (active in the
+same time windows) vs INDEPENDENT qubits (active at different times), a
+distinction invisible to static interaction weight counts.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 7
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Hypergraph Partition Hardware Clique Cover Mapping (HPHCCM)
+
+DESCRIPTION:
+Models the circuit as a HYPERGRAPH where each hyperedge spans ALL logical
+qubits participating in a temporal "macro-gate cluster" (group of gates
+scheduled at the same DAG layer with shared qubit dependencies). Hardware
+physical qubits are modeled as a clique hypergraph based on hardware
+k-neighborhoods. Uses hMetis-style hypergraph partitioning heuristics to
+co-partition logical qubits and hardware nodes.
+
+ALGORITHMIC_APPROACH:
+1. Extract macro-gate clusters: group all 2-qubit gates at the same
+   topological layer into clusters. Each cluster C_t = set of distinct
+   logical qubits active at layer t. This forms a hypergraph H_C where
+   each hyperedge = cluster, weighted by number of gates in cluster.
+   Use self.access and topological layer computation.
+2. Build hardware k-neighborhood hypergraph H_H: for each hardware qubit p,
+   define hyperedge = all qubits within k=2 hops in self.backend.
+   (These are "reachable within 2 SWAPs.")
+3. Compute hyperedge weight = sum of gate weights in each cluster.
+4. Find maximum-weight partial partition of H_C qubits into groups of size
+   ≤ k, where each group spans a hyperedge of H_H (k-neighborhood):
+   - Greedily: sort clusters by weight, assign cluster qubits to nearest
+     available hardware k-neighborhood.
+   - Use a priority queue sorted by best available hardware match.
+   - "Match score" = overlap between circuit hyperedge and hardware hyperedge.
+5. Resolve conflicts (qubits assigned to multiple groups) via:
+   - Use self.distance_matrix to pick the hardware group with minimum
+     total distance to already-assigned qubits.
+6. Remaining unassigned qubits: greedy BFS from assigned neighbors.
+7. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Assignment uses an explicit "hardware_occupied" set (set of physical qubits
+already assigned). Before each assignment, the algorithm checks availability.
+Since logical qubits are processed in a fixed order and each physical qubit
+enters hardware_occupied exactly once, no collision is possible.
+
+WHY_NOVEL:
+All existing methods model the circuit as a SIMPLE GRAPH (binary edges).
+HPHCCM is the first method to model it as a HYPERGRAPH, capturing the
+multi-qubit co-activity of macro-gate clusters. Real quantum circuits often
+have many gates at the same DAG layer (e.g., in QFT, quantum volume circuits),
+creating multi-qubit hyperedges that cannot be adequately captured by
+pairwise interaction graphs. Hypergraph partitioning is standard in VLSI
+placement (Fiduccia-Mattheyses) but has never been applied to quantum
+circuit initial mapping.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+```
+IDEA_NAME: Doubly Stochastic Sinkhorn Permutation Gradient Flow (DSSPGF)
+
+DESCRIPTION:
+Relaxes the discrete permutation matrix (mapping assignment) to the
+Birkhoff polytope of doubly stochastic matrices and applies gradient flow
+to minimize a differentiable SWAP cost proxy. Uses the Sinkhorn iteration
+to project back onto doubly stochastic matrices after each gradient step,
+then rounds the converged soft assignment to a permutation via Hungarian.
+This is a continuous relaxation approach analogous to permutation learning
+in deep learning (e.g., the Gumbel-Sinkhorn network), applied to placement.
+
+ALGORITHMIC_APPROACH:
+1. Define the differentiable cost: given soft assignment T (doubly stochastic
+   n×n matrix), the expected distance cost is:
+   f(T) = Σ_{g:(q1,q2)} w_g · (T^T · D_H · T)[q1][q2]
+   where D_H = self.distance_matrix, w_g = 1 + dag_dependencies_count[g],
+   T is the soft mapping (T[logical][physical] = assignment probability).
+2. Compute gradient: ∇_T f(T) = Σ_g w_g · (D_H · T · e_{q1} · e_{q2}^T +
+   D_H^T · T · e_{q2} · e_{q1}^T)   [chain rule through bilinear form]
+   (Closed-form matrix gradient, computable with 2 matrix multiplications.)
+3. Initialize T = doubly stochastic version of degree-sorted greedy mapping
+   (compute via Sinkhorn normalization of the greedy cost matrix).
+4. Run gradient descent on T:
+   T ← T - α · ∇_T f(T)   (step size α = 0.05, 30 iterations)
+   After each step, project T back to doubly stochastic via Sinkhorn:
+   repeat (T ← T/T.sum(1); T ← T/T.sum(0)) for 5 iterations.
+5. Round converged T to permutation: linear_sum_assignment(-T).
+6. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Step 5 linear_sum_assignment on T (doubly stochastic, so all entries in
+[0,1]) solves the LAP exactly, returning a perfect matching. The rounded
+permutation is then encoded as mapping_dict via in-place swap transposition.
+
+WHY_NOVEL:
+This is the ONLY approach that (1) formulates initial mapping as an
+OPTIMIZATION OVER THE BIRKHOFF POLYTOPE with a differentiable objective,
+(2) computes exact gradient of expected SWAP distance with respect to the
+soft permutation matrix, and (3) uses Sinkhorn projection to maintain
+feasibility during gradient flow. The continuous relaxation + Sinkhorn
+projection approach is inspired by recent work in differentiable sorting/
+ranking (NeurIPS 2019, Cuturi et al.) but is here applied for the first
+time to quantum circuit placement with a physics-informed distance objective.
+
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 6
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+```
+
+---
+
+```
+IDEA_NAME: Interaction DAG Critical Antichain Hardware Diameter Alignment (IDCAHDA)
+
+DESCRIPTION:
+In a DAG, an "antichain" is a set of mutually incomparable nodes (no directed
+path between any pair). A MAXIMUM antichain in the 2-qubit gate DAG represents
+the largest set of gates that can potentially execute simultaneously —
+the circuit's maximum parallelism. The qubits active in this maximum antichain
+are simultaneously "hot" and must all be close to each other on hardware.
+Maps the maximum antichain's qubit set to the hardware's "maximum clique in
+2-hop neighborhood" — the most densely connected subgraph.
+
+ALGORITHMIC_APPROACH:
+1. Find a maximum weighted antichain in the 2-qubit gate DAG:
+   By Dilworth's theorem, max antichain = n_gates - max_chain_cover.
+   Use the dual LP: maximum independent set in the conflict DAG (transitive
+   closure). Approximate via greedy: process gates in topological order,
+   greedily add to antichain if no conflict with existing members.
+   Weight each gate by its interaction weight (gate count for that pair).
+   Use compute_transitive_closure_bitset() for fast reachability queries.
+2. From the maximum antichain A, extract the set of DISTINCT logical qubit
+   pairs: pairs_A = {(q1,q2) : gate g ∈ A, access[g] = [q1,q2]}.
+3. Build the "antichain subgraph" G_A: nodes = all logical qubits in pairs_A,
+   edges = pairs_A.
+4. Find the connected subgraph of hardware with maximum internal edge density
+   (most connections per node) with |G_A| nodes:
+   - BFS from each hardware node, collect all subgraphs of size |G_A|.
+   - Score = sum of edges within subgraph / |G_A|. Take max.
+   (Prune: only try hardware nodes with degree ≥ mean degree.)
+5. Map G_A logical qubits → dense hardware subgraph via:
+   - Hungarian assignment with cost matrix = distance_matrix[p1][p2] for
+     each pair of qubits with an edge in G_A assigned to hardware pair (p1,p2).
+6. Assign remaining qubits via interaction-weighted BFS from placed qubits.
+7. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Step 5 Hungarian assignment on the G_A subproblem (small, ≤ n_logical) is
+injective. Step 6 BFS uses an "occupied" set. Global injectivity follows from
+the two-phase structure: G_A qubits and non-G_A qubits are disjoint sets
+processed with separate but compatible assignment mechanisms.
+
+WHY_NOVEL:
+The "antichain" concept (maximum parallel execution set) has not been applied
+to quantum circuit initial mapping. Existing DAG-based methods focus on the
+CRITICAL PATH (longest chain) or FRONT LAYER (current layer). IDCAHDA instead
+focuses on the MAXIMUM ANTICHAIN — the theoretically most constrained set of
+gates in terms of hardware locality (all must execute "simultaneously" from
+the scheduler's perspective). Dilworth's theorem establishes a deep connection
+between maximum antichain size and minimum path cover — a result from
+combinatorics that has not been exploited in quantum compilation.
+
+NOVELTY_SCORE: 9
+PROBABILITY_SCORE: 8
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.5
+```
+
+---
+
+```
+IDEA_NAME: Persistent Topological Filtration Barcode Alignment (PTFBA)
+
+DESCRIPTION:
+Applies Topological Data Analysis (TDA) to characterize qubit "topological
+roles" in both the circuit and hardware graphs via persistent homology.
+Builds a filtration of the circuit interaction graph by adding edges in
+decreasing weight order and tracks when connected components are born and
+die (0-dimensional persistence). Each logical qubit gets a "barcode signature"
+encoding its persistence lifetime — how long it remains a connected component
+boundary. Maps qubits with similar barcodes to similar hardware positions.
+
+ALGORITHMIC_APPROACH:
+1. Sort 2-qubit interaction edges by weight (gate count) descending.
+2. Build filtration F_0 ⊇ F_1 ⊇ ... ⊇ F_k by removing edges in
+   increasing weight threshold: start with full weighted graph (all edges),
+   remove lowest-weight edges first.
+3. Track connected components using Union-Find (path compression):
+   Record (qubit q, threshold τ) when qubit q's component merges into
+   another component (birth event).
+   Record (qubit q, threshold τ') when qubit q's component is the last to
+   merge (death event).
+4. Persistence "lifetime" of qubit q = |τ_birth - τ_death|.
+   Build signature vector per qubit: s_C[q] = (degree_in_G_C, lifetime,
+   τ_birth, τ_death, component_size_at_death).
+5. For hardware graph (unit weights), compute the same filtration by BFS
+   ordering: remove edges by BFS distance from center.
+   Build s_H[p] similarly.
+6. Cost matrix M[q][p] = ||s_C[q] - s_H[p]||₂ (after normalization).
+7. Apply linear_sum_assignment(M) to get bijective assignment.
+8. Apply in-place swap transposition to build mapping_dict.
+
+COLLISION_PREVENTION:
+Linear assignment in step 7 is bijective by construction. Persistent homology
+signatures are per-node scalars/vectors used only as matching costs; the
+actual assignment mechanism is the LAP solver.
+
+WHY_NOVEL:
+Persistent homology has been applied to molecular topology, sensor networks,
+and brain connectivity, but NEVER to quantum circuit qubit placement.
+PTFBA introduces a fundamentally new notion of "qubit topological role" based
+on when and how a qubit's interaction cluster merges into the overall connected
+component — a characteristic that captures the qubit's role in the circuit's
+"interaction hierarchy." This is completely different from centrality
+(betweenness, PageRank) or spectral measures (Fiedler coordinates).
+
+NOVELTY_SCORE: 10
+PROBABILITY_SCORE: 6
+EFFORT_SCORE: 7
+FEASIBILITY_SCORE: 10
+AVERAGE_SCORE: 8.3
+```
+
+---
+
+## Summary Table
+
+| # | Name | N | P | E | F | AVG |
+|---|------|---|---|---|---|-----|
+| 1 | Gromov-Wasserstein Isometric Distance Embedding (GWIDE) | 9 | 8 | 5 | 10 | 8.0 |
+| 2 | **Causal Cone Overlap Spectral Factorization (CCOSF)** | 9 | 8 | 7 | 10 | **8.5** |
+| 3 | **Temporal Gate Density Window Stripe Mapping (TGDWSM)** | 9 | 8 | 8 | 10 | **8.8** |
+| 4 | Discrete Ollivier-Ricci Curvature Profile Embedding (DORCPE) | 10 | 7 | 6 | 10 | 8.3 |
+| 5 | Gate Commutation Conflict Graph IS Tiling (GCCGIST) | 10 | 7 | 6 | 10 | 8.3 |
+| 6 | Random Walk Commute Time Isometry Placement (RWCTIP) | 8 | 7 | 7 | 10 | 8.0 |
+| 7 | Steiner Tree Hardware Packing / Interaction Forest (STHPIFD) | 8 | 8 | 7 | 10 | 8.3 |
+| 8 | **DAG Slack-Weighted Tension Network Spring Relaxation (DSTWNSR)** | 9 | 8 | 7 | 10 | **8.5** |
+| 9 | Interaction Tensor CP Decomposition Placement (ITCPDLFP) | 10 | 7 | 6 | 10 | 8.3 |
+| 10 | **Progressive Analytical SWAP Expectation Minimization (PASEM)** | 9 | 9 | 8 | 10 | **9.0** |
+| 11 | Normalized Recursive Spectral Co-Bisection Alignment (NRSCBA) | 8 | 8 | 7 | 10 | 8.3 |
+| 12 | Mutual Information Qubit Coupling Entropy Minimization (MIQCEM) | 9 | 7 | 7 | 10 | 8.3 |
+| 13 | Hypergraph Partition Hardware Clique Cover Mapping (HPHCCM) | 9 | 8 | 6 | 10 | 8.3 |
+| 14 | **Doubly Stochastic Sinkhorn Permutation Gradient Flow (DSSPGF)** | 10 | 8 | 6 | 10 | **8.5** |
+| 15 | **Interaction DAG Critical Antichain Hardware Diameter Alignment (IDCAHDA)** | 9 | 8 | 7 | 10 | **8.5** |
+| 16 | Persistent Topological Filtration Barcode Alignment (PTFBA) | 10 | 6 | 7 | 10 | 8.3 |
+
+> All 16 ideas score **F = 10** (all use linear_sum_assignment + in-place swap transposition for guaranteed bijection).
+> All 16 ideas score **F ≥ 8** — none eliminated.
+
+---
+
+## Top 5 Recommendations (AVG ≥ 8.5)
+
+1. **PASEM** (9.0) — Analytically minimizes expected SWAP count with closed-form gradient; coordinate descent is fast and directly targets the routing objective.
+2. **TGDWSM** (8.8) — Temporal density window analysis; captures "hot bursts" of gate activity that dominate SWAP overhead; unique temporal perspective.
+3. **CCOSF** (8.5) — Causal cone overlap matrix captures transitive DAG dependencies invisible to graph-theoretic methods; eigenspace alignment is principled.
+4. **DSTWNSR** (8.5) — DAG slack drives spring stiffness; places urgently-sequential qubits adjacent while giving freely-commuting qubits slack in placement.
+5. **DSSPGF** (8.5) — Continuous relaxation over Birkhoff polytope with exact gradient enables fine-grained optimization before discrete rounding.
+6. **IDCAHDA** (8.5) — Maximum antichain = theoretically most constrained parallel execution set; Dilworth's theorem provides the combinatorial foundation.

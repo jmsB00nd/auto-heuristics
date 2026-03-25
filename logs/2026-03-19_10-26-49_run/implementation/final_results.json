@@ -1,0 +1,110 @@
+{
+  "DAG Layer-Weighted Closeness Centrality Seeding": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  },
+  "Lookahead DAG Window Hungarian Optimization": {
+    "mean_swaps": 518.9047619047619,
+    "mean_depth": 584.5714285714286,
+    "error": null,
+    "failures": []
+  },
+  "Temporal Interaction Entropy-Guided Central Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  },
+  "Entanglement Concentration Hub Mapping": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "DAG Critical-Path Priority Mapping with Cascade Propagation": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Interaction-Weighted Bipartite Hungarian Assignment": {
+    "mean_swaps": 513.0952380952381,
+    "mean_depth": 600.9047619047619,
+    "error": null,
+    "failures": []
+  },
+  "PageRank-Closeness Centrality Rank Alignment": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Louvain Community Detection + Hardware Region Bipartite Matching": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  "Adaptive Simulated Annealing on Permutation Space": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'random' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'random' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'random' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'random' is not defined"
+      }
+    ]
+  },
+  "Metropolis-Hastings Sampling from Boltzmann Mapping Distribution": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'math' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'math' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'math' is not defined"
+      }
+    ]
+  }
+}

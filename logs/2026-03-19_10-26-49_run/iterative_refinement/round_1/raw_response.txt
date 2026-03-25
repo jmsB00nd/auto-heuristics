@@ -1,0 +1,179 @@
+Now I have a clear picture of the data structures. Let me analyze the current best and design an improvement.
+
+**Analysis:**
+- `self.access` is an ordered dict (gates in circuit order)
+- `self.distance_matrix[p1][p2]` gives BFS distances on hardware graph
+- Current Hungarian cost `weighted_degree[lq] * mean_dist[pq]` is **separable** — equivalent to sorting both lists and matching, losing all pairwise structure
+- Critical gap: never directly minimizes `sum w(lq1,lq2) * dist(map[lq1], map[lq2])` (the actual QAP objective)
+
+**Strategy (Refine + Extend):**
+1. Replace the cost matrix with a **rearrangement-inequality lower bound**: for lq at pq, sort lq's interaction weights descending and pq's distances to neighbors ascending, then pair them. This is a tighter, structure-aware bound.
+2. Add **local 2-opt refinement** after Hungarian that directly minimizes the QAP objective via pairwise swaps across all physical positions (including idle ones).
+
+```python
+def init_mapping(self):
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+
+    # --- Step 1: Build weighted interaction graph ---
+    interaction_weight = defaultdict(float)
+    logical_qubit_set = set()
+
+    for gate, qubits in self.access.items():
+        for q in qubits:
+            logical_qubit_set.add(q)
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            key = (min(q1, q2), max(q1, q2))
+            interaction_weight[key] += 1
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    n_lq = len(logical_qubits)
+    n_pq = len(physical_qubits)
+
+    # --- Step 2: For each logical qubit, collect sorted interaction weights (desc) ---
+    # For each physical qubit, collect sorted distances to all others (asc)
+    lq_sorted_weights = {}
+    for lq in logical_qubits:
+        weights = [w for (q1, q2), w in interaction_weight.items() if q1 == lq or q2 == lq]
+        lq_sorted_weights[lq] = sorted(weights, reverse=True)
+
+    pq_sorted_dists = {}
+    for pq in physical_qubits:
+        dists = sorted([
+            self.distance_matrix[pq][other]
+            for other in physical_qubits
+            if other != pq and self.distance_matrix[pq][other] != float('inf')
+        ])
+        pq_sorted_dists[pq] = dists
+
+    # --- Step 3: Build cost matrix via rearrangement-inequality lower bound ---
+    #
+    # For logical qubit lq placed at physical qubit pq:
+    #   lower_bound_cost(lq, pq) = sum_k  w_k * d_k
+    # where w_1 >= w_2 >= ... are lq's sorted interaction weights
+    # and   d_1 <= d_2 <= ... are the sorted distances from pq to other qubits.
+    #
+    # By the rearrangement inequality, this is the minimum achievable interaction
+    # cost for lq at pq if its partners could be placed optimally around pq.
+    # It captures both the weight distribution of lq AND the local topology of pq,
+    # unlike the separable proxy `weighted_degree * mean_dist` used previously.
+    cost_matrix = np.zeros((n_lq, n_pq))
+    for i, lq in enumerate(logical_qubits):
+        weights = lq_sorted_weights[lq]
+        if not weights:
+            continue
+        for j, pq in enumerate(physical_qubits):
+            dists = pq_sorted_dists[pq]
+            cost = 0.0
+            for k, w in enumerate(weights):
+                d = dists[k] if k < len(dists) else (dists[-1] + k - len(dists) + 1)
+                cost += w * d
+            cost_matrix[i, j] = cost
+
+    # --- Step 4: Hungarian assignment ---
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    lq_to_phys = {
+        logical_qubits[r]: physical_qubits[c]
+        for r, c in zip(row_ind, col_ind)
+    }
+
+    # --- Step 5: Build 1-to-1 bijection via in-place swaps ---
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    # --- Step 6: Local 2-opt refinement to minimize QAP objective directly ---
+    #
+    # QAP objective: sum_{(lq1, lq2) in interactions} w(lq1,lq2) * dist(map[lq1], map[lq2])
+    #
+    # For each circuit qubit lq1, consider swapping its physical position with every
+    # other physical position p2 (including idle ones). The delta for swapping
+    # physical positions pos1 <-> pos2 is computed efficiently by only iterating
+    # over interactions involving the two qubits at those positions.
+    # Internal edges (between pos1 and pos2) are invariant under the swap.
+
+    lq_interactions = defaultdict(dict)
+    for (q1, q2), w in interaction_weight.items():
+        lq_interactions[q1][q2] = w
+        lq_interactions[q2][q1] = w
+
+    def swap_delta(pos1, pos2):
+        lq_a = reverse_mapping_dict[pos1]
+        lq_b = reverse_mapping_dict[pos2]
+        delta = 0.0
+        for partner, w in lq_interactions[lq_a].items():
+            p_partner = mapping_dict[partner]
+            if p_partner == pos2:
+                continue  # internal edge: distance unchanged by swap
+            delta += w * (self.distance_matrix[pos2][p_partner] - self.distance_matrix[pos1][p_partner])
+        for partner, w in lq_interactions[lq_b].items():
+            p_partner = mapping_dict[partner]
+            if p_partner == pos1:
+                continue  # internal edge: distance unchanged by swap
+            delta += w * (self.distance_matrix[pos1][p_partner] - self.distance_matrix[pos2][p_partner])
+        return delta
+
+    improved = True
+    max_iters = 200
+    itr = 0
+    while improved and itr < max_iters:
+        improved = False
+        itr += 1
+        for lq1 in logical_qubits:
+            p1 = mapping_dict[lq1]
+            best_delta = -1e-9
+            best_p2 = -1
+            for p2 in physical_qubits:
+                if p2 == p1:
+                    continue
+                delta = swap_delta(p1, p2)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_p2 = p2
+            if best_p2 != -1:
+                lq2 = reverse_mapping_dict[best_p2]
+                mapping_dict[lq1] = best_p2
+                mapping_dict[lq2] = p1
+                reverse_mapping_dict[p1] = lq2
+                reverse_mapping_dict[best_p2] = lq1
+                improved = True
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict
+
+    if self.use_isl:
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+---
+
+**Key improvements over current best:**
+
+| Aspect | Current (Hungarian) | This version |
+|--------|--------------------|-|
+| Cost function | `degree(lq) × mean_dist(pq)` — separable, ignores distribution | Rearrangement bound: `Σ w_k × d_k` — captures weight *shape* and local topology |
+| QAP objective | Never directly optimized | 2-opt refinement directly minimizes `Σ w·dist(map[lq1],map[lq2])` |
+| Idle physical qubits | Ignored after assignment | Considered as swap targets — circuit qubits can migrate to better positions |
+| Pairwise interactions | Lost when collapsing to degree | Preserved throughout refinement |
+
+The 2-opt loop is the most impactful addition: the Hungarian solution is a good warm start, but the actual objective (routing swaps ∝ sum of interaction-weighted distances) is non-separable and needs direct optimization.

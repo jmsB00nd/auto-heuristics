@@ -1,0 +1,16 @@
+The edit requires your permission. Please approve the file write to `src/mapping/routing.py`, or let me know if you'd like to review the implementation first.
+
+Here's a summary of what the IRDWP `init_mapping` does:
+
+**Algorithm outline:**
+
+| Step | Description |
+|------|-------------|
+| 1 | Collect all logical qubits and 2Q gates |
+| 2 | Build sequential per-qubit DAG, compute `layer_index[gate]` via Kahn's topo-sort + DP — **O(G)** |
+| 3 | For each 2Q gate `(q1,q2)`: `decay_interaction[q1][q2] += exp(-0.5 * layer_index[gate])` — early gates near weight 1.0, deep gates → 0 |
+| 4 | Anchor: place the logical qubit with the highest total decay-weighted degree on the most central physical node |
+| 5 | BFS expansion: greedily pick the unplaced qubit with highest decay-weighted affinity to already-placed qubits; seat it on the hardware-frontier neighbor minimizing `Σ w_decay * hw_distance` |
+| 6 | Bijection enforcement via in-place swap trick (identical to CCHPCR step 7) — guarantees strict 1-to-1 |
+
+**Key difference from CCHPCR:** instead of a uniform interaction count, every interaction is weighted by `exp(-λ * depth)`, so the placement is dominated by early-circuit gates. Routing overhead is biased toward the part of the circuit that executes first, where it matters most.
