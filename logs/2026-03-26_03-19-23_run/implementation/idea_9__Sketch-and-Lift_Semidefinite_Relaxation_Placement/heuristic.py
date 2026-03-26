@@ -1,0 +1,225 @@
+def init_mapping(self):
+    """
+    Sketch-and-Lift Semidefinite Relaxation Placement.
+
+    1. Build interaction weight matrix W (logical) and distance matrix D (physical).
+    2. Formulate QAP cost: minimize trace(W P D P^T) over permutation P.
+    3. Approximate the SDP relaxation via sketching: project W and D into
+       low-rank (rank-r) subspaces using their top eigenvectors, then
+       construct a fractional doubly-stochastic assignment matrix from
+       the spectral embeddings.
+    4. Round the fractional solution using the Hungarian algorithm
+       (deterministic) plus K randomized roundings biased by the
+       fractional solution.
+    5. Refine the best permutation with simulated annealing + local search.
+    """
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from collections import defaultdict
+    import math
+    import random
+
+    # --- Collect logical qubits ---
+    gates_list = list(self.access.items())
+    logical_qubit_set = set()
+    for _, qubits in gates_list:
+        for q in qubits:
+            logical_qubit_set.add(q)
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+    n_logical = len(logical_qubits)
+    n_physical = len(physical_qubits)
+
+    # Trivial / empty fallback
+    if n_logical == 0 or n_logical == 1:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        return
+
+    lq_idx = {q: i for i, q in enumerate(logical_qubits)}
+    pq_idx = {q: i for i, q in enumerate(physical_qubits)}
+
+    # --- Step 1: Build interaction weight matrix W (n_logical x n_logical) ---
+    qubit_ready = {}
+    gate_layer = []
+    for _, qubits in gates_list:
+        es = max((qubit_ready.get(q, 0) for q in qubits), default=0)
+        gate_layer.append(es)
+        for q in qubits:
+            qubit_ready[q] = es + 1
+
+    total_depth = max((qubit_ready.get(q, 0) for q in logical_qubit_set), default=1)
+    half_life = max(total_depth / 4.0, 1.0)
+
+    W = np.zeros((n_logical, n_logical), dtype=np.float64)
+    for idx, (_, qubits) in enumerate(gates_list):
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            if q1 in lq_idx and q2 in lq_idx:
+                layer = gate_layer[idx]
+                weight = math.exp(-layer / half_life)
+                i, j = lq_idx[q1], lq_idx[q2]
+                W[i][j] += weight
+                W[j][i] += weight
+
+    # --- Step 2: Build distance matrix D (n_physical x n_physical) ---
+    D = np.zeros((n_physical, n_physical), dtype=np.float64)
+    for i, pq1 in enumerate(physical_qubits):
+        for j, pq2 in enumerate(physical_qubits):
+            d = self.distance_matrix[pq1][pq2]
+            D[i][j] = d if d != float('inf') else 1e6
+
+    # --- Step 3: Sketch-and-Lift SDP approximation ---
+    r = min(8, n_logical - 1, n_physical - 1)  # sketch rank
+    if r < 1:
+        r = 1
+
+    # Eigendecomposition of W
+    eigvals_W, eigvecs_W = np.linalg.eigh(W)
+    idx_W = np.argsort(-eigvals_W)[:r]
+    U_W = eigvecs_W[:, idx_W] * np.sqrt(np.abs(eigvals_W[idx_W]))[np.newaxis, :]
+
+    # Embed physical qubits via double-centered negative distance (MDS)
+    neg_D = -D
+    row_mean = neg_D.mean(axis=1, keepdims=True)
+    col_mean = neg_D.mean(axis=0, keepdims=True)
+    grand_mean = neg_D.mean()
+    B = neg_D - row_mean - col_mean + grand_mean
+
+    eigvals_D, eigvecs_D = np.linalg.eigh(B)
+    idx_D = np.argsort(-eigvals_D)[:r]
+    pos_eigvals = np.maximum(eigvals_D[idx_D], 0)
+    U_D = eigvecs_D[:, idx_D] * np.sqrt(pos_eigvals + 1e-12)[np.newaxis, :]
+
+    # --- Step 4: Rounding ---
+    n = max(n_logical, n_physical)
+
+    def evaluate_assignment(perm):
+        cost = 0.0
+        for i in range(n_logical):
+            for k in range(i + 1, n_logical):
+                if W[i][k] > 0:
+                    cost += W[i][k] * D[perm[i]][perm[k]]
+        return cost
+
+    # 4a: Hungarian rounding with sign disambiguation
+    best_perm = None
+    best_cost = float('inf')
+
+    for flip_mask in range(min(2**r, 32)):
+        U_D_flipped = U_D.copy()
+        for bit in range(r):
+            if flip_mask & (1 << bit):
+                U_D_flipped[:, bit] *= -1
+
+        C_flip = np.full((n, n), 0.0, dtype=np.float64)
+        for i in range(n_logical):
+            for j in range(n_physical):
+                diff = U_W[i] - U_D_flipped[j]
+                C_flip[i][j] = np.dot(diff, diff)
+
+        row_ind, col_ind = linear_sum_assignment(C_flip)
+        perm = [0] * n_logical
+        for ri, ci in zip(row_ind[:n_logical], col_ind[:n_logical]):
+            if ri < n_logical:
+                perm[ri] = ci if ci < n_physical else 0
+        cost = evaluate_assignment(perm)
+        if cost < best_cost:
+            best_cost = cost
+            best_perm = perm[:]
+
+    # 4b: Randomized rounding biased by fractional SDP solution
+    K = 30
+    C_for_prob = np.zeros((n_logical, n_physical), dtype=np.float64)
+    for i in range(n_logical):
+        for j in range(n_physical):
+            diff = U_W[i] - U_D[j]
+            C_for_prob[i][j] = np.dot(diff, diff)
+
+    C_neg = -C_for_prob
+    C_neg -= C_neg.max(axis=1, keepdims=True)
+    scale = max(C_neg.std() + 1e-10, 0.1)
+    prob_matrix = np.exp(C_neg / scale)
+    prob_matrix /= prob_matrix.sum(axis=1, keepdims=True)
+
+    for _ in range(K):
+        used_phys = set()
+        perm = [0] * n_logical
+        order = list(range(n_logical))
+        random.shuffle(order)
+
+        for i in order:
+            probs = prob_matrix[i].copy()
+            for j in used_phys:
+                probs[j] = 0.0
+            total = probs.sum()
+            if total < 1e-15:
+                remaining = [j for j in range(n_physical) if j not in used_phys]
+                chosen = random.choice(remaining)
+            else:
+                probs /= total
+                chosen = np.random.choice(n_physical, p=probs)
+            perm[i] = chosen
+            used_phys.add(chosen)
+
+        cost = evaluate_assignment(perm)
+        if cost < best_cost:
+            best_cost = cost
+            best_perm = perm[:]
+
+    # --- Step 5: Simulated Annealing refinement with warm restarts ---
+    perm = best_perm[:]
+    current_cost = best_cost
+    T = max(current_cost * 0.1, 1.0)
+    T_min = 1e-4
+    alpha_sa = 0.995
+    sa_iters = min(n_logical * n_logical * 50, 15000)
+
+    for iteration in range(sa_iters):
+        if T < T_min:
+            T = max(best_cost * 0.02, 0.5)
+
+        i1 = random.randint(0, n_logical - 1)
+        i2 = random.randint(0, n_logical - 1)
+        if i1 == i2:
+            continue
+
+        delta = 0.0
+        for k in range(n_logical):
+            if k == i1 or k == i2:
+                continue
+            if W[i1][k] > 0:
+                delta += W[i1][k] * (D[perm[i2]][perm[k]] - D[perm[i1]][perm[k]])
+            if W[i2][k] > 0:
+                delta += W[i2][k] * (D[perm[i1]][perm[k]] - D[perm[i2]][perm[k]])
+
+        if delta < 0 or random.random() < math.exp(-delta / max(T, 1e-15)):
+            perm[i1], perm[i2] = perm[i2], perm[i1]
+            current_cost += delta
+            if current_cost < best_cost:
+                best_cost = current_cost
+                best_perm = perm[:]
+
+        T *= alpha_sa
+
+    # --- Step 6: Build final bijective mapping ---
+    lq_to_phys = {}
+    for i, lq in enumerate(logical_qubits):
+        lq_to_phys[lq] = physical_qubits[best_perm[i]]
+
+    mapping_dict = list(range(self.num_qubits))
+    reverse_mapping_dict = list(range(self.num_qubits))
+
+    for lq, target_phys in lq_to_phys.items():
+        current_phys = mapping_dict[lq]
+        if current_phys == target_phys:
+            continue
+        displaced_lq = reverse_mapping_dict[target_phys]
+        mapping_dict[lq] = target_phys
+        mapping_dict[displaced_lq] = current_phys
+        reverse_mapping_dict[target_phys] = lq
+        reverse_mapping_dict[current_phys] = displaced_lq
+
+    self.mapping_dict = mapping_dict
+    self.reverse_mapping_dict = reverse_mapping_dict

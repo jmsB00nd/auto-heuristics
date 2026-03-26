@@ -1,0 +1,113 @@
+{
+  " Diffusion-Gradient Placement": {
+    "mean_swaps": 824.0,
+    "mean_depth": 673.3333333333334,
+    "error": null,
+    "failures": []
+  },
+  " DAG-Layered Incremental Placement": {
+    "mean_swaps": 457.6666666666667,
+    "mean_depth": 585.8095238095239,
+    "error": null,
+    "failures": []
+  },
+  " Spectral Flow Matching": {
+    "mean_swaps": 355.0952380952381,
+    "mean_depth": 529.3333333333334,
+    "error": null,
+    "failures": []
+  },
+  " Critical-Path Anchored Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: list index out of range",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "bv_n30__22CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "multiplier_n45__462CYC.json",
+        "error": "list index out of range"
+      }
+    ]
+  },
+  " Community-Aware Hierarchical Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Extraction Failed"
+  },
+  " Weighted Centroid Gravity Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'defaultdict' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'defaultdict' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'defaultdict' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'defaultdict' is not defined"
+      }
+    ]
+  },
+  " Reverse-SABRE Seed Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: name 'generate_dag' is not defined",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "name 'generate_dag' is not defined"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "name 'generate_dag' is not defined"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "name 'generate_dag' is not defined"
+      }
+    ]
+  },
+  " Interaction Tensor Decomposition Placement": {
+    "mean_swaps": 624.8095238095239,
+    "mean_depth": 606.2857142857143,
+    "error": null,
+    "failures": []
+  },
+  " Min-Congestion Flow Placement": {
+    "mean_swaps": Infinity,
+    "mean_depth": 0,
+    "error": "Aborted early: Failed on 3 circuits. First error: list index out of range",
+    "failures": [
+      {
+        "circuit": "adder_n28__42CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "qft_n29__222CYC.json",
+        "error": "list index out of range"
+      },
+      {
+        "circuit": "knn_n31__18CYC.json",
+        "error": "list index out of range"
+      }
+    ]
+  },
+  " Token Swapping Lower Bound Placement": {
+    "mean_swaps": 464.57142857142856,
+    "mean_depth": 566.6666666666666,
+    "error": null,
+    "failures": []
+  }
+}

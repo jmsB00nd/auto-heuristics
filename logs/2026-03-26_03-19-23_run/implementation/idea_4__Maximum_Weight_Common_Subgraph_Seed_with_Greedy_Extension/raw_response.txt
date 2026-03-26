@@ -1,0 +1,23 @@
+It seems write permissions haven't been granted yet. Could you approve the file write? The implementation is ready — here's a summary of what it does:
+
+**Algorithm structure:**
+
+1. **Interaction graph construction** — Builds weighted edges between logical qubit pairs from 2-qubit gates, with exponential layer decay (earlier gates matter more).
+
+2. **Top-K anchor pairs** (K=8) — Selects the highest-weight logical qubit pairs as seed candidates.
+
+3. **BFS greedy expansion** — For each anchor pair × top-20 hardware edges (both orientations), maps the anchor pair then greedily expands by:
+   - Picking the unplaced logical qubit with highest total interaction to already-placed qubits
+   - Mapping it to the best adjacent physical qubit (minimizing weighted distance)
+   - Expanding candidate physical qubits from radius-1 to radius-2 as needed
+
+4. **Best seed selection** — Keeps the expansion with lowest total weighted distance cost.
+
+5. **Fill phase** — Remaining unmapped logical qubits are placed greedily by interaction weight, using explicit exclusion sets to guarantee bijectivity.
+
+6. **Local search refinement** — Full pairwise swap local search followed by simulated annealing, then a final local search pass.
+
+**Guarantees:**
+- Strict 1-to-1 mapping via explicit `placed`/`pq_used` tracking
+- Polynomial time (K × edges × n for BFS, plus SA iterations)
+- Populates both `self.mapping_dict` and `self.reverse_mapping_dict`

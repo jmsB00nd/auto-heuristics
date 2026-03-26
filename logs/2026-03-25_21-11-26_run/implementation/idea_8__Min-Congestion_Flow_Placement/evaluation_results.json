@@ -1,0 +1,19 @@
+{
+  "mean_swaps": Infinity,
+  "mean_depth": 0,
+  "error": "Aborted early: Failed on 3 circuits. First error: list index out of range",
+  "failures": [
+    {
+      "circuit": "adder_n28__42CYC.json",
+      "error": "list index out of range"
+    },
+    {
+      "circuit": "qft_n29__222CYC.json",
+      "error": "list index out of range"
+    },
+    {
+      "circuit": "knn_n31__18CYC.json",
+      "error": "list index out of range"
+    }
+  ]
+}

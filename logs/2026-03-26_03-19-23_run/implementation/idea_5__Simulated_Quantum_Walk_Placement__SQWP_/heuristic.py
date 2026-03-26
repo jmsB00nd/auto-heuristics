@@ -1,0 +1,149 @@
+def init_mapping(self):
+    """
+    Simulated Quantum Walk Placement (SQWP)
+
+    Simulates continuous-time quantum walks on both logical interaction and
+    hardware graphs, then matches qubits based on Jensen-Shannon divergence
+    of their walk probability distributions. Uses Hungarian assignment + local search.
+    """
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from scipy.linalg import expm
+    from scipy.spatial.distance import jensenshannon
+    import random
+
+    N = self.num_qubits
+    gates_list = list(self.access.items())
+
+    # Identify logical qubits used in the circuit
+    logical_qubit_set = set()
+    for _, qubits in gates_list:
+        for q in qubits:
+            logical_qubit_set.add(q)
+
+    num_logical = len(logical_qubit_set)
+
+    # Trivial case
+    if num_logical <= 1:
+        self.mapping_dict = list(range(N))
+        self.reverse_mapping_dict = list(range(N))
+        return
+
+    # ---- Step 1: Build weighted logical adjacency matrix ----
+    logical_weight = {}
+    for _, qubits in gates_list:
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            key = (min(q1, q2), max(q1, q2))
+            logical_weight[key] = logical_weight.get(key, 0) + 1
+
+    A_L = np.zeros((N, N), dtype=np.float64)
+    for (q1, q2), w in logical_weight.items():
+        A_L[q1, q2] = w
+        A_L[q2, q1] = w
+
+    # ---- Step 2: Build hardware adjacency matrix ----
+    A_H = np.zeros((N, N), dtype=np.float64)
+    for p1 in self.backend:
+        for p2 in self.backend[p1]:
+            A_H[p1, p2] = 1.0
+
+    # ---- Step 3: Compute quantum walk matrix exponentials ----
+    times = [0.5, 1.0, 2.0]
+
+    def compute_walk_distributions(A, times):
+        """Compute probability distributions from quantum walk at given times."""
+        n = A.shape[0]
+        probs = np.zeros((n, n), dtype=np.float64)
+        for t in times:
+            # U = exp(-i * A * t), quantum walk unitary
+            U = expm(-1j * A * t)
+            # Probability distribution: |U[node, :]|^2
+            P = np.abs(U) ** 2
+            probs += P
+        # Normalize each row to be a valid probability distribution
+        row_sums = probs.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums > 0, row_sums, 1.0)
+        probs = probs / row_sums
+        return probs
+
+    P_L = compute_walk_distributions(A_L, times)
+    P_H = compute_walk_distributions(A_H, times)
+
+    # ---- Step 4: Build cost matrix using Jensen-Shannon divergence ----
+    eps = 1e-12
+    P_L_safe = P_L + eps
+    P_L_safe = P_L_safe / P_L_safe.sum(axis=1, keepdims=True)
+    P_H_safe = P_H + eps
+    P_H_safe = P_H_safe / P_H_safe.sum(axis=1, keepdims=True)
+
+    cost_matrix = np.zeros((N, N), dtype=np.float64)
+    for l in range(N):
+        for p in range(N):
+            cost_matrix[l, p] = jensenshannon(P_L_safe[l], P_H_safe[p])
+
+    # ---- Step 5: Hungarian assignment ----
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    mapping_dict = list(range(N))
+    for l, p in zip(row_ind, col_ind):
+        mapping_dict[l] = p
+
+    reverse_mapping_dict = list(range(N))
+    for l in range(N):
+        reverse_mapping_dict[mapping_dict[l]] = l
+
+    # ---- Step 6: Local search improvement ----
+    def evaluate_mapping(md):
+        total = 0.0
+        for (q1, q2), w in logical_weight.items():
+            total += w * self.distance_matrix[md[q1]][md[q2]]
+        return total
+
+    best_cost = evaluate_mapping(mapping_dict)
+    best_md = mapping_dict[:]
+    best_rmd = reverse_mapping_dict[:]
+
+    # Swap-based local search on logical qubits
+    improved = True
+    max_rounds = 50
+    round_count = 0
+    while improved and round_count < max_rounds:
+        improved = False
+        round_count += 1
+        logical_list = sorted(logical_qubit_set)
+        for i in range(len(logical_list)):
+            for j in range(i + 1, len(logical_list)):
+                l1, l2 = logical_list[i], logical_list[j]
+                best_md[l1], best_md[l2] = best_md[l2], best_md[l1]
+                new_cost = evaluate_mapping(best_md)
+                if new_cost < best_cost - 1e-12:
+                    best_cost = new_cost
+                    best_rmd[best_md[l1]] = l1
+                    best_rmd[best_md[l2]] = l2
+                    improved = True
+                else:
+                    best_md[l1], best_md[l2] = best_md[l2], best_md[l1]
+
+    # Try swapping logical qubits with unmapped ones
+    unmapped_logical = [q for q in range(N) if q not in logical_qubit_set]
+    if unmapped_logical:
+        improved = True
+        round_count = 0
+        while improved and round_count < 10:
+            improved = False
+            round_count += 1
+            for lq in sorted(logical_qubit_set):
+                for uq in unmapped_logical:
+                    best_md[lq], best_md[uq] = best_md[uq], best_md[lq]
+                    new_cost = evaluate_mapping(best_md)
+                    if new_cost < best_cost - 1e-12:
+                        best_cost = new_cost
+                        best_rmd[best_md[lq]] = lq
+                        best_rmd[best_md[uq]] = uq
+                        improved = True
+                    else:
+                        best_md[lq], best_md[uq] = best_md[uq], best_md[lq]
+
+    self.mapping_dict = best_md
+    self.reverse_mapping_dict = best_rmd

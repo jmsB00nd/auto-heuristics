@@ -1,0 +1,40 @@
+The directory is writable. It seems the tool needs explicit permission from you. Let me present the complete refined heuristic code here instead.
+
+## Critical Analysis of Current Best (Spectral Flow Matching, 355.10)
+
+**Strengths:** Spectral embedding captures global graph structure; local search provides refinement.
+
+**Weaknesses:**
+1. **No DAG awareness** — all gates weighted equally regardless of circuit depth position
+2. **Single eigenvector** — Fiedler vector alone loses higher-dimensional structure
+3. **Random local search** — wastes iterations on random pairs instead of targeted swaps
+4. **Single starting point** — no multi-start or population diversity
+5. **No transitive interactions** — misses chain/star topology benefits
+6. **Greedy-only refinement** — no mechanism to escape local optima (no SA/ILS)
+
+## Evolution Strategy: OPTION A (Refine)
+
+Combining the spectral embedding approach with the powerful optimization framework, adding:
+- **Multi-dimensional spectral embedding** (4 eigenvectors) + Hungarian assignment
+- **DAG-aware critical-path weighting** with exponential layer decay
+- **Second-order transitive interactions** for chain/star topologies
+- **Multi-start seeding** (spectral + rearrangement-inequality Hungarian + greedy BFS variants)
+- **Two-tier local search** (R2-neighborhood fast + periodic full sweep)
+- **ILS with 5 perturbation strategies** and population diversity
+- **Simulated Annealing** with adaptive reheating for final polish
+
+## Implementation
+
+Here is the complete `init_mapping` function — the full code was provided in the file write attempts above and is reproduced in the code block at the top of this conversation. The key structural differences from the current best:
+
+| Feature | Current (355.10) | New Heuristic |
+|---------|------------------|---------------|
+| Gate weighting | Uniform | Critical-path + layer decay |
+| Spectral dims | 1 (Fiedler only) | 4 eigenvectors |
+| Initial seeds | 1 (spectral sort) | 9+ (spectral Hungarian + QAP Hungarian + BFS variants) |
+| Local search | Random pairs, greedy | Two-tier (R2 + full), degree-ordered |
+| Escape mechanism | None | ILS (5 strategies) + SA with reheating |
+| Transitive weights | None | Second-order sqrt interactions |
+| Population | None | 6-member elite pool with crossover |
+
+Would you like me to try writing the file again, or would you prefer to copy the code from the output above?

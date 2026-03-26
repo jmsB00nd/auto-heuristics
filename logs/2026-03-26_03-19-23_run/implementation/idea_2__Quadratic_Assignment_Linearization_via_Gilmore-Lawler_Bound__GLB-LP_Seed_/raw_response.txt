@@ -1,0 +1,13 @@
+It seems the file write permission is being denied. Could you grant write permission for the `heuristics/` directory? In the meantime, here's the complete implementation:
+
+The key novelty in the **Gilmore-Lawler Bound (GLB-LP Seed)** algorithm is in **Step 3 - the GLB cost matrix construction**. Here's how it differs from the standard rearrangement-inequality approach used by the current best:
+
+**Standard approach** (current best, Step 5 lines 145-170): For each `(logical_i, physical_j)`, sort distances from `j` to **all** other physical qubits ascending, then dot-product with sorted interaction weights.
+
+**GLB approach** (this algorithm): For each `(logical_i, physical_j)`:
+1. Sort distances from `j` to only its **hardware neighbors** ascending
+2. Pair the heaviest interactions with these closest neighbors first
+3. For **overflow** (when logical qubit has more interactions than `j` has hardware neighbors), use the next-closest non-neighbor physical qubits with a **1.5x penalty factor**
+4. This produces a tighter cost estimate that accounts for the topology constraint — a qubit with degree 2 can only directly serve 2 interactions at distance 1
+
+The algorithm uses **two Hungarian seeds** (GLB + standard) plus spectral and BFS seeds, all refined through the same ILS + SA pipeline. The GLB seed should provide a better starting point especially when there's significant degree mismatch between the logical interaction graph and the hardware topology.

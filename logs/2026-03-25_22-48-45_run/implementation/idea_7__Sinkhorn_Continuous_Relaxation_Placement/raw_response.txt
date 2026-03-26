@@ -1,0 +1,232 @@
+It seems file write permissions need to be granted. Could you approve the file write permission so I can save the implementation to `/home/jmsb00nd/Documents/auto-heuristics/heuristics/_Sinkhorn_Continuous_Relaxation_Placement.py`?
+
+In the meantime, here's the complete implementation:
+
+```python
+def init_mapping(self):
+    """
+    Sinkhorn Continuous Relaxation Placement.
+
+    Relaxes the discrete QAP to continuous optimization over doubly-stochastic
+    matrices using the Sinkhorn operator, then discretizes via Hungarian.
+    """
+    from collections import defaultdict
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    import math
+
+    gates_list = list(self.access.items())
+
+    # Collect logical qubits
+    logical_qubit_set = set()
+    for _, qubits in gates_list:
+        for q in qubits:
+            logical_qubit_set.add(q)
+
+    logical_qubits = sorted(logical_qubit_set)
+    physical_qubits = sorted(self.backend.keys())
+
+    if not logical_qubits:
+        self.mapping_dict = list(range(self.num_qubits))
+        self.reverse_mapping_dict = list(range(self.num_qubits))
+        if self.use_isl:
+            from src.utils.isl_data_loader import dict_to_isl_map
+            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+        return
+
+    n_lq = len(logical_qubits)
+    n_pq = len(physical_qubits)
+    lq_idx = {q: i for i, q in enumerate(logical_qubits)}
+    pq_idx = {q: i for i, q in enumerate(physical_qubits)}
+
+    # ---- Step 1: Build interaction weight matrix W ----
+    qubit_ready = {}
+    gate_layer = []
+    for _, qubits in gates_list:
+        es = max((qubit_ready.get(q, 0) for q in qubits), default=0)
+        gate_layer.append(es)
+        for q in qubits:
+            qubit_ready[q] = es + 1
+
+    total_depth = max((qubit_ready.get(q, 0) for q in logical_qubit_set), default=1)
+    max_layer = max(total_depth - 1, 1)
+
+    # Backward pass for criticality
+    qubit_next_ls = defaultdict(lambda: total_depth)
+    gate_latest_start = [0] * len(gates_list)
+    for idx in range(len(gates_list) - 1, -1, -1):
+        _, qubits = gates_list[idx]
+        lf = min(qubit_next_ls[q] for q in qubits)
+        ls = lf - 1
+        gate_latest_start[idx] = ls
+        for q in qubits:
+            qubit_next_ls[q] = ls
+
+    gate_slack = [gate_latest_start[i] - gate_layer[i] for i in range(len(gates_list))]
+    max_slack = max(gate_slack, default=1) or 1
+    half_life = max(max_layer / 3.5, 4.0)
+
+    W = np.zeros((n_lq, n_lq))
+    for idx, (_, qubits) in enumerate(gates_list):
+        if len(qubits) == 2:
+            q1, q2 = qubits[0], qubits[1]
+            if q1 in lq_idx and q2 in lq_idx:
+                i, j = lq_idx[q1], lq_idx[q2]
+                layer = gate_layer[idx]
+                slack = gate_slack[idx]
+                w = math.exp(-layer * math.log(2) / half_life) + 0.05
+                crit = 1.0 + 2.0 * (1.0 - slack / max_slack)
+                w *= crit
+                W[i][j] += w
+                W[j][i] += w
+
+    # ---- Step 2: Build distance matrix D ----
+    D = np.zeros((n_pq, n_pq))
+    for i, p1 in enumerate(physical_qubits):
+        for j, p2 in enumerate(physical_qubits):
+            D[i][j] = self.distance_matrix[p1][p2]
+
+    # ---- Step 3: Initialize soft assignment P = exp(-beta * C) ----
+    W_row_sum = W.sum(axis=1)
+    D_mean = D.mean(axis=1)
+    C = np.outer(W_row_sum, D_mean)
+
+    beta = 1.0 / (C.std() + 1e-10)
+    P = np.exp(-beta * C)
+    P = np.clip(P, 1e-12, None)
+
+    # Pad to square n_pq x n_pq
+    if n_lq < n_pq:
+        pad = np.ones((n_pq - n_lq, n_pq)) / n_pq
+        P_full = np.vstack([P, pad])
+    elif n_lq == n_pq:
+        P_full = P.copy()
+    else:
+        P_full = P[:n_pq, :]
+
+    n = n_pq
+
+    # ---- Step 4 & 5: Sinkhorn + gradient descent loop ----
+    def sinkhorn(M, iters=80):
+        M = np.clip(M, 1e-12, None)
+        for _ in range(iters):
+            M = M / M.sum(axis=1, keepdims=True)
+            M = M / M.sum(axis=0, keepdims=True)
+            M = np.clip(M, 1e-12, None)
+        return M
+
+    P_full = sinkhorn(P_full, iters=100)
+
+    W_full = np.zeros((n, n))
+    W_full[:n_lq, :n_lq] = W
+
+    eta = 0.5 / (np.max(W_full) * np.max(D) * n + 1e-10)
+    T_iters = 30
+
+    for t in range(T_iters):
+        grad = W_full @ P_full @ D + W_full.T @ P_full @ D.T
+        eta_t = eta / (1.0 + 0.05 * t)
+        P_full = P_full * np.exp(-eta_t * grad)
+        P_full = np.clip(P_full, 1e-12, None)
+        P_full = sinkhorn(P_full, iters=60)
+
+    # ---- Step 7: Discretize via Hungarian ----
+    cost_matrix = -P_full[:n_lq, :]
+    if n_lq < n_pq:
+        pad = np.zeros((n_pq - n_lq, n_pq))
+        cost_matrix_sq = np.vstack([cost_matrix, pad])
+    else:
+        cost_matrix_sq = cost_matrix
+
+    row_ind, col_ind = linear_sum_assignment(cost_matrix_sq)
+
+    hungarian_map = {}
+    for r, c in zip(row_ind, col_ind):
+        if r < n_lq:
+            hungarian_map[logical_qubits[r]] = physical_qubits[c]
+
+    # ---- Step 8: Build full mapping + local search refinement ----
+    md = list(range(self.num_qubits))
+    rmd = list(range(self.num_qubits))
+
+    for lq, pq in hungarian_map.items():
+        md[lq] = pq
+        rmd[pq] = lq
+
+    mapped_logical = set(hungarian_map.keys())
+    unmapped_logical = [q for q in range(self.num_qubits) if q not in mapped_logical]
+    assigned_physical = set(hungarian_map.values())
+    free_physical_all = [q for q in range(self.num_qubits) if q not in assigned_physical]
+
+    for i, lq in enumerate(unmapped_logical):
+        if i < len(free_physical_all):
+            pq = free_physical_all[i]
+            md[lq] = pq
+            rmd[pq] = lq
+
+    def compute_cost(mapping):
+        cost = 0.0
+        for idx, (_, qubits) in enumerate(gates_list):
+            if len(qubits) == 2:
+                q1, q2 = qubits[0], qubits[1]
+                p1, p2 = mapping[q1], mapping[q2]
+                layer = gate_layer[idx]
+                slack = gate_slack[idx]
+                w = math.exp(-layer * math.log(2) / half_life) + 0.05
+                crit = 1.0 + 2.0 * (1.0 - slack / max_slack)
+                w *= crit
+                cost += w * self.distance_matrix[p1][p2]
+        return cost
+
+    def swap_in_mapping(md, rmd, p1, p2):
+        l1, l2 = rmd[p1], rmd[p2]
+        md[l1], md[l2] = p2, p1
+        rmd[p1], rmd[p2] = l2, l1
+
+    best_cost = compute_cost(md)
+    improved = True
+    for _ in range(5):
+        if not improved:
+            break
+        improved = False
+        active_physical = set()
+        for lq in logical_qubits:
+            active_physical.add(md[lq])
+            for nb in self.backend.get(md[lq], []):
+                active_physical.add(nb)
+
+        active_list = sorted(active_physical)
+        for i in range(len(active_list)):
+            for j in range(i + 1, len(active_list)):
+                p1, p2 = active_list[i], active_list[j]
+                swap_in_mapping(md, rmd, p1, p2)
+                new_cost = compute_cost(md)
+                if new_cost < best_cost - 1e-9:
+                    best_cost = new_cost
+                    improved = True
+                else:
+                    swap_in_mapping(md, rmd, p1, p2)
+
+    self.mapping_dict = md
+    self.reverse_mapping_dict = rmd
+
+    if self.use_isl:
+        from src.utils.isl_data_loader import dict_to_isl_map
+        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+```
+
+**Key design decisions:**
+
+1. **Interaction weight matrix W**: Uses layer-decayed, criticality-weighted 2-qubit gate frequencies (forward/backward pass for slack analysis)
+
+2. **Linearized QAP cost initialization**: `C[l,p] = W_row_sum[l] * D_mean[p]` — high-interaction logical qubits prefer central (low avg distance) physical qubits
+
+3. **Sinkhorn normalization**: 100 initial iterations, 60 per gradient step — ensures doubly-stochastic constraint throughout
+
+4. **Gradient-Sinkhorn loop**: 30 iterations of multiplicative gradient update `P ← P ⊙ exp(-η * ∇)` with decaying learning rate, followed by re-Sinkhorn. The gradient `∇ = W @ P @ D + W^T @ P @ D^T` comes from the QAP objective `trace(W P D P^T)`
+
+5. **Hungarian discretization**: Applied to `-P` (top n_lq rows) to extract a valid permutation
+
+6. **Local search**: Pairwise swap refinement on active physical qubits (mapped + neighbors) for up to 5 rounds
+
+7. **Validity guarantee**: Hungarian produces a bijection; unmapped qubits get remaining physical slots; `md` and `rmd` are consistent inverse lists

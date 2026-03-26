@@ -1,0 +1,21 @@
+It seems the write permission hasn't been granted yet. Could you approve the file write permission? I'm trying to create the file at `/home/jmsb00nd/Documents/auto-heuristics/heuristics/_Chronological_Gate_Wavefront_Placement.py`.
+
+Here's a summary of the implementation:
+
+**Chronological Gate Wavefront Placement** — the `init_mapping(self)` function:
+
+1. **DAG Construction & Topological Sort** — Builds a dependency DAG from `self.access` using per-qubit last-gate tracking, then performs Kahn's algorithm for topological ordering.
+
+2. **Future Interaction Counting** — Pre-computes how many 2-qubit gates each logical qubit participates in, used to prioritize placement.
+
+3. **Wavefront Placement** — Processes gates in topological order:
+   - **Both qubits new**: Finds the best available hardware edge (highest combined unoccupied neighbor degree), assigns higher-interaction qubit to higher-degree endpoint.
+   - **One qubit placed**: Places the new qubit on the nearest unoccupied neighbor of the already-placed qubit, preferring neighbors with more flexibility.
+   - **Single-qubit gate, new qubit**: Places at the physical qubit with most unoccupied neighbors.
+   - **Both placed**: Skip.
+
+4. **Remaining Qubits** — Any unplaced logical qubits get assigned to remaining physical qubits.
+
+5. **2-opt Local Search Refinement** — Computes layer-decayed interaction weights, then iteratively swaps physical assignments to minimize QAP cost until convergence (up to 50 passes).
+
+6. **Output** — Sets `self.mapping_dict` (logical→physical) and `self.reverse_mapping_dict` (physical→logical) as lists indexed by qubit ID.

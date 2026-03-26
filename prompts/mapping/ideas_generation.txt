@@ -24,3 +24,16 @@ PROBABILITY_SCORE: [1–10]
 EFFORT_SCORE: [1–10]
 FEASIBILITY_SCORE: [1-10]
 AVERAGE_SCORE: [1-10]
+
+
+Already tested Ideas DON'T REPAET : 
+-Diffusion-Gradient Placement
+-DAG-Layered Incremental Placement
+-Spectral Flow Matching
+-Critical-Path Anchored Placement
+-Community-Aware Hierarchical Placement
+-Weighted Centroid Gravity Placement
+-Reverse-SABRE Seed Placement
+-Interaction Tensor Decomposition Placement
+-Min-Congestion Flow Placement
+-Token Swapping Lower Bound Placement

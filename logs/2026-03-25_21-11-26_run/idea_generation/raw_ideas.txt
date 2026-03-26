@@ -1,0 +1,404 @@
+Now I have a thorough understanding of the codebase. Let me generate the novel ideas.
+
+Here are **15 novel algorithmic concepts** for quantum circuit initial mapping, evaluated and scored:
+
+---
+
+**IDEA_NAME:** Diffusion-Gradient Placement
+
+**DESCRIPTION:** Model logical qubits as particles on the hardware graph that diffuse according to interaction strength. Start all qubits at the graph centroid, then iteratively "push" them apart along shortest-path gradients weighted by gate interaction frequency. High-interaction pairs resist separation (low diffusion coefficient), while low-interaction pairs diffuse freely. The process converges when particles settle on distinct physical qubits.
+
+**ALGORITHMIC_APPROACH:**
+1. Build interaction graph `W[i][j]` = number of 2-qubit gates between logical qubits i,j
+2. Compute hardware graph centroid (min sum-of-distances node)
+3. Initialize all logical qubits at centroid position (continuous coordinates via spectral embedding of hardware)
+4. Iteratively: for each pair, apply repulsive force inversely proportional to `W[i][j]` and attractive force proportional to `W[i][j]`
+5. After convergence, snap each logical qubit to nearest unoccupied physical qubit via greedy nearest-neighbor assignment
+6. Build `mapping_dict` and `reverse_mapping_dict` from the assignment
+
+**COLLISION_PREVENTION:** The final snap step uses a greedy assignment: sort logical qubits by distance to their target physical qubit, assign closest first, mark physical qubit as occupied. Guarantees 1-to-1 by construction. Unassigned logical qubits get remaining physical qubits.
+
+**WHY_NOVEL:** Unlike spectral methods that align eigenvectors, this uses a physics-based force simulation on the actual hardware topology. The diffusion model respects the discrete graph structure while allowing continuous optimization before discretization.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 6
+**EFFORT_SCORE:** 7
+**FEASIBILITY_SCORE:** 9
+**AVERAGE_SCORE:** 7.3
+
+---
+
+**IDEA_NAME:** DAG-Layered Incremental Placement
+
+**DESCRIPTION:** Instead of placing all qubits at once, place them incrementally as they first appear in the DAG layers. Process DAG layers front-to-back. When a new logical qubit first participates in a 2-qubit gate, place it adjacent to (or near) its interaction partner that's already placed. This naturally clusters interacting qubits.
+
+**ALGORITHMIC_APPROACH:**
+1. Topologically sort the DAG and identify layers
+2. Maintain a set of placed logical qubits and their physical positions
+3. For each layer, identify newly appearing qubits
+4. For each new qubit q: find its gate partner p in this layer. If p is already placed at physical location P, assign q to the closest unoccupied neighbor of P
+5. If no partner is placed yet, defer q. If both are new, place the pair on the highest-degree unoccupied edge in the hardware graph
+6. Build `mapping_dict[q] = assigned_physical` and `reverse_mapping_dict` accordingly
+
+**COLLISION_PREVENTION:** Each placement selects from the set of currently unoccupied physical qubits only. The "unoccupied" set shrinks monotonically. All logical qubits are guaranteed placement since |logical| <= |physical|.
+
+**WHY_NOVEL:** Most methods treat placement as a single global optimization. This is an online/streaming approach that exploits the temporal structure of the circuit, placing qubits "just in time" based on when they're first needed.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 9
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 8.3
+
+---
+
+**IDEA_NAME:** Spectral Flow Matching
+
+**DESCRIPTION:** Compute the Fiedler vector (second-smallest eigenvector of the Laplacian) of both the logical interaction graph and the hardware coupling graph. Sort logical qubits by their Fiedler values and physical qubits by theirs. Match them in sorted order. Then refine by running a local-search phase that swaps pairs if doing so reduces total weighted distance.
+
+**ALGORITHMIC_APPROACH:**
+1. Build weighted adjacency matrix for logical interaction graph (edge weight = gate count)
+2. Compute Laplacian and Fiedler vector for both graphs
+3. Sort logical qubits by Fiedler value; sort physical qubits by Fiedler value
+4. Create initial mapping by matching sorted positions: `mapping_dict[sorted_logical[i]] = sorted_physical[i]`
+5. Local search: for K iterations, pick two random logical qubits, swap their physical assignments if total interaction-weighted distance decreases
+6. Build `reverse_mapping_dict` from final `mapping_dict`
+
+**COLLISION_PREVENTION:** The sorted-order matching is a bijection by construction. Local search only swaps existing assignments, preserving bijectivity.
+
+**WHY_NOVEL:** While spectral methods exist, the Fiedler-sort-and-match approach with local search refinement is a simpler and more direct spectral strategy that avoids Procrustes alignment entirely. The local search exploits the spectral initialization as a strong starting point.
+
+**NOVELTY_SCORE:** 4
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 9
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Critical-Path Anchored Placement
+
+**DESCRIPTION:** Identify the critical path through the DAG (longest chain of dependent 2-qubit gates). Map the qubits on this critical path to a shortest physical path in the hardware graph first, ensuring zero or minimal SWAPs for the most impactful gates. Then greedily place remaining qubits to minimize distance to their interaction partners.
+
+**ALGORITHMIC_APPROACH:**
+1. Compute the critical path of the 2-qubit DAG (longest path by gate count)
+2. Extract the ordered sequence of logical qubits along this path
+3. Find a shortest path in the hardware graph of the same length (BFS/DFS enumeration of paths)
+4. Anchor: map critical-path logical qubits to this physical path in order
+5. For remaining unplaced qubits, sort by total interaction weight with already-placed qubits (descending). For each, assign to the closest unoccupied physical qubit to its heaviest interaction partner
+6. Build both mapping arrays
+
+**COLLISION_PREVENTION:** Critical-path qubits get unique physical positions along a path. Remaining qubits are assigned to unoccupied positions only. Each step selects from a shrinking "available" set.
+
+**WHY_NOVEL:** This directly optimizes for the bottleneck (critical path determines depth). By ensuring the critical path requires minimal routing, it targets depth reduction specifically rather than aggregate SWAP count.
+
+**NOVELTY_SCORE:** 6
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 8
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.8
+
+---
+
+**IDEA_NAME:** Community-Aware Hierarchical Placement
+
+**DESCRIPTION:** Detect communities (densely connected clusters) in the logical interaction graph using Louvain or similar. Simultaneously partition the hardware graph into regions of similar size. Map each logical community to a hardware region, then within each region, solve local placement using interaction-weighted bipartite matching.
+
+**ALGORITHMIC_APPROACH:**
+1. Build weighted interaction graph from 2-qubit gates
+2. Detect communities using Louvain algorithm (or label propagation)
+3. Partition hardware graph into k regions (k = number of communities) using graph partitioning (e.g., recursive bisection via Fiedler vector)
+4. Match communities to regions: build a bipartite graph where edge weight = sum of inter-community interactions × inverse distance between region centroids. Solve with Hungarian algorithm
+5. Within each community-region pair: solve local assignment with `linear_sum_assignment` on interaction-weighted distance matrix
+6. Combine local assignments into global `mapping_dict`
+
+**COLLISION_PREVENTION:** Each community maps to a distinct region. Within each region, Hungarian matching produces a bijection. Regions are disjoint, so no collisions between communities. Unmatched physical qubits are assigned to remaining logical qubits arbitrarily.
+
+**WHY_NOVEL:** The two-level hierarchy (community→region then qubit→physical) is a divide-and-conquer approach that scales well and exploits circuit modularity. Most methods treat placement as flat.
+
+**NOVELTY_SCORE:** 6
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 6
+**FEASIBILITY_SCORE:** 9
+**AVERAGE_SCORE:** 7.0
+
+---
+
+**IDEA_NAME:** Weighted Centroid Gravity Placement
+
+**DESCRIPTION:** For each logical qubit, compute a "gravity center" on the hardware graph based on its interactions. The gravity center is the physical qubit that minimizes the sum of distance × interaction_weight to all other logical qubits' current positions. Iterate: update positions, then resolve conflicts by keeping the qubit with the strongest pull at each contested position.
+
+**ALGORITHMIC_APPROACH:**
+1. Build interaction weight matrix W
+2. Initialize with random or trivial mapping
+3. For T iterations:
+   a. For each logical qubit q, compute ideal position: `argmin_p Σ_j W[q][j] * dist(p, mapping[j])`
+   b. If multiple qubits want the same physical position, the one with highest total interaction weight keeps it
+   c. Displaced qubits get assigned to nearest unoccupied physical qubit
+4. Track best mapping seen (by total weighted distance score)
+5. Return best mapping found
+
+**COLLISION_PREVENTION:** Each iteration resolves conflicts by priority (highest interaction weight wins). Displaced qubits go to nearest available. At every step, a valid 1-to-1 mapping is maintained.
+
+**WHY_NOVEL:** This is an iterative gravitational relaxation that combines aspects of facility location problems with conflict resolution. Unlike force-directed methods, it works directly on the discrete hardware graph.
+
+**NOVELTY_SCORE:** 5
+**PROBABILITY_SCORE:** 6
+**EFFORT_SCORE:** 8
+**FEASIBILITY_SCORE:** 9
+**AVERAGE_SCORE:** 7.0
+
+---
+
+**IDEA_NAME:** Reverse-SABRE Seed Placement
+
+**DESCRIPTION:** Run a lightweight "reverse simulation" of the routing algorithm. Start with a random mapping, simulate the circuit backward through the DAG, track which SWAPs would be needed. Use the final mapping state (after reverse simulation) as the initial mapping for the actual forward pass. The idea is that the reverse pass "unwinds" the mapping to a state that's naturally good for the forward pass.
+
+**ALGORITHMIC_APPROACH:**
+1. Generate a random initial mapping M₀
+2. Process the DAG in reverse topological order
+3. For each 2-qubit gate encountered in reverse, if its qubits aren't adjacent under current mapping, apply the cheapest SWAP to make them adjacent (using a simplified heuristic — just nearest-path SWAP)
+4. After processing all gates backward, the resulting mapping M_reverse is the output
+5. Set `mapping_dict = M_reverse`, build `reverse_mapping_dict`
+6. Optionally repeat k times with different random seeds, keep best
+
+**COLLISION_PREVENTION:** The reverse simulation only applies SWAPs (which are bijective transformations). Starting from a valid permutation and applying SWAPs preserves bijectivity at every step.
+
+**WHY_NOVEL:** This exploits the bidirectional property that SABRE uses for routing but applies it specifically to derive the initial mapping. The reverse pass effectively "predicts" what mapping the forward pass would prefer to start from.
+
+**NOVELTY_SCORE:** 5
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 8
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Interaction Tensor Decomposition Placement
+
+**DESCRIPTION:** Build a 3D tensor T[i][j][l] where i,j are logical qubits and l is the DAG layer, representing interaction intensity at each layer. Perform tensor decomposition (CP or Tucker) to extract low-rank factors that capture the dominant interaction patterns across time. Use these factors to construct an embedding of logical qubits, then match to hardware graph embedding.
+
+**ALGORITHMIC_APPROACH:**
+1. Stratify 2-qubit gates by DAG layer, build tensor T[i][j][l]
+2. Apply CP decomposition: T ≈ Σ_r a_r ⊗ b_r ⊗ c_r (rank-R approximation)
+3. Use the qubit factors (a_r, b_r matrices) to embed logical qubits in R-dimensional space
+4. Embed physical qubits via spectral embedding of hardware graph in same dimensionality
+5. Match logical embeddings to physical embeddings via Hungarian on Euclidean distance matrix
+6. Build `mapping_dict` and `reverse_mapping_dict`
+
+**COLLISION_PREVENTION:** Hungarian algorithm on the embedding distance matrix produces a perfect matching — guaranteed bijection.
+
+**WHY_NOVEL:** Tensor decomposition captures the temporal evolution of qubit interactions, not just aggregate statistics. This is fundamentally different from matrix-based methods that collapse temporal information.
+
+**NOVELTY_SCORE:** 9
+**PROBABILITY_SCORE:** 5
+**EFFORT_SCORE:** 5
+**FEASIBILITY_SCORE:** 9
+**AVERAGE_SCORE:** 7.0
+
+---
+
+**IDEA_NAME:** Min-Congestion Flow Placement
+
+**DESCRIPTION:** Model the mapping problem as a minimum-congestion network flow. Create a bipartite graph (logical qubits → physical qubits). For each logical-physical assignment, the "cost" is the sum of shortest-path distances to all interaction partners' assigned physical positions. Solve iteratively: fix one side, optimize the other, using min-cost assignment.
+
+**ALGORITHMIC_APPROACH:**
+1. Build interaction matrix W
+2. Initialize with trivial mapping
+3. For T iterations:
+   a. Compute cost matrix C[i][p] = Σ_j W[i][j] * dist(p, current_mapping[j]) for all logical i, physical p
+   b. Solve min-cost bipartite matching: `linear_sum_assignment(C)`
+   c. Update mapping from matching result
+   d. If mapping unchanged, converge
+4. Return converged mapping
+
+**COLLISION_PREVENTION:** `linear_sum_assignment` always returns a perfect matching (bijection). Each iteration produces a valid 1-to-1 mapping.
+
+**WHY_NOVEL:** This iterative assignment approach treats placement as a fixed-point problem. Each iteration globally re-optimizes all assignments simultaneously given the current state, rather than greedy local moves.
+
+**NOVELTY_SCORE:** 6
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 8
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.8
+
+---
+
+**IDEA_NAME:** Token Swapping Lower Bound Placement
+
+**DESCRIPTION:** For each candidate mapping, compute a lower bound on the number of SWAPs needed using the token swapping problem framework. The token swapping distance between the current mapping and the "ideal" mapping (where all front-layer gates are adjacent) gives a lower bound. Choose the initial mapping that minimizes this lower bound.
+
+**ALGORITHMIC_APPROACH:**
+1. Generate k candidate mappings (random, spectral, trivial, etc.)
+2. For each candidate mapping M:
+   a. For the first L layers of the DAG, compute the "ideal" partial mapping where each 2-qubit gate's qubits are adjacent
+   b. Compute the token swapping distance from M to the ideal (using the 2-approximation algorithm on the hardware graph)
+   c. Score M by this distance (lower is better)
+3. Select the mapping with lowest token swapping distance
+4. Build `mapping_dict` and `reverse_mapping_dict`
+
+**COLLISION_PREVENTION:** Each candidate mapping is generated as a valid permutation. Selection merely picks the best one. No mapping manipulation needed.
+
+**WHY_NOVEL:** Using token swapping distance as a mapping quality metric directly estimates the actual SWAP overhead rather than using proxy metrics like sum-of-distances. This is a tighter bound on routing cost.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 6
+**EFFORT_SCORE:** 5
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.3
+
+---
+
+**IDEA_NAME:** Dependency-Weighted Simulated Annealing Placement
+
+**DESCRIPTION:** Use simulated annealing where the energy function is a DAG-dependency-weighted sum of distances. Gates with more transitive successors contribute more to the energy, reflecting their actual impact on total circuit depth and SWAP count. The annealing schedule is tuned to the circuit size.
+
+**ALGORITHMIC_APPROACH:**
+1. Compute `dag_dependencies_count` for each gate (already available in codebase)
+2. Initialize with trivial or spectral mapping
+3. Energy function: E(M) = Σ_g (deps[g]+1) * dist(M[q1_g], M[q2_g]) for all 2-qubit gates g
+4. SA loop: at temperature T, propose a random swap of two logical qubits' physical assignments
+   - Accept if ΔE < 0, else accept with probability exp(-ΔE/T)
+   - Cool: T *= 0.995
+5. Run for N_steps = 100 * num_logical_qubits
+6. Return best mapping found during annealing
+
+**COLLISION_PREVENTION:** Swapping two entries in the mapping array is inherently bijective. Starting from a valid permutation and applying only pair swaps preserves the permutation property.
+
+**WHY_NOVEL:** While SA for placement exists, weighting by transitive dependency count (which is already computed in this codebase) is a direct integration of DAG criticality into the energy function. This specifically targets the gates that matter most for routing.
+
+**NOVELTY_SCORE:** 4
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 9
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Graph Neural Network Embedding Alignment
+
+**DESCRIPTION:** Use a lightweight, untrained GNN-like message-passing scheme (no training data needed) to create structurally-aware embeddings of both the interaction graph and the hardware graph. Match embeddings via linear assignment.
+
+**ALGORITHMIC_APPROACH:**
+1. For the logical interaction graph: initialize node features as degree vector. Run K rounds of message passing: `h_i^{k+1} = h_i^k + Σ_j W[i][j] * h_j^k` (normalized)
+2. For the hardware graph: same message passing with adjacency weights
+3. After K rounds, each node has a K-dimensional embedding
+4. Build cost matrix: C[i][p] = ||h_logical_i - h_physical_p||₂
+5. Solve `linear_sum_assignment(C)` for optimal matching
+6. Build mapping arrays
+
+**COLLISION_PREVENTION:** Hungarian algorithm on the cost matrix guarantees bijection.
+
+**WHY_NOVEL:** This uses the structural insight of GNNs (message passing captures neighborhood topology) without requiring any training data or GPU. It's a purely algebraic graph feature extraction that naturally captures multi-hop structural similarity.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 6
+**EFFORT_SCORE:** 7
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.5
+
+---
+
+**IDEA_NAME:** Recursive Bisection with Interaction Balancing
+
+**DESCRIPTION:** Recursively bisect both the logical interaction graph and the hardware graph, matching halves at each level. At each bisection level, split the logical graph to minimize inter-partition interaction weight (min-cut), and split the hardware graph to balance sizes while preserving locality. Match corresponding halves.
+
+**ALGORITHMIC_APPROACH:**
+1. Compute Fiedler vector of logical interaction graph → split into two halves by sign
+2. Compute Fiedler vector of hardware graph → split into two halves by sign
+3. Match the denser logical half to the more connected hardware half
+4. Recurse on each matched pair until partitions are size 1
+5. At leaf level, direct assignment: `mapping_dict[logical] = physical`
+6. Build `reverse_mapping_dict`
+
+**COLLISION_PREVENTION:** Recursive bisection produces a tree of disjoint partitions. At each level, hardware qubits are split into disjoint sets. The recursion ensures every logical qubit maps to exactly one physical qubit from its designated partition.
+
+**WHY_NOVEL:** While graph partitioning exists for placement, recursive bisection that simultaneously co-partitions both graphs at every level—matching structural density—is a principled divide-and-conquer that naturally handles hierarchy.
+
+**NOVELTY_SCORE:** 5
+**PROBABILITY_SCORE:** 6
+**EFFORT_SCORE:** 7
+**FEASIBILITY_SCORE:** 9
+**AVERAGE_SCORE:** 6.8
+
+---
+
+**IDEA_NAME:** Temporal Interaction Wavefront Placement
+
+**DESCRIPTION:** Process the circuit front-to-back in wavefronts (DAG layers). Maintain a "placement frontier" — the set of physical qubits currently hosting active logical qubits. As new qubits enter the wavefront, place them at positions that minimize the distance to their immediate gate partners. Qubits that are no longer active in upcoming layers become candidates for displacement to make room.
+
+**ALGORITHMIC_APPROACH:**
+1. Compute DAG layers and the "lifespan" of each logical qubit (first layer to last layer it appears in a 2-qubit gate)
+2. Process layers in order. For each layer:
+   a. Identify new qubits entering (first appearance) and qubits retiring (last appearance)
+   b. For new qubit q interacting with placed qubit p: assign q to closest unoccupied physical neighbor of mapping_dict[p]
+   c. If no neighbor available, assign to closest unoccupied physical qubit globally
+3. Retiring qubits can optionally free their physical slots (but for a static initial mapping, just keep them)
+4. After all layers processed, assign any remaining unplaced logical qubits to remaining physical qubits
+
+**COLLISION_PREVENTION:** New qubits always select from unoccupied physical positions. The available set is tracked explicitly and shrinks monotonically.
+
+**WHY_NOVEL:** This is a wavefront-driven online algorithm that respects the temporal activation pattern of qubits. Unlike batch methods, it directly aligns placement decisions with the circuit's execution timeline.
+
+**NOVELTY_SCORE:** 7
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 9
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 8.3
+
+---
+
+**IDEA_NAME:** Quadratic Assignment Problem via Alternating Projections
+
+**DESCRIPTION:** Formulate placement as a Quadratic Assignment Problem (QAP): minimize Σ W[i][j] * D[π(i)][π(j)] over permutations π. Relax to a doubly stochastic matrix, solve the continuous relaxation via alternating projections (Sinkhorn iterations on the gradient), then round to a permutation via Hungarian.
+
+**ALGORITHMIC_APPROACH:**
+1. Build interaction weight matrix W and distance matrix D
+2. Initialize doubly stochastic matrix P = (1/n) * ones(n,n)
+3. Gradient step: compute ∂/∂P of trace(W P D Pᵀ), update P -= α * gradient
+4. Sinkhorn projection: alternately normalize rows and columns to sum to 1 (project back to doubly stochastic)
+5. Repeat for T iterations
+6. Round final P to permutation via `linear_sum_assignment(-P)`
+7. Build mapping arrays from permutation
+
+**COLLISION_PREVENTION:** The final rounding step uses Hungarian algorithm, which produces a perfect matching (bijection). The continuous relaxation is only used to guide toward a good solution.
+
+**WHY_NOVEL:** This casts placement as continuous optimization of a QAP relaxation. The Sinkhorn-based projection is a modern technique from optimal transport theory applied to the placement problem. It avoids the discreteness trap of purely combinatorial methods.
+
+**NOVELTY_SCORE:** 8
+**PROBABILITY_SCORE:** 7
+**EFFORT_SCORE:** 6
+**FEASIBILITY_SCORE:** 10
+**AVERAGE_SCORE:** 7.8
+
+---
+
+## Summary Table (sorted by AVERAGE_SCORE descending)
+
+| Rank | Idea | N | P | E | F | Avg |
+|------|------|---|---|---|---|-----|
+| 1 | DAG-Layered Incremental Placement | 7 | 7 | 9 | 10 | **8.3** |
+| 2 | Temporal Interaction Wavefront Placement | 7 | 7 | 9 | 10 | **8.3** |
+| 3 | Critical-Path Anchored Placement | 6 | 7 | 8 | 10 | **7.8** |
+| 4 | Min-Congestion Flow Placement | 6 | 7 | 8 | 10 | **7.8** |
+| 5 | QAP via Alternating Projections | 8 | 7 | 6 | 10 | **7.8** |
+| 6 | Spectral Flow Matching | 4 | 7 | 9 | 10 | **7.5** |
+| 7 | Reverse-SABRE Seed Placement | 5 | 7 | 8 | 10 | **7.5** |
+| 8 | Dependency-Weighted SA Placement | 4 | 7 | 9 | 10 | **7.5** |
+| 9 | GNN Embedding Alignment | 7 | 6 | 7 | 10 | **7.5** |
+| 10 | Diffusion-Gradient Placement | 7 | 6 | 7 | 9 | **7.3** |
+| 11 | Token Swapping Lower Bound Placement | 8 | 6 | 5 | 10 | **7.3** |
+| 12 | Interaction Tensor Decomposition | 9 | 5 | 5 | 9 | **7.0** |
+| 13 | Community-Aware Hierarchical Placement | 6 | 7 | 6 | 9 | **7.0** |
+| 14 | Weighted Centroid Gravity Placement | 5 | 6 | 8 | 9 | **7.0** |
+| 15 | Recursive Bisection with Interaction Balancing | 5 | 6 | 7 | 9 | **6.8** |
+
+All 15 ideas have F ≥ 8, so none are eliminated by the feasibility filter.
+
+**Top 3 Recommendations for Implementation:**
+
+1. **DAG-Layered Incremental Placement** — Highest practicality. Simple to implement, directly leverages the DAG structure already computed in the codebase, and the online nature is fundamentally different from existing batch approaches.
+
+2. **Temporal Interaction Wavefront Placement** — Similar philosophy to #1 but with lifespan awareness. The qubit activation/retirement tracking adds temporal intelligence.
+
+3. **QAP via Alternating Projections** — Most mathematically principled. The continuous relaxation with Sinkhorn projections is a modern optimization technique that could find globally better solutions than greedy methods. Moderate implementation effort but high ceiling.
