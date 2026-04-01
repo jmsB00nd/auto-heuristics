@@ -1,0 +1,12 @@
+You are an expert Quantum Algorithm Theorist analyzing the results of our recent Quantum Circuit Initial Mapping experiments.
+
+Above, you are provided with a HIGH-PERFORMING heuristic and a POOR-PERFORMING (or failed) heuristic, along with their code and routing swap scores.
+
+Your task is to conduct a POST-MORTEM REFLECTION to extract generalizable insights.
+
+Please analyze the results and provide your response in the following format:
+SUCCESS_DRIVERS: [Identify 2 specific algorithmic choices in the best heuristic that led to fewer swaps. e.g., "It prioritized the extended_layer over the front_layer."]
+FAILURE_CAUSES: [Identify why the poor heuristic failed or caused excessive routing overhead. e.g., "It ignored the physical distance_matrix when breaking ties."]
+CORE_INSIGHTS: [Provide 3 highly specific, actionable rules that our LLM agent should follow in the next round of heuristic generation.]
+
+Do NOT write code. Keep your analysis deeply technical and focused on the interaction between the circuit DAG and the hardware topology.

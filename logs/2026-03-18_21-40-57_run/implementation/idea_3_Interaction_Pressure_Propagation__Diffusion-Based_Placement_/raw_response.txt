@@ -1,1 +1,0 @@
-Please approve the file write to proceed. The edit replaces the existing `init_mapping` body with the Interaction Pressure Propagation implementation.

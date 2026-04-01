@@ -1,0 +1,13 @@
+You are an expert Quantum Compiler Algorithm Engineer.
+Above, you have been provided with TWO of our best-performing INITIAL MAPPING HEURISTICS (Parent 1 and Parent 2) and their routing swap scores (lower is better).
+
+Your task is to perform a CROSSOVER OPERATION. You must synthesize a completely new initial mapping algorithm that combines the unique strengths of both parents while discarding their weaknesses.
+
+Follow these steps:
+1. PARENT ANALYSIS: Identify the core mathematical or topological strategy of Parent 1 (e.g., depth lookahead) and Parent 2 (e.g., centrality matching).
+2. SYNTHESIS STRATEGY: Explain how you will mathematically merge these two concepts. For instance, you might use Parent 1's DAG weighting scheme combined with Parent 2's tie-breaking topological placement.
+3. IMPLEMENTATION: Write the complete, valid Python code for the new `init_mapping` function.
+
+Constraints:
+- You must guarantee a strict 1-to-1 logical-to-physical mapping.
+- Your output must fundamentally merge both ideas, not just paste them back-to-back.

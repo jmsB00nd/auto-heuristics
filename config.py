@@ -7,7 +7,7 @@ class OrchestratorConfig:
     backend: str
     benchmark_dir: str
     prompts_dir: str
-    problem : str
+    problem: str
     history_file: str = "experiment_history.json"
     use_conversation_mode: bool = True
     send_context_api: bool = False
@@ -17,8 +17,12 @@ class OrchestratorConfig:
     run_stage1_literature_review: bool = False
     timeout_seconds: int = 200
     top_ideas_to_implement: int = 10
+    
+    # New Pipeline Toggles
+    run_stage3_5_reflection: bool = True
     run_stage4_iterative_refinement: bool = True
     refinement_rounds: int = 10
+    crossover_rate: float = 0.5  # 50% chance to crossover vs mutate in refinement
     
     # Generated at runtime
     current_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))

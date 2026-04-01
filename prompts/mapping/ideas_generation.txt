@@ -1,39 +1,26 @@
 Your TASK: Generate, Evaluate, Score, Filter, and Report Novel Ideas for Quantum Circuit Initial Mapping (Placement) Algorithms.
 
 PART 1: GENERATE DIVERSE NOVEL IDEAS
-Propose at least 15 fundamentally novel algorithmic concepts for initial mapping. 
+Propose at least 10 fundamentally novel, highly mathematical algorithmic concepts for initial mapping. 
+Think deeply about graph theory, subgraph isomorphism approximations, force-directed placement, or DAG-critical-path weighting. Explicitly consider how to map heavily interacting logical qubits (using dag_dependencies_count and extended_layer) to physically close qubits (using distance_matrix).
 
 PART 2: EVALUATE, SCORE, AND FILTER ALL IDEAS
-Score using four conservative metrics (1–10 scale):
+Score using four metrics (1–10 scale):
 - Novelty (N): 10 = revolutionary, 1 = incremental  
 - Probability of Outperforming SOTA (P): 10 = very likely, 1 = unlikely  
-- Effort (E): 10 = easy to implement in Python, 1 = requires extreme optimization/external SAT solvers 
-- Feasibility/Validity (F): 10 = perfectly guarantees 1-to-1 mapping, 1 = high risk of mapping collisions.
+- Effort (E): 10 = easy to implement efficiently in Python, 1 = requires exponential time (O(2^N))
+- Feasibility/Validity (F): 10 = perfectly guarantees 1-to-1 mapping, 1 = high risk of physical collisions.
 
 Compute: AVERAGE_SCORE = (N + P + E + F) / 4  
-Round to one decimal place. Eliminate ideas that score poorly on Feasibility (F < 8).
+Round to one decimal place. Eliminate ideas that score (F < 9).
 
 REQUIRED OUTPUT FORMAT (one block per idea, separated by ---):
 IDEA_NAME: [Short descriptive name]  
 DESCRIPTION: [Explanation of the core mechanism]  
-ALGORITHMIC_APPROACH: [Key steps / heuristics used]  
+VARIABLE_UTILIZATION: [Which self.* variables will this use and how?]
 COLLISION_PREVENTION: [How it guarantees a valid 1-to-1 physical-logical assignment]
-WHY_NOVEL: [Explanation of what makes it fundamentally different]  
 NOVELTY_SCORE: [1–10]  
 PROBABILITY_SCORE: [1–10]  
 EFFORT_SCORE: [1–10]
 FEASIBILITY_SCORE: [1-10]
 AVERAGE_SCORE: [1-10]
-
-
-Already tested Ideas DON'T REPAET : 
--Diffusion-Gradient Placement
--DAG-Layered Incremental Placement
--Spectral Flow Matching
--Critical-Path Anchored Placement
--Community-Aware Hierarchical Placement
--Weighted Centroid Gravity Placement
--Reverse-SABRE Seed Placement
--Interaction Tensor Decomposition Placement
--Min-Congestion Flow Placement
--Token Swapping Lower Bound Placement

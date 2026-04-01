@@ -10,9 +10,9 @@ import os
 from tqdm import tqdm 
 
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-81qbt"
+BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-16qbt"
 OUTPUT_DIR = "/home/jmsb00nd/Documents/auto-heuristics/autoheuristics_results"
-OUTPUT_CSV = os.path.join(OUTPUT_DIR, "init_mapping_llm_queko-bss-81qbt_ibm_sherbrooke_trivial.csv")
+OUTPUT_CSV = os.path.join(OUTPUT_DIR, "init_mapping_llm_queko-bss-16qbt_ibm_sherbrooke.csv")
 
 edges = load_backend_edges(BACKEND)
 circuit_files = list(Path(BENCHMARK_DIR).glob("*.json"))
