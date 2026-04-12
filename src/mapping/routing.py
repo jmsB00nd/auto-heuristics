@@ -45,7 +45,7 @@ class Qlosure():
         self.results = {}
         self.instruction_times = defaultdict(int)
 
-    def run(self, heuristic_method="Qlosure", enforce_read_after_read=True, transitive_reduction=True, initial_mapping_method="trivial", dag_mode="default", num_iter=1, look_ahead_param=5, verbose=0):
+    def run(self, heuristic_method="Qlosure", enforce_read_after_read=True, transitive_reduction=True, initial_mapping_method="sabre", dag_mode="default", num_iter=1, look_ahead_param=5, verbose=0):
         """
         Execute the mapping/scheduling loop and return (min_swaps, min_depth, exec_time).
         The method alternates between forward and backward DAG passes when
@@ -110,49 +110,27 @@ class Qlosure():
                     min_depth = min(min_depth, self.get_circuit_depth())
 
         return min_swaps, min_depth, exec_time
-
+    
+    def to_qasm(self):
+        return self.data.get("qasm_code", "")
+    
     def init_mapping(self):
-        """
-        DAG-Aware K-Core Refined Placement v2
-
-        Improvements over v1 (527.82 mean swaps):
-        - Nonlinear cost distance (dist-1)^1.3: adjacent=free, penalizes far placements
-        - Steeper temporal decay with front-layer premium for first few DAG layers
-        - Cost-biased simulated annealing (focus on highest-cost pairs)
-        - Adaptive weight boosting round after initial optimization
-        - Front-layer focused seed for better layer-0 adjacency
-        - Radius-3 neighborhood in ILS local search
-        - More ILS restarts and SA iterations
-        """
-        from collections import defaultdict, deque
         import math
         import random
+        import heapq
+        from collections import defaultdict, deque
+        from time import time as _time
 
-        rng = random.Random(42)
+        num_q = self.num_qubits
+        physical_qubits = sorted(self.backend.keys())
+        dist = self.distance_matrix
 
-        # ================================================================== #
-        # 1. Build DAG and compute gate layers + critical path               #
-        # ================================================================== #
+        # ---------------------------------------------------------------
+        # Step 1: Build DAG and topological layers
+        # ---------------------------------------------------------------
         all_gates = sorted(self.access.keys())
         two_qubit_gates = [g for g in all_gates if len(self.access[g]) == 2]
 
-        logical_qubit_set = set()
-        for qubits in self.access.values():
-            logical_qubit_set.update(qubits)
-        logical_qubits = sorted(logical_qubit_set)
-        physical_qubits = sorted(self.backend.keys())
-
-        if not logical_qubits or not two_qubit_gates:
-            self.mapping_dict = list(range(self.num_qubits))
-            self.reverse_mapping_dict = list(range(self.num_qubits))
-            if self.use_isl:
-                self.isl_mapping = dict_to_isl_map(self.mapping_dict)
-            return
-
-        n_lq = len(logical_qubits)
-        n_pq = len(physical_qubits)
-
-        # Build DAG via last-gate-on-qubit tracking
         last_gate_on_qubit = {}
         successors_dag = defaultdict(set)
         predecessors_dag = defaultdict(set)
@@ -164,12 +142,11 @@ class Qlosure():
                     predecessors_dag[g].add(pred)
                 last_gate_on_qubit[q] = g
 
-        # Gate layer via topological BFS (Kahn's algorithm)
         in_degree = {g: len(predecessors_dag[g]) for g in all_gates}
         gate_layer = {g: 0 for g in all_gates}
+        temp_in = dict(in_degree)
         queue = deque(g for g in all_gates if in_degree[g] == 0)
         topo_order = []
-        temp_in = dict(in_degree)
         while queue:
             g = queue.popleft()
             topo_order.append(g)
@@ -179,666 +156,1455 @@ class Qlosure():
                 if temp_in[s] == 0:
                     queue.append(s)
 
-        # Critical path: remaining depth from each gate
         critical_path = {g: 0 for g in all_gates}
         for g in reversed(topo_order):
             for s in successors_dag[g]:
                 if critical_path[s] + 1 > critical_path[g]:
                     critical_path[g] = critical_path[s] + 1
 
+        # 2q DAG for routing simulation
+        gates_2q = {}
+        dag2q_succ = defaultdict(set)
+        dag2q_pred = defaultdict(set)
+        last_2q_on_qubit = {}
+        logical_qubits_set = set()
+
+        for gate in all_gates:
+            qubits = self.access[gate]
+            if len(qubits) == 2:
+                q1, q2 = qubits
+                gates_2q[gate] = (q1, q2)
+                logical_qubits_set.add(q1)
+                logical_qubits_set.add(q2)
+                for q in [q1, q2]:
+                    if q in last_2q_on_qubit:
+                        prev = last_2q_on_qubit[q]
+                        if prev != gate:
+                            dag2q_succ[prev].add(gate)
+                            dag2q_pred[gate].add(prev)
+                    last_2q_on_qubit[q] = gate
+            elif len(qubits) == 1:
+                logical_qubits_set.add(qubits[0])
+
+        logical_qubits = sorted(logical_qubits_set)
+
+        if not gates_2q:
+            self.mapping_dict = list(range(num_q))
+            self.reverse_mapping_dict = list(range(num_q))
+            if self.use_isl:
+                self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+            return
+
+        # Topological order for 2q DAG
+        topo_2q = []
+        in_deg_2q = {g: len(dag2q_pred[g]) for g in gates_2q}
+        q2 = deque(sorted(g for g in gates_2q if in_deg_2q[g] == 0))
+        while q2:
+            g = q2.popleft()
+            topo_2q.append(g)
+            for s in dag2q_succ[g]:
+                in_deg_2q[s] -= 1
+                if in_deg_2q[s] == 0:
+                    q2.append(s)
+
+        dep_count = defaultdict(int)
+        for g in reversed(topo_2q):
+            for s in dag2q_succ[g]:
+                dep_count[g] = max(dep_count[g], dep_count[s] + 1)
+
+        # Backward dep count for backward routing
+        bwd_dep = defaultdict(int)
+        for g in topo_2q:
+            for p in dag2q_pred[g]:
+                if p in gates_2q:
+                    bwd_dep[g] = max(bwd_dep[g], bwd_dep[p] + 1)
+
+        # ---------------------------------------------------------------
+        # Step 2: Interaction weights — critical-path weighting
+        # ---------------------------------------------------------------
         max_layer = max((gate_layer[g] for g in two_qubit_gates), default=1)
-        max_cp = max((critical_path[g] for g in two_qubit_gates), default=1)
 
-        # ================================================================== #
-        # 2. Precompute nonlinear cost distance matrix                        #
-        # ================================================================== #
-        # (dist-1)^1.3: dist=1 (adjacent) costs 0, dist=2 costs 1,
-        # dist=3 costs ~2.46, dist=4 costs ~4.17 -- penalizes far more
-        n_total = self.num_qubits
-        cost_dist = [[0.0] * n_total for _ in range(n_total)]
-        for p1 in physical_qubits:
-            for p2 in physical_qubits:
-                d = self.distance_matrix[p1][p2]
-                if d <= 1:
-                    cost_dist[p1][p2] = 0.0
-                else:
-                    cost_dist[p1][p2] = (d - 1) ** 1.3
-
-        # ================================================================== #
-        # 3. Build temporally-decayed, criticality-weighted interactions      #
-        # ================================================================== #
-        # Steeper decay + front-layer premium
-        alpha_decay = 1.8 * math.log(10.0) / (max_layer + 1)
-        front_layer_cutoff = max(3, int(max_layer * 0.08))
-
-        interaction_weight = defaultdict(float)
-        interaction_neighbors = defaultdict(dict)
+        static_weight = defaultdict(float)
+        logical_degree = defaultdict(float)
 
         for g in two_qubit_gates:
             q1, q2 = self.access[g]
+            cp = critical_path[g] + 1
             layer = gate_layer[g]
-            cp = critical_path[g]
-
-            # Temporal decay (steeper than v1)
-            w = math.exp(-alpha_decay * layer)
-            # Critical path boost
-            w *= (1.0 + 1.8 * cp / max_cp) if max_cp > 0 else 1.0
-            # Front-layer premium: first few layers get extra weight
-            if layer <= front_layer_cutoff:
-                w *= 2.0 + (front_layer_cutoff - layer) * 0.5
-            # Floor
-            w = max(w, 0.03)
-
+            w = cp * (max_layer - layer + 1)
             key = (min(q1, q2), max(q1, q2))
-            interaction_weight[key] += w
-            interaction_neighbors[q1][q2] = interaction_neighbors[q1].get(q2, 0.0) + w
-            interaction_neighbors[q2][q1] = interaction_neighbors[q2].get(q1, 0.0) + w
+            static_weight[key] += w
+            logical_degree[q1] += w
+            logical_degree[q2] += w
 
-        # Second-order (transitive) interactions
-        alpha2 = 0.12
-        second_order = defaultdict(float)
-        for mid in logical_qubits:
-            neighbors = list(interaction_neighbors[mid].items())
-            for i in range(len(neighbors)):
-                for j in range(i + 1, len(neighbors)):
-                    nb1, w1 = neighbors[i]
-                    nb2, w2 = neighbors[j]
-                    key = (min(nb1, nb2), max(nb1, nb2))
-                    second_order[key] += alpha2 * math.sqrt(w1 * w2)
+        interacting_logical = [q for q in logical_qubits if logical_degree.get(q, 0) > 0]
 
-        # Combined weights
-        combined_weight = defaultdict(float)
-        for k, v in interaction_weight.items():
-            combined_weight[k] += v
-        for k, v in second_order.items():
-            combined_weight[k] += v
-
-        lq_combined = defaultdict(dict)
-        for (q1, q2), w in combined_weight.items():
-            lq_combined[q1][q2] = w
-            lq_combined[q2][q1] = w
-
-        weighted_degree = {q: sum(lq_combined[q].values()) for q in logical_qubits}
-
-        # ================================================================== #
-        # 4. Hardware topology analysis                                       #
-        # ================================================================== #
-        pq_set = set(physical_qubits)
-        pq_adj = {pq: [nb for nb in self.backend.get(pq, []) if nb in pq_set]
-                for pq in physical_qubits}
-        pq_degree = {pq: len(pq_adj[pq]) for pq in physical_qubits}
-
-        # Harmonic centrality
-        pq_centrality = {}
+        # ---------------------------------------------------------------
+        # Step 3: Physical graph properties
+        # ---------------------------------------------------------------
+        hw_adj = defaultdict(set)
         for pq in physical_qubits:
-            c = sum(
-                1.0 / self.distance_matrix[pq][other]
-                for other in physical_qubits
-                if other != pq and self.distance_matrix[pq][other] not in (0, float('inf'))
-            )
-            pq_centrality[pq] = c
+            for pq2 in self.backend.get(pq, []):
+                hw_adj[pq].add(pq2)
 
-        # Radius-2 neighborhoods
-        pq_r2 = {}
+        phys_degree = {pq: len(hw_adj[pq]) for pq in physical_qubits}
+        phys_centrality = {}
         for pq in physical_qubits:
-            nbrs = set(pq_adj[pq])
-            for nb in pq_adj[pq]:
-                nbrs.update(pq_adj[nb])
-            nbrs.discard(pq)
-            pq_r2[pq] = list(nbrs)
+            phys_centrality[pq] = sum(dist[pq][pq2] for pq2 in physical_qubits)
 
-        # Radius-3 neighborhoods for broader ILS search
-        pq_r3 = {}
-        for pq in physical_qubits:
-            nbrs = set(pq_r2[pq])
-            for nb in pq_r2[pq]:
-                nbrs.update(pq_adj.get(nb, []))
-            nbrs.discard(pq)
-            pq_r3[pq] = list(nbrs)
+        # ---------------------------------------------------------------
+        # Step 4: Helper functions
+        # ---------------------------------------------------------------
+        def build_neighbors(weights):
+            nbrs = defaultdict(dict)
+            deg = defaultdict(float)
+            for (q1, q2), w in weights.items():
+                nbrs[q1][q2] = w
+                nbrs[q2][q1] = w
+                deg[q1] += w
+                deg[q2] += w
+            return nbrs, deg
 
-        phys_by_centrality = sorted(physical_qubits, key=lambda p: pq_centrality[p], reverse=True)
+        def compute_cost_nonlinear(m, weights, alpha_exp):
+            cost = 0.0
+            for (q1, q2), w in weights.items():
+                if m[q1] >= 0 and m[q2] >= 0:
+                    d = dist[m[q1]][m[q2]]
+                    cost += w * (d ** alpha_exp)
+            return cost
 
-        # ================================================================== #
-        # 5. K-core decomposition for placement ordering                      #
-        # ================================================================== #
-        adj = defaultdict(set)
-        for q in logical_qubits:
-            for nb in interaction_neighbors[q]:
-                adj[q].add(nb)
+        def compute_cost(m, weights):
+            cost = 0.0
+            for (q1, q2), w in weights.items():
+                if m[q1] >= 0 and m[q2] >= 0:
+                    cost += w * dist[m[q1]][m[q2]]
+            return cost
 
-        degree_kcore = {q: len(adj[q]) for q in logical_qubits}
-        remaining = set(logical_qubits)
-        peeling_order = []
-
-        while remaining:
-            min_q = min(remaining, key=lambda q: degree_kcore[q])
-            peeling_order.append(min_q)
-            remaining.remove(min_q)
-            for nb in adj[min_q]:
-                if nb in remaining:
-                    degree_kcore[nb] -= 1
-
-        # Reverse: most interconnected first
-        kcore_placement_order = list(reversed(peeling_order))
-
-        # ================================================================== #
-        # 6. Greedy BFS placement using combined weights + nonlinear dist     #
-        # ================================================================== #
-        def greedy_bfs_seed(placement_order, anchor_pq=None):
-            lq_phys = {}
-            used_phys = set()
-
-            for lq in placement_order:
-                neighbors_placed = [
-                    nb for nb in lq_combined[lq] if nb in lq_phys
-                ]
-
-                if not neighbors_placed:
-                    if anchor_pq is not None and anchor_pq not in used_phys:
-                        best_phys = anchor_pq
-                        anchor_pq = None
-                    else:
-                        best_phys = None
-                        for p in phys_by_centrality:
-                            if p not in used_phys:
-                                best_phys = p
-                                break
-                        if best_phys is None:
-                            best_phys = next(p for p in physical_qubits if p not in used_phys)
-                else:
-                    best_phys = None
-                    best_score = float('inf')
-                    unplaced_nb_count = sum(1 for nb in lq_combined[lq] if nb not in lq_phys)
-                    for p in physical_qubits:
-                        if p in used_phys:
-                            continue
-                        # Use nonlinear cost distance
-                        dist_cost = sum(
-                            lq_combined[lq][nb] * cost_dist[p][lq_phys[nb]]
-                            for nb in neighbors_placed
-                        )
-                        free_nb = sum(1 for adj_p in pq_adj[p] if adj_p not in used_phys)
-                        capacity_penalty = max(0, unplaced_nb_count - free_nb) * 0.2
-                        score = dist_cost + capacity_penalty
-                        if score < best_score:
-                            best_score = score
-                            best_phys = p
-
-                lq_phys[lq] = best_phys
-                used_phys.add(best_phys)
-
-            return lq_phys
-
-        # ================================================================== #
-        # 7. Hungarian assignment seed (rearrangement inequality)             #
-        # ================================================================== #
-        def hungarian_seed():
-            try:
-                import numpy as np
-                from scipy.optimize import linear_sum_assignment
-            except ImportError:
-                return None
-
-            lq_sorted_weights = {
-                lq: sorted(lq_combined[lq].values(), reverse=True)
-                for lq in logical_qubits
-            }
-            # Use sorted nonlinear cost distances
-            pq_sorted_cdists = {
-                pq: sorted(
-                    cost_dist[pq][other]
-                    for other in physical_qubits
-                    if other != pq
-                )
-                for pq in physical_qubits
-            }
-
-            cost_matrix_np = np.zeros((n_lq, n_pq))
-            for i, lq in enumerate(logical_qubits):
-                weights = lq_sorted_weights[lq]
-                if not weights:
-                    continue
-                for j, pq in enumerate(physical_qubits):
-                    dists = pq_sorted_cdists[pq]
-                    cost = 0.0
-                    for k, w_val in enumerate(weights):
-                        d = dists[k] if k < len(dists) else (dists[-1] + k - len(dists) + 1)
-                        cost += w_val * d
-                    cost_matrix_np[i, j] = cost
-
-            row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
-            return {
-                logical_qubits[r]: physical_qubits[c]
-                for r, c in zip(row_ind, col_ind)
-            }
-
-        # ================================================================== #
-        # 8. Bijection builder + cost utilities (using nonlinear distance)    #
-        # ================================================================== #
-        def make_mapping(lq_phys):
-            md = list(range(self.num_qubits))
-            rmd = list(range(self.num_qubits))
-            for lq, pq in lq_phys.items():
-                cur = md[lq]
-                if cur == pq:
-                    continue
-                displaced = rmd[pq]
-                md[lq] = pq
-                md[displaced] = cur
-                rmd[pq] = lq
-                rmd[cur] = displaced
-            return md, rmd
-
-        def qap_cost(md):
-            return sum(
-                w * cost_dist[md[q1]][md[q2]]
-                for (q1, q2), w in interaction_weight.items()
-            )
-
-        def swap_delta(p1, p2, md, rmd):
-            a, b = rmd[p1], rmd[p2]
+        def delta_swap_cost_nonlinear(m, rm, pq_a, pq_b, nbrs, alpha_exp):
+            lq_a, lq_b = rm[pq_a], rm[pq_b]
             delta = 0.0
-            for nb, w in lq_combined[a].items():
-                pp = md[nb]
-                if pp == p2:
+            affected = set()
+            if lq_a in nbrs:
+                affected.update(nbrs[lq_a].keys())
+            if lq_b in nbrs:
+                affected.update(nbrs[lq_b].keys())
+            for q in affected:
+                if q == lq_a or q == lq_b:
                     continue
-                delta += w * (cost_dist[p2][pp] - cost_dist[p1][pp])
-            for nb, w in lq_combined[b].items():
-                pp = md[nb]
-                if pp == p1:
-                    continue
-                delta += w * (cost_dist[p1][pp] - cost_dist[p2][pp])
+                pq_q = m[q]
+                w_a = nbrs.get(lq_a, {}).get(q, 0.0)
+                if w_a > 0:
+                    old_d = dist[pq_a][pq_q] ** alpha_exp
+                    new_d = dist[pq_b][pq_q] ** alpha_exp
+                    delta += w_a * (new_d - old_d)
+                w_b = nbrs.get(lq_b, {}).get(q, 0.0)
+                if w_b > 0:
+                    old_d = dist[pq_b][pq_q] ** alpha_exp
+                    new_d = dist[pq_a][pq_q] ** alpha_exp
+                    delta += w_b * (new_d - old_d)
             return delta
 
-        def do_swap(p1, p2, md, rmd):
-            a, b = rmd[p1], rmd[p2]
-            md[a], md[b] = p2, p1
-            rmd[p1], rmd[p2] = b, a
+        def do_swap(m, rm, pq_a, pq_b):
+            lq_a, lq_b = rm[pq_a], rm[pq_b]
+            m[lq_a], m[lq_b] = pq_b, pq_a
+            rm[pq_a], rm[pq_b] = lq_b, lq_a
 
-        # ================================================================== #
-        # 9. Two-tier local search (radius-3 for ILS, full for seeds)         #
-        # ================================================================== #
-        lq_by_degree = sorted(
-            logical_qubits,
-            key=lambda lq: weighted_degree.get(lq, 0),
-            reverse=True
-        )
+        # ---------------------------------------------------------------
+        # Step 5: A* early-layer routing with adaptive node limit
+        # ---------------------------------------------------------------
+        ASTAR_LAYERS = 5
+        n_2q = len(gates_2q)
+        if n_2q < 50:
+            ASTAR_NODE_LIMIT = 8000
+        elif n_2q < 200:
+            ASTAR_NODE_LIMIT = 5000
+        else:
+            ASTAR_NODE_LIMIT = 3000
 
-        def local_search(md, rmd, max_iters=350, full_every=6):
-            for iteration in range(max_iters):
-                improved = False
-                do_full = (iteration % full_every == 0)
-                for lq in lq_by_degree:
-                    p1 = md[lq]
-                    best_d, best_p2 = -1e-9, -1
-                    # Use radius-3 for broader neighborhood
-                    for p2 in pq_r3[p1]:
-                        d = swap_delta(p1, p2, md, rmd)
-                        if d < best_d:
-                            best_d, best_p2 = d, p2
-                    if do_full:
-                        r3_set = set(pq_r3[p1])
-                        r3_set.add(p1)
-                        for p2 in physical_qubits:
-                            if p2 in r3_set:
-                                continue
-                            d = swap_delta(p1, p2, md, rmd)
-                            if d < best_d:
-                                best_d, best_p2 = d, p2
-                    if best_p2 != -1:
-                        do_swap(p1, best_p2, md, rmd)
-                        improved = True
-                if not improved:
-                    break
-            return md, rmd
+        pred_rem_layer = {g: len(dag2q_pred[g]) for g in gates_2q}
+        front_layer_calc = set(g for g in gates_2q if pred_rem_layer[g] == 0)
+        current_layer = 0
+        early_layer_gates = set()
 
-        def local_search_full(md, rmd, max_iters=450):
-            for _ in range(max_iters):
-                improved = False
-                for lq in lq_by_degree:
-                    p1 = md[lq]
-                    best_d, best_p2 = -1e-9, -1
-                    for p2 in physical_qubits:
-                        if p2 == p1:
-                            continue
-                        d = swap_delta(p1, p2, md, rmd)
-                        if d < best_d:
-                            best_d, best_p2 = d, p2
-                    if best_p2 != -1:
-                        do_swap(p1, best_p2, md, rmd)
-                        improved = True
-                if not improved:
-                    break
-            return md, rmd
+        temp_front = set(front_layer_calc)
+        while temp_front:
+            for g in temp_front:
+                if current_layer < ASTAR_LAYERS:
+                    early_layer_gates.add(g)
+            next_front = set()
+            for g in temp_front:
+                for s in dag2q_succ[g]:
+                    pred_rem_layer[s] -= 1
+                    if pred_rem_layer[s] == 0:
+                        next_front.add(s)
+            current_layer += 1
+            temp_front = next_front
 
-        # ================================================================== #
-        # 10. Multi-start seeds                                               #
-        # ================================================================== #
-        best_md, best_rmd, best_cost = None, None, float('inf')
-        population = []
+        # ---------------------------------------------------------------
+        # Step 6: A*-guided routing for early layers
+        # ---------------------------------------------------------------
+        def astar_routing_early(m, rm):
+            if not early_layer_gates:
+                return defaultdict(float), 0
 
-        # Seed 1: K-core order, default centrality anchor
-        kcore_map = greedy_bfs_seed(kcore_placement_order)
-        md, rmd = make_mapping(kcore_map)
-        md, rmd = local_search_full(md, rmd)
-        c = qap_cost(md)
-        population.append((c, md[:], rmd[:]))
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
+            early_pred = {}
+            for g in early_layer_gates:
+                early_pred[g] = len(dag2q_pred[g] & early_layer_gates)
 
-        # Seed 2: K-core order, different anchor points
-        for anchor in phys_by_centrality[1:4]:
-            kcore_map2 = greedy_bfs_seed(kcore_placement_order, anchor_pq=anchor)
-            md, rmd = make_mapping(kcore_map2)
-            md, rmd = local_search_full(md, rmd)
-            c = qap_cost(md)
-            population.append((c, md[:], rmd[:]))
-            if c < best_cost:
-                best_cost, best_md, best_rmd = c, md[:], rmd[:]
+            initial_front = frozenset(g for g in early_layer_gates if early_pred[g] == 0)
 
-        # Seed 3: Weighted-degree order
-        wd_order = sorted(logical_qubits, key=lambda q: weighted_degree.get(q, 0), reverse=True)
-        wd_map = greedy_bfs_seed(wd_order)
-        md, rmd = make_mapping(wd_map)
-        md, rmd = local_search_full(md, rmd)
-        c = qap_cost(md)
-        population.append((c, md[:], rmd[:]))
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
+            init_executed = set()
+            cur_front = set(initial_front)
+            changed = True
+            while changed:
+                changed = False
+                newly_exec = set()
+                for g in cur_front:
+                    gq1, gq2 = gates_2q[g]
+                    p1, p2 = m[gq1], m[gq2]
+                    if (p1, p2) in self.backend_connections or (p2, p1) in self.backend_connections:
+                        newly_exec.add(g)
+                if newly_exec:
+                    changed = True
+                    init_executed |= newly_exec
+                    cur_front -= newly_exec
+                    for g in newly_exec:
+                        for s in dag2q_succ[g]:
+                            if s in early_layer_gates and s not in init_executed:
+                                all_pred_done = True
+                                for p in dag2q_pred[s]:
+                                    if p in early_layer_gates and p not in init_executed:
+                                        all_pred_done = False
+                                        break
+                                if all_pred_done:
+                                    cur_front.add(s)
 
-        # Seed 4: Hungarian assignment
-        hung_map = hungarian_seed()
-        if hung_map is not None:
-            md, rmd = make_mapping(hung_map)
-            md, rmd = local_search_full(md, rmd)
-            c = qap_cost(md)
-            population.append((c, md[:], rmd[:]))
-            if c < best_cost:
-                best_cost, best_md, best_rmd = c, md[:], rmd[:]
+            remaining_early = early_layer_gates - init_executed
+            if not remaining_early:
+                return defaultdict(float), 0
 
-        # Seed 5: Strongest-pair seed with k-core fill
-        if combined_weight:
-            top_pair = max(combined_weight, key=combined_weight.__getitem__)
-            sq1, sq2 = top_pair
-            best_pair_score = float('inf')
-            best_pp1, best_pp2 = physical_qubits[0], physical_qubits[min(1, n_pq - 1)]
-            for p1 in phys_by_centrality[:20]:
-                for p2 in pq_adj[p1]:
-                    s = (1.0 / (pq_centrality[p1] + 0.01)) + (1.0 / (pq_centrality[p2] + 0.01))
-                    if s < best_pair_score:
-                        best_pair_score = s
-                        best_pp1, best_pp2 = p1, p2
-
-            for a, b in [(sq1, sq2), (sq2, sq1)]:
-                partial = {a: best_pp1, b: best_pp2}
-                remaining_order = [lq for lq in kcore_placement_order if lq not in partial]
-                used = set(partial.values())
-                for lq in remaining_order:
-                    neighbors_placed = [nb for nb in lq_combined[lq] if nb in partial]
-                    if not neighbors_placed:
-                        for p in phys_by_centrality:
-                            if p not in used:
-                                partial[lq] = p
-                                used.add(p)
-                                break
-                    else:
-                        best_p, best_s = None, float('inf')
-                        for p in physical_qubits:
-                            if p in used:
-                                continue
-                            s = sum(lq_combined[lq][nb] * cost_dist[p][partial[nb]]
-                                    for nb in neighbors_placed)
-                            if s < best_s:
-                                best_s, best_p = s, p
-                        partial[lq] = best_p
-                        used.add(best_p)
-
-                md, rmd = make_mapping(partial)
-                md, rmd = local_search_full(md, rmd)
-                c = qap_cost(md)
-                population.append((c, md[:], rmd[:]))
-                if c < best_cost:
-                    best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-        # Seed 6: Front-layer focused seed
-        # Place qubits involved in layer-0 gates first, prioritizing adjacency
-        layer0_gates = [g for g in two_qubit_gates if gate_layer[g] == 0]
-        if layer0_gates:
-            fl_adj = defaultdict(set)
-            for g in layer0_gates:
-                q1, q2 = self.access[g]
-                fl_adj[q1].add(q2)
-                fl_adj[q2].add(q1)
-            fl_order = sorted(
-                logical_qubits,
-                key=lambda q: (len(fl_adj[q]), weighted_degree.get(q, 0)),
-                reverse=True
-            )
-            fl_map = greedy_bfs_seed(fl_order)
-            md, rmd = make_mapping(fl_map)
-            md, rmd = local_search_full(md, rmd)
-            c = qap_cost(md)
-            population.append((c, md[:], rmd[:]))
-            if c < best_cost:
-                best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-        population = sorted(population, key=lambda x: x[0])[:8]
-
-        # ================================================================== #
-        # 11. ILS with diversified perturbations                              #
-        # ================================================================== #
-        n_restarts = min(35, max(10, n_lq // 2))
-
-        for restart in range(n_restarts):
-            base_idx = restart % len(population)
-            _, base_md, base_rmd = population[base_idx]
-            md = base_md[:]
-            rmd = base_rmd[:]
-            strategy = restart % 5
-
-            if strategy == 0:
-                # Cyclic rotation of random subset
-                k = rng.randint(max(3, n_lq // 4), max(4, n_lq // 2 + 1))
-                k = min(k, n_lq)
-                sample = rng.sample(logical_qubits, k)
-                positions = [md[lq] for lq in sample]
-                offset = rng.randint(1, k - 1)
-                rotated = positions[offset:] + positions[:offset]
-                for lq, tgt in zip(sample, rotated):
-                    cur = md[lq]
-                    if cur != tgt:
-                        do_swap(cur, tgt, md, rmd)
-
-            elif strategy == 1:
-                # Random pairwise swaps
-                n_swaps = rng.randint(2, max(3, n_lq // 3))
-                pool = rng.sample(logical_qubits, min(n_swaps * 2, n_lq))
-                for i in range(0, len(pool) - 1, 2):
-                    do_swap(md[pool[i]], md[pool[i + 1]], md, rmd)
-
-            elif strategy == 2:
-                # Worst-pair relocation
-                worst = sorted(
-                    interaction_weight.items(),
-                    key=lambda x: x[1] * cost_dist[md[x[0][0]]][md[x[0][1]]],
-                    reverse=True
-                )
-                moved = set()
-                for (q1, q2), _ in worst[:max(2, n_lq // 5)]:
-                    if q1 in moved or q2 in moved:
+            def compute_front(executed):
+                front = set()
+                for g in early_layer_gates:
+                    if g in executed:
                         continue
-                    best_cost_pair = float('inf')
-                    best_pp1, best_pp2 = md[q1], md[q2]
-                    for pp1 in phys_by_centrality[:max(8, n_pq // 4)]:
-                        for pp2 in pq_adj[pp1]:
-                            cost_pair = 0.0
-                            for nb, w in lq_combined[q1].items():
-                                pnb = pp2 if nb == q2 else md[nb]
-                                cost_pair += w * cost_dist[pp1][pnb]
-                            for nb, w in lq_combined[q2].items():
-                                pnb = pp1 if nb == q1 else md[nb]
-                                cost_pair += w * cost_dist[pp2][pnb]
-                            if cost_pair < best_cost_pair:
-                                best_cost_pair = cost_pair
-                                best_pp1, best_pp2 = pp1, pp2
-                    cur_p1 = md[q1]
-                    if best_pp1 != cur_p1:
-                        do_swap(cur_p1, best_pp1, md, rmd)
-                    cur_p2 = md[q2]
-                    if best_pp2 != cur_p2:
-                        do_swap(cur_p2, best_pp2, md, rmd)
-                    moved.update([q1, q2])
+                    all_pred = True
+                    for p in dag2q_pred[g]:
+                        if p in early_layer_gates and p not in executed:
+                            all_pred = False
+                            break
+                    if all_pred:
+                        front.add(g)
+                return frozenset(front)
 
-            elif strategy == 3:
-                # Population crossover
-                if len(population) >= 2:
-                    other_idx = rng.randint(0, len(population) - 1)
-                    _, other_md, _ = population[other_idx]
-                    crossover_size = max(1, n_lq // 3)
-                    crossover_lqs = lq_by_degree[:crossover_size]
-                    for lq in crossover_lqs:
-                        target_pq = other_md[lq]
-                        cur_pq = md[lq]
-                        if cur_pq != target_pq:
-                            do_swap(cur_pq, target_pq, md, rmd)
+            init_exec_frozen = frozenset(init_executed)
+            init_front_astar = compute_front(init_executed)
 
+            active_logical = set()
+            for g in remaining_early:
+                gq1, gq2 = gates_2q[g]
+                active_logical.add(gq1)
+                active_logical.add(gq2)
+
+            def h_func(mapping, front_gates):
+                h = 0
+                for g in front_gates:
+                    gq1, gq2 = gates_2q[g]
+                    h += dist[mapping[gq1]][mapping[gq2]]
+                return h
+
+            active_logical_list = sorted(active_logical)
+
+            def mapping_key(mapping):
+                return tuple(mapping[lq] for lq in active_logical_list)
+
+            init_m = list(m)
+            init_h = h_func(init_m, init_front_astar)
+
+            counter = [0]
+            start_state = (init_h, 0, 0, init_m, init_exec_frozen, init_front_astar)
+            open_heap = [start_state]
+            visited = {}
+            best_known_total = float('inf')
+            best_result = None
+
+            swap_history = {}
+            init_key = (mapping_key(init_m), init_exec_frozen)
+            swap_history[init_key] = defaultdict(float)
+
+            expansions = 0
+
+            while open_heap and expansions < ASTAR_NODE_LIMIT:
+                f, _, g_cost, cur_m_list, executed, front = heapq.heappop(open_heap)
+
+                mk = mapping_key(cur_m_list)
+                state_key = (mk, executed)
+
+                if state_key in visited and visited[state_key] <= g_cost:
+                    continue
+                visited[state_key] = g_cost
+
+                if best_known_total < float('inf') and f > best_known_total * 1.2:
+                    continue
+
+                new_executed = set(executed)
+                new_front = set(front)
+                progress = True
+                while progress:
+                    progress = False
+                    newly_exec = set()
+                    for g in list(new_front):
+                        gq1, gq2 = gates_2q[g]
+                        p1, p2 = cur_m_list[gq1], cur_m_list[gq2]
+                        if (p1, p2) in self.backend_connections or (p2, p1) in self.backend_connections:
+                            newly_exec.add(g)
+                    if newly_exec:
+                        progress = True
+                        new_executed |= newly_exec
+                        new_front -= newly_exec
+                        for g in newly_exec:
+                            for s in dag2q_succ[g]:
+                                if s in early_layer_gates and s not in new_executed:
+                                    all_pred = True
+                                    for p in dag2q_pred[s]:
+                                        if p in early_layer_gates and p not in new_executed:
+                                            all_pred = False
+                                            break
+                                    if all_pred:
+                                        new_front.add(s)
+
+                new_exec_frozen = frozenset(new_executed)
+                new_front_frozen = frozenset(new_front)
+
+                if not (early_layer_gates - new_executed):
+                    if g_cost < best_known_total:
+                        best_known_total = g_cost
+                        parent_key = (mk, executed)
+                        pair_swaps = dict(swap_history.get(parent_key, {}))
+                        best_result = (g_cost, pair_swaps)
+                    continue
+
+                if not new_front_frozen:
+                    continue
+
+                active_phys = set()
+                for g in new_front_frozen:
+                    gq1, gq2 = gates_2q[g]
+                    active_phys.add(cur_m_list[gq1])
+                    active_phys.add(cur_m_list[gq2])
+                ext_gates = set()
+                for g in new_front_frozen:
+                    for s in dag2q_succ[g]:
+                        if s in early_layer_gates and s not in new_executed:
+                            ext_gates.add(s)
+                for g in ext_gates:
+                    gq1, gq2 = gates_2q[g]
+                    active_phys.add(cur_m_list[gq1])
+                    active_phys.add(cur_m_list[gq2])
+
+                swaps = set()
+                for pq in active_phys:
+                    for nb in hw_adj.get(pq, set()):
+                        swaps.add((min(pq, nb), max(pq, nb)))
+
+                expansions += 1
+                parent_pair_swaps = swap_history.get((mk, executed), defaultdict(float))
+
+                for (s1, s2) in swaps:
+                    new_m = list(cur_m_list)
+                    lq_at_s1 = -1
+                    lq_at_s2 = -1
+                    for lq in range(num_q):
+                        if new_m[lq] == s1:
+                            lq_at_s1 = lq
+                        if new_m[lq] == s2:
+                            lq_at_s2 = lq
+
+                    if lq_at_s1 >= 0:
+                        new_m[lq_at_s1] = s2
+                    if lq_at_s2 >= 0:
+                        new_m[lq_at_s2] = s1
+
+                    new_g = g_cost + 1
+                    new_mk = mapping_key(new_m)
+                    child_key = (new_mk, new_exec_frozen)
+
+                    if child_key in visited and visited[child_key] <= new_g:
+                        continue
+
+                    new_h = h_func(new_m, new_front_frozen)
+                    new_f = new_g + new_h
+
+                    if best_known_total < float('inf') and new_f > best_known_total * 1.2:
+                        continue
+
+                    counter[0] += 1
+
+                    child_pair_swaps = defaultdict(float, parent_pair_swaps)
+                    for g in new_front_frozen:
+                        gq1, gq2 = gates_2q[g]
+                        pair_key = (min(gq1, gq2), max(gq1, gq2))
+                        child_pair_swaps[pair_key] += 1.0
+
+                    swap_history[child_key] = child_pair_swaps
+
+                    heapq.heappush(open_heap, (new_f, counter[0], new_g, new_m, new_exec_frozen, new_front_frozen))
+
+            if best_result is not None:
+                return defaultdict(float, best_result[1]), best_result[0]
             else:
-                # Strategy 4: Segment reversal of high-degree qubits
-                seg_size = rng.randint(max(2, n_lq // 6), max(3, n_lq // 3))
-                start = rng.randint(0, max(0, len(lq_by_degree) - seg_size))
-                segment = lq_by_degree[start:start + seg_size]
-                positions = [md[lq] for lq in segment]
-                positions.reverse()
-                for lq, tgt in zip(segment, positions):
-                    cur = md[lq]
-                    if cur != tgt:
-                        do_swap(cur, tgt, md, rmd)
+                return defaultdict(float), 0
 
-            md, rmd = local_search(md, rmd)
-            c = qap_cost(md)
-            if c < best_cost:
-                best_cost, best_md, best_rmd = c, md[:], rmd[:]
-            if len(population) < 8 or c < population[-1][0]:
-                population.append((c, md[:], rmd[:]))
-                population = sorted(population, key=lambda x: x[0])[:8]
+        # ---------------------------------------------------------------
+        # Step 7: Forward greedy routing simulation
+        # ---------------------------------------------------------------
+        def simulate_routing_greedy(m, rm, max_layers=20):
+            sim_m = list(m)
+            sim_rm = list(rm)
+            swap_counts = defaultdict(float)
+            total_swaps = 0
 
-        # ================================================================== #
-        # 12. Cost-biased simulated annealing                                 #
-        # ================================================================== #
-        md = best_md[:]
-        rmd = best_rmd[:]
-        current_cost = best_cost
+            if not gates_2q:
+                return swap_counts, total_swaps
 
-        active_pqs = list(set(md[lq] for lq in logical_qubits if lq_combined[lq]))
-        if len(active_pqs) < 2:
-            active_pqs = physical_qubits
+            pred_remaining = {g: len(dag2q_pred[g]) for g in gates_2q}
+            front = set(g for g in gates_2q if pred_remaining[g] == 0)
+            layers_done = 0
 
-        # Precompute per-qubit cost contributions for biased sampling
-        def compute_qubit_costs(cur_md):
-            qcost = defaultdict(float)
-            for (q1, q2), w in interaction_weight.items():
-                c_val = w * cost_dist[cur_md[q1]][cur_md[q2]]
-                qcost[cur_md[q1]] += c_val
-                qcost[cur_md[q2]] += c_val
-            return qcost
+            while front and layers_done < max_layers:
+                executable = []
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    p1, p2 = sim_m[gq1], sim_m[gq2]
+                    if (p1, p2) in self.backend_connections or (p2, p1) in self.backend_connections:
+                        executable.append(g)
 
-        n_sa_iters = max(6000, n_lq * 500)
-        T_start = max(current_cost * 0.04, 0.5)
-        T_end = max(current_cost * 0.00002, 1e-4)
-        sa_alpha = (T_end / T_start) ** (1.0 / n_sa_iters) if n_sa_iters > 0 else 1.0
-        T = T_start
+                if executable:
+                    for g in executable:
+                        front.discard(g)
+                        for s in dag2q_succ[g]:
+                            pred_remaining[s] -= 1
+                            if pred_remaining[s] == 0:
+                                front.add(s)
+                    layers_done += 1
+                    continue
 
-        no_improve = 0
-        reheat_interval = n_sa_iters // 4
+                active_phys = set()
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    active_phys.add(sim_m[gq1])
+                    active_phys.add(sim_m[gq2])
 
-        # Initialize cost-biased sampling
-        qubit_costs = compute_qubit_costs(md)
-        high_cost_pqs = sorted(active_pqs, key=lambda p: qubit_costs.get(p, 0), reverse=True)
-        top_half = max(2, len(high_cost_pqs) // 2)
+                candidates_sw = set()
+                for pq in active_phys:
+                    for nb in self.backend.get(pq, []):
+                        candidates_sw.add((min(pq, nb), max(pq, nb)))
 
-        for sa_iter in range(n_sa_iters):
-            # Cost-biased sampling: 60% from high-cost qubits, 40% random
-            if rng.random() < 0.6 and len(high_cost_pqs) >= 2:
-                p1 = high_cost_pqs[rng.randint(0, min(top_half - 1, len(high_cost_pqs) - 1))]
-                p2 = rng.choice(active_pqs)
-                while p2 == p1:
-                    p2 = rng.choice(active_pqs)
-            else:
-                p1, p2 = rng.sample(active_pqs, 2)
+                best_swap, best_score = None, float('inf')
+                for (s1, s2) in candidates_sw:
+                    l1, l2 = sim_rm[s1], sim_rm[s2]
+                    score = 0.0
+                    for g in front:
+                        gq1, gq2 = gates_2q[g]
+                        p1, p2 = sim_m[gq1], sim_m[gq2]
+                        if gq1 == l1: p1 = s2
+                        elif gq1 == l2: p1 = s1
+                        if gq2 == l1: p2 = s2
+                        elif gq2 == l2: p2 = s1
+                        deps = dep_count.get(g, 0) + 1
+                        score += deps * dist[p1][p2]
+                    if score < best_score:
+                        best_score = score
+                        best_swap = (s1, s2)
 
-            delta = swap_delta(p1, p2, md, rmd)
-            if delta < 0 or (T > 1e-9 and rng.random() < math.exp(-delta / T)):
-                do_swap(p1, p2, md, rmd)
-                current_cost += delta
-                if current_cost < best_cost:
-                    best_cost = current_cost
-                    best_md = md[:]
-                    best_rmd = rmd[:]
-                    no_improve = 0
+                if best_swap is None:
+                    break
+
+                s1, s2 = best_swap
+                l1, l2 = sim_rm[s1], sim_rm[s2]
+                sim_m[l1], sim_m[l2] = s2, s1
+                sim_rm[s1], sim_rm[s2] = l2, l1
+                total_swaps += 1
+
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    pair_key = (min(gq1, gq2), max(gq1, gq2))
+                    swap_counts[pair_key] += 1.0
+
+            return swap_counts, total_swaps
+
+        # ---------------------------------------------------------------
+        # Step 7b: Backward greedy routing simulation
+        # ---------------------------------------------------------------
+        def simulate_routing_backward(m, rm, max_layers=20):
+            sim_m = list(m)
+            sim_rm = list(rm)
+            swap_counts = defaultdict(float)
+            total_swaps = 0
+
+            if not gates_2q:
+                return swap_counts, total_swaps
+
+            succ_remaining = {g: len(dag2q_succ[g] & set(gates_2q.keys())) for g in gates_2q}
+            front = set(g for g in gates_2q if succ_remaining[g] == 0)
+            layers_done = 0
+
+            while front and layers_done < max_layers:
+                executable = []
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    p1, p2 = sim_m[gq1], sim_m[gq2]
+                    if (p1, p2) in self.backend_connections or (p2, p1) in self.backend_connections:
+                        executable.append(g)
+
+                if executable:
+                    for g in executable:
+                        front.discard(g)
+                        for p in dag2q_pred[g]:
+                            if p in gates_2q:
+                                succ_remaining[p] -= 1
+                                if succ_remaining[p] == 0:
+                                    front.add(p)
+                    layers_done += 1
+                    continue
+
+                active_phys = set()
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    active_phys.add(sim_m[gq1])
+                    active_phys.add(sim_m[gq2])
+
+                candidates_sw = set()
+                for pq in active_phys:
+                    for nb in self.backend.get(pq, []):
+                        candidates_sw.add((min(pq, nb), max(pq, nb)))
+
+                best_swap, best_score = None, float('inf')
+                for (s1, s2) in candidates_sw:
+                    l1, l2 = sim_rm[s1], sim_rm[s2]
+                    score = 0.0
+                    for g in front:
+                        gq1, gq2 = gates_2q[g]
+                        p1, p2 = sim_m[gq1], sim_m[gq2]
+                        if gq1 == l1: p1 = s2
+                        elif gq1 == l2: p1 = s1
+                        if gq2 == l1: p2 = s2
+                        elif gq2 == l2: p2 = s1
+                        deps = bwd_dep.get(g, 0) + 1
+                        score += deps * dist[p1][p2]
+                    if score < best_score:
+                        best_score = score
+                        best_swap = (s1, s2)
+
+                if best_swap is None:
+                    break
+
+                s1, s2 = best_swap
+                l1, l2 = sim_rm[s1], sim_rm[s2]
+                sim_m[l1], sim_m[l2] = s2, s1
+                sim_rm[s1], sim_rm[s2] = l2, l1
+                total_swaps += 1
+
+                for g in front:
+                    gq1, gq2 = gates_2q[g]
+                    pair_key = (min(gq1, gq2), max(gq1, gq2))
+                    swap_counts[pair_key] += 1.0
+
+            return swap_counts, total_swaps
+
+        # ---------------------------------------------------------------
+        # Step 7c: Asymmetric bidirectional routing (forward-biased 0.6/0.4)
+        # ---------------------------------------------------------------
+        def simulate_routing_asymmetric_bidir(m, rm, max_layers=20):
+            fwd_swaps, fwd_total = simulate_routing_greedy(m, rm, max_layers=max_layers)
+            bwd_swaps, bwd_total = simulate_routing_backward(m, rm, max_layers=max_layers)
+
+            combined = defaultdict(float)
+            all_keys = set(fwd_swaps.keys()) | set(bwd_swaps.keys())
+            for key in all_keys:
+                combined[key] = 0.6 * fwd_swaps.get(key, 0.0) + 0.4 * bwd_swaps.get(key, 0.0)
+
+            return combined, (fwd_total + bwd_total) // 2
+
+        # ---------------------------------------------------------------
+        # Step 7d: Hybrid A* + greedy routing
+        # ---------------------------------------------------------------
+        def simulate_routing_hybrid(m, rm, max_layers=20):
+            astar_swaps, astar_total = astar_routing_early(m, rm)
+            greedy_swaps, greedy_total = simulate_routing_greedy(m, rm, max_layers=max_layers)
+
+            combined_swaps = defaultdict(float)
+            early_pairs = set()
+            for g in early_layer_gates:
+                gq1, gq2 = gates_2q[g]
+                early_pairs.add((min(gq1, gq2), max(gq1, gq2)))
+
+            for pair_key in early_pairs:
+                if pair_key in astar_swaps:
+                    combined_swaps[pair_key] = astar_swaps[pair_key]
+
+            for pair_key, count in greedy_swaps.items():
+                if pair_key not in early_pairs:
+                    combined_swaps[pair_key] = count
+
+            return combined_swaps, astar_total + greedy_total
+
+        # ---------------------------------------------------------------
+        # Step 7e: Hybrid A* + asymmetric bidirectional for later iters
+        # ---------------------------------------------------------------
+        def simulate_routing_hybrid_bidir(m, rm, max_layers=20):
+            astar_swaps, astar_total = astar_routing_early(m, rm)
+            fwd_swaps, fwd_total = simulate_routing_greedy(m, rm, max_layers=max_layers)
+            bwd_swaps, bwd_total = simulate_routing_backward(m, rm, max_layers=max_layers)
+
+            combined_swaps = defaultdict(float)
+            early_pairs = set()
+            for g in early_layer_gates:
+                gq1, gq2 = gates_2q[g]
+                early_pairs.add((min(gq1, gq2), max(gq1, gq2)))
+
+            # Early pairs: A* exact feedback
+            for pair_key in early_pairs:
+                if pair_key in astar_swaps:
+                    combined_swaps[pair_key] = astar_swaps[pair_key]
+
+            # Late pairs: asymmetric bidirectional
+            all_late_keys = (set(fwd_swaps.keys()) | set(bwd_swaps.keys())) - early_pairs
+            for pair_key in all_late_keys:
+                combined_swaps[pair_key] = 0.6 * fwd_swaps.get(pair_key, 0.0) + 0.4 * bwd_swaps.get(pair_key, 0.0)
+
+            return combined_swaps, astar_total + (fwd_total + bwd_total) // 2
+
+        # ---------------------------------------------------------------
+        # Step 8: Seed generation setup
+        # ---------------------------------------------------------------
+        sorted_by_degree = sorted(interacting_logical, key=lambda q: logical_degree[q], reverse=True)
+        seed_lqs = sorted_by_degree[:min(3, len(sorted_by_degree))]
+        phys_by_centrality = sorted(physical_qubits, key=lambda pq: phys_centrality[pq])
+        seed_pqs = phys_by_centrality[:min(3, len(phys_by_centrality))]
+
+        logical_degree_ranked = sorted(interacting_logical, key=lambda q: logical_degree[q], reverse=True)
+        logical_degree_rank = {q: i for i, q in enumerate(logical_degree_ranked)}
+        max_logical_rank = max(len(logical_degree_ranked) - 1, 1)
+        phys_degree_ranked = sorted(physical_qubits, key=lambda pq: phys_degree[pq], reverse=True)
+        phys_degree_rank = {pq: i for i, pq in enumerate(phys_degree_ranked)}
+        max_phys_rank = max(len(phys_degree_ranked) - 1, 1)
+
+        static_nbrs, static_deg = build_neighbors(static_weight)
+        max_iw = max(static_weight.values()) if static_weight else 1.0
+
+        # ---------------------------------------------------------------
+        # Step 9: Routing-Pressure-Aware Conflict-Graph MIS Seed
+        # ---------------------------------------------------------------
+        def conflict_graph_seed(start_pq, nbrs, deg, weights, routing_pressure=None):
+            if len(interacting_logical) < 2:
+                return None, None
+
+            cur_max_iw = max(weights.values()) if weights else 1.0
+
+            top_partners = {}
+            for lq in interacting_logical:
+                nbr_list = sorted(nbrs.get(lq, {}).items(), key=lambda x: x[1], reverse=True)
+                top_partners[lq] = set(p for p, _ in nbr_list[:3])
+
+            conflict_adj = defaultdict(set)
+            il = interacting_logical
+
+            qubit_pressure = defaultdict(float)
+            if routing_pressure:
+                for (q1, q2), cnt in routing_pressure.items():
+                    qubit_pressure[q1] += cnt
+                    qubit_pressure[q2] += cnt
+
+            for i in range(len(il)):
+                for j in range(i + 1, len(il)):
+                    l1, l2 = il[i], il[j]
+                    s1 = top_partners.get(l1, set())
+                    s2 = top_partners.get(l2, set())
+                    if not s1 and not s2:
+                        continue
+                    intersection = len(s1 & s2)
+                    union = len(s1 | s2)
+                    if union > 0:
+                        jaccard = intersection / union
+                        threshold = 0.5
+                        if routing_pressure and qubit_pressure[l1] > 0 and qubit_pressure[l2] > 0:
+                            max_pressure = max(qubit_pressure.values()) if qubit_pressure else 1.0
+                            pressure_factor = min(1.0, (qubit_pressure[l1] + qubit_pressure[l2]) /
+                                                (max_pressure * 2 + 1e-10))
+                            threshold = max(0.25, 0.5 - 0.25 * pressure_factor)
+                        if jaccard > threshold:
+                            conflict_adj[l1].add(l2)
+                            conflict_adj[l2].add(l1)
+
+            sorted_by_deg_local = sorted(interacting_logical,
+                                        key=lambda q: (deg.get(q, 0), qubit_pressure.get(q, 0)),
+                                        reverse=True)
+            mis = set()
+            excluded = set()
+            for lq in sorted_by_deg_local:
+                if lq not in excluded:
+                    mis.add(lq)
+                    for neighbor in conflict_adj.get(lq, set()):
+                        excluded.add(neighbor)
+
+            non_mis = [lq for lq in sorted_by_deg_local if lq not in mis]
+            mis_ordered = sorted(mis, key=lambda q: (deg.get(q, 0), qubit_pressure.get(q, 0)),
+                                reverse=True)
+
+            m = [-1] * num_q
+            rm = [-1] * num_q
+            used_phys = set()
+
+            if mis_ordered:
+                first_lq = mis_ordered[0]
+                m[first_lq] = start_pq
+                rm[start_pq] = first_lq
+                used_phys.add(start_pq)
+
+                for lq in mis_ordered[1:]:
+                    nbrs_placed = {}
+                    for plq in mis:
+                        if m[plq] >= 0 and plq in nbrs.get(lq, {}):
+                            nbrs_placed[plq] = nbrs[lq][plq]
+
+                    if nbrs_placed:
+                        best_pq = None
+                        best_score = float('inf')
+                        for pq in physical_qubits:
+                            if pq in used_phys:
+                                continue
+                            score = 0.0
+                            for plq, iw in nbrs_placed.items():
+                                d = dist[pq][m[plq]]
+                                cost = iw * d
+                                if m[plq] in hw_adj[pq]:
+                                    cost *= 0.90 - 0.10 * (iw / cur_max_iw)
+                                score += cost
+                            if score < best_score:
+                                best_score = score
+                                best_pq = pq
+                    else:
+                        best_pq = None
+                        best_score = float('inf')
+                        for pq in physical_qubits:
+                            if pq not in used_phys:
+                                if phys_centrality[pq] < best_score:
+                                    best_score = phys_centrality[pq]
+                                    best_pq = pq
+
+                    if best_pq is not None:
+                        m[lq] = best_pq
+                        rm[best_pq] = lq
+                        used_phys.add(best_pq)
+
+            placed_set = set(lq for lq in interacting_logical if m[lq] >= 0)
+
+            for lq in non_mis:
+                nbrs_placed = {}
+                for plq in placed_set:
+                    w = nbrs.get(lq, {}).get(plq, 0.0)
+                    if w > 0:
+                        nbrs_placed[plq] = w
+
+                if nbrs_placed:
+                    near_ties = []
+                    best_score = float('inf')
+                    for pq in physical_qubits:
+                        if pq in used_phys:
+                            continue
+                        score = 0.0
+                        for plq, iw in nbrs_placed.items():
+                            d = dist[pq][m[plq]]
+                            cost = iw * d
+                            if m[plq] in hw_adj[pq]:
+                                cost *= 0.90 - 0.10 * (iw / cur_max_iw)
+                            score += cost
+                        near_ties.append((score, pq))
+                        if score < best_score:
+                            best_score = score
+
+                    if near_ties and best_score > 0:
+                        threshold = best_score * 1.05
+                        candidates_list = [(s, pq) for s, pq in near_ties if s <= threshold]
+                        if len(candidates_list) > 1 and lq in logical_degree_rank:
+                            lq_rn = logical_degree_rank[lq] / max_logical_rank
+                            best_pq = min(candidates_list, key=lambda x: (
+                                abs(phys_degree_rank[x[1]] / max_phys_rank - lq_rn), x[0]))[1]
+                        else:
+                            best_pq = min(candidates_list, key=lambda x: x[0])[1]
+                    elif near_ties:
+                        best_pq = min(near_ties, key=lambda x: x[0])[1]
+                    else:
+                        best_pq = None
                 else:
-                    no_improve += 1
+                    best_pq = None
+                    best_score = float('inf')
+                    for pq in physical_qubits:
+                        if pq not in used_phys:
+                            if phys_centrality[pq] < best_score:
+                                best_score = phys_centrality[pq]
+                                best_pq = pq
+
+                if best_pq is not None:
+                    m[lq] = best_pq
+                    rm[best_pq] = lq
+                    used_phys.add(best_pq)
+                    placed_set.add(lq)
+
+            remaining_lqs = [lq for lq in logical_qubits if m[lq] == -1]
+            for lq in remaining_lqs:
+                best_pq = None
+                best_score = float('inf')
+                for pq in physical_qubits:
+                    if pq not in used_phys:
+                        if phys_centrality[pq] < best_score:
+                            best_score = phys_centrality[pq]
+                            best_pq = pq
+                if best_pq is not None:
+                    m[lq] = best_pq
+                    rm[best_pq] = lq
+                    used_phys.add(best_pq)
+
+            return m, rm
+
+        # ---------------------------------------------------------------
+        # Step 10: Spectral ordering seed
+        # ---------------------------------------------------------------
+        def spectral_seed():
+            if len(interacting_logical) < 3:
+                return None, None
+
+            idx_map = {q: i for i, q in enumerate(interacting_logical)}
+            n = len(interacting_logical)
+
+            L = [[0.0] * n for _ in range(n)]
+            for (q1, q2), w in static_weight.items():
+                if q1 in idx_map and q2 in idx_map:
+                    i, j = idx_map[q1], idx_map[q2]
+                    L[i][j] -= w
+                    L[j][i] -= w
+                    L[i][i] += w
+                    L[j][j] += w
+
+            def power_iter(mat, n_iter=200):
+                v = [random.gauss(0, 1) for _ in range(n)]
+                for _ in range(n_iter):
+                    new_v = [0.0] * n
+                    for i in range(n):
+                        for j in range(n):
+                            new_v[i] += mat[i][j] * v[j]
+                    norm = math.sqrt(sum(x * x for x in new_v)) or 1e-12
+                    v = [x / norm for x in new_v]
+                return v
+
+            max_diag = max(L[i][i] for i in range(n)) + 1.0
+            shifted = [[0.0] * n for _ in range(n)]
+            for i in range(n):
+                for j in range(n):
+                    shifted[i][j] = -L[i][j]
+                shifted[i][i] += max_diag
+
+            v1 = power_iter(shifted, 150)
+
+            dot_v1 = sum(x * x for x in v1) or 1e-12
+            lam1_shifted = sum(v1[i] * sum(shifted[i][j] * v1[j] for j in range(n)) for i in range(n)) / dot_v1
+            shifted2 = [row[:] for row in shifted]
+            for i in range(n):
+                for j in range(n):
+                    shifted2[i][j] -= lam1_shifted * v1[i] * v1[j] / dot_v1
+
+            fiedler = power_iter(shifted2, 200)
+
+            fiedler_order = sorted(range(n), key=lambda i: fiedler[i])
+            sorted_logical = [interacting_logical[i] for i in fiedler_order]
+
+            phys_sorted = sorted(physical_qubits, key=lambda pq: phys_centrality[pq])
+            start_pq = phys_sorted[0]
+            visited_bfs = set()
+            bfs_order = []
+            bfs_q = deque([start_pq])
+            visited_bfs.add(start_pq)
+            while bfs_q:
+                pq = bfs_q.popleft()
+                bfs_order.append(pq)
+                for nb in sorted(hw_adj[pq]):
+                    if nb not in visited_bfs:
+                        visited_bfs.add(nb)
+                        bfs_q.append(nb)
+            for pq in physical_qubits:
+                if pq not in visited_bfs:
+                    bfs_order.append(pq)
+                    visited_bfs.add(pq)
+
+            m = [-1] * num_q
+            rm = [-1] * num_q
+            n_interact = len(sorted_logical)
+            n_phys = len(bfs_order)
+            offset = max(0, (n_phys - n_interact) // 2)
+            for i, lq in enumerate(sorted_logical):
+                pq = bfs_order[min(offset + i, n_phys - 1)]
+                if rm[pq] != -1:
+                    best_pq = None
+                    best_d = float('inf')
+                    for cpq in physical_qubits:
+                        if rm[cpq] == -1:
+                            d = dist[pq][cpq]
+                            if d < best_d:
+                                best_d = d
+                                best_pq = cpq
+                    pq = best_pq
+                m[lq] = pq
+                rm[pq] = lq
+
+            return m, rm
+
+        # ---------------------------------------------------------------
+        # Step 11: Greedy placement
+        # ---------------------------------------------------------------
+        def run_greedy_placement(start_lq, start_pq, nbrs, deg, weights=None):
+            cur_max_iw = max(weights.values()) if weights else max_iw
+            used_phys = {start_pq}
+            m = [-1] * num_q
+            rm = [-1] * num_q
+            m[start_lq] = start_pq
+            rm[start_pq] = start_lq
+            placed = {start_lq}
+            remaining = set(logical_qubits) - placed
+
+            while remaining:
+                best_lq, best_w = None, -1.0
+                for lq in remaining:
+                    w = sum(nbrs.get(lq, {}).get(plq, 0.0) for plq in placed)
+                    if w > best_w:
+                        best_w = w
+                        best_lq = lq
+
+                nbrs_placed = {plq: nbrs.get(best_lq, {}).get(plq, 0.0)
+                            for plq in placed if plq in nbrs.get(best_lq, {})}
+
+                if nbrs_placed:
+                    near_ties = []
+                    best_score = float('inf')
+                    for pq in physical_qubits:
+                        if pq in used_phys:
+                            continue
+                        score = 0.0
+                        for plq, iw in nbrs_placed.items():
+                            d = dist[pq][m[plq]]
+                            cost = iw * d
+                            if m[plq] in hw_adj[pq]:
+                                cost *= 0.90 - 0.10 * (iw / cur_max_iw)
+                            score += cost
+                        near_ties.append((score, pq))
+                        if score < best_score:
+                            best_score = score
+
+                    if near_ties and best_score > 0:
+                        threshold = best_score * 1.05
+                        candidates_list = [(s, pq) for s, pq in near_ties if s <= threshold]
+                        if len(candidates_list) > 1 and best_lq in logical_degree_rank:
+                            lq_rn = logical_degree_rank[best_lq] / max_logical_rank
+                            best_pq = min(candidates_list, key=lambda x: (
+                                abs(phys_degree_rank[x[1]] / max_phys_rank - lq_rn), x[0]))[1]
+                        else:
+                            best_pq = min(candidates_list, key=lambda x: x[0])[1]
+                    elif near_ties:
+                        best_pq = min(near_ties, key=lambda x: x[0])[1]
+                    else:
+                        best_pq = None
+                else:
+                    best_pq = None
+                    best_score = float('inf')
+                    for pq in physical_qubits:
+                        if pq not in used_phys:
+                            score = phys_centrality[pq]
+                            if score < best_score:
+                                best_score = score
+                                best_pq = pq
+
+                m[best_lq] = best_pq
+                rm[best_pq] = best_lq
+                used_phys.add(best_pq)
+                placed.add(best_lq)
+                remaining.discard(best_lq)
+            return m, rm
+
+        def fill_unmapped(m, rm):
+            unmapped = [q for q in range(num_q) if m[q] == -1]
+            free = [pq for pq in range(num_q) if rm[pq] == -1]
+            for lq, pq in zip(unmapped, free):
+                m[lq] = pq
+                rm[pq] = lq
+
+        # ---------------------------------------------------------------
+        # Step 12: Local search with nonlinear distance penalty
+        # ---------------------------------------------------------------
+        def local_search(m, rm, nbrs, weights, alpha_exp, max_rounds=5):
+            if len(interacting_logical) <= 1:
+                return compute_cost_nonlinear(m, weights, alpha_exp)
+            for _ in range(max_rounds):
+                improved = False
+                best_d, best_pair = 0.0, None
+                active_phys = [m[q] for q in interacting_logical]
+                for pq1 in active_phys:
+                    for pq2 in hw_adj.get(pq1, set()):
+                        d = delta_swap_cost_nonlinear(m, rm, pq1, pq2, nbrs, alpha_exp)
+                        if d < best_d:
+                            best_d = d
+                            best_pair = (pq1, pq2)
+                n_random = min(150, len(interacting_logical) * 3)
+                for _ in range(n_random):
+                    i, j = random.sample(range(len(interacting_logical)), 2)
+                    pq1, pq2 = m[interacting_logical[i]], m[interacting_logical[j]]
+                    d = delta_swap_cost_nonlinear(m, rm, pq1, pq2, nbrs, alpha_exp)
+                    if d < best_d:
+                        best_d = d
+                        best_pair = (pq1, pq2)
+                if best_pair and best_d < -1e-12:
+                    do_swap(m, rm, *best_pair)
+                    improved = True
+                if not improved:
+                    for i in range(len(interacting_logical)):
+                        for j in range(i + 1, len(interacting_logical)):
+                            pq1, pq2 = m[interacting_logical[i]], m[interacting_logical[j]]
+                            d = delta_swap_cost_nonlinear(m, rm, pq1, pq2, nbrs, alpha_exp)
+                            if d < best_d:
+                                best_d = d
+                                best_pair = (pq1, pq2)
+                    if best_pair and best_d < -1e-12:
+                        do_swap(m, rm, *best_pair)
+                    else:
+                        break
+            return compute_cost_nonlinear(m, weights, alpha_exp)
+
+        # ---------------------------------------------------------------
+        # Step 13: Perturbation modes with bandit selection
+        #   LNS uses accumulated routing pressure to bias destruction
+        # ---------------------------------------------------------------
+        rsdiwr_iter_ref = [0]
+        accumulated_routing_pressure_ref = [defaultdict(float)]
+
+        def perturb_random(m, rm, **kw):
+            if len(interacting_logical) >= 2:
+                lqs = random.sample(interacting_logical, 2)
+                do_swap(m, rm, m[lqs[0]], m[lqs[1]])
+
+        def perturb_segment_shuffle(m, rm, **kw):
+            k = min(random.randint(3, 5), len(interacting_logical))
+            if k < 2:
+                perturb_random(m, rm)
+                return
+            lqs = random.sample(interacting_logical, k)
+            phys_positions = [m[lq] for lq in lqs]
+            random.shuffle(phys_positions)
+            for lq in lqs:
+                rm[m[lq]] = -1
+            for lq, pq in zip(lqs, phys_positions):
+                m[lq] = pq
+                rm[pq] = lq
+
+        def perturb_worst_pair(m, rm, weights=None, alpha_exp=1.5, **kw):
+            if weights is None:
+                perturb_random(m, rm)
+                return
+            pair_costs = []
+            for (q1, q2), w in weights.items():
+                if m[q1] >= 0 and m[q2] >= 0:
+                    d = dist[m[q1]][m[q2]]
+                    c = w * (d ** alpha_exp)
+                    pair_costs.append((c, q1, q2))
+            if not pair_costs:
+                return
+            pair_costs.sort(reverse=True)
+            top_n = min(3, len(pair_costs))
+            _, tq1, tq2 = pair_costs[random.randint(0, top_n - 1)]
+            pq1, pq2 = m[tq1], m[tq2]
+            adj_of_pq2 = list(hw_adj.get(pq2, set()))
+            if adj_of_pq2:
+                target = random.choice(adj_of_pq2)
+                if target != pq1:
+                    do_swap(m, rm, pq1, target)
+                else:
+                    do_swap(m, rm, pq1, pq2)
             else:
-                no_improve += 1
-            T *= sa_alpha
+                do_swap(m, rm, pq1, pq2)
 
-            # Periodically refresh cost-biased sampling
-            if sa_iter % 1000 == 999:
-                qubit_costs = compute_qubit_costs(md)
-                high_cost_pqs = sorted(active_pqs, key=lambda p: qubit_costs.get(p, 0), reverse=True)
+        def perturb_edge_targeted(m, rm, weights=None, alpha_exp=1.5, **kw):
+            if weights is None:
+                perturb_random(m, rm)
+                return
+            edge_costs = []
+            for (q1, q2), w in weights.items():
+                if m[q1] >= 0 and m[q2] >= 0:
+                    c = w * (dist[m[q1]][m[q2]] ** alpha_exp)
+                    edge_costs.append((c, q1, q2))
+            if not edge_costs:
+                return
+            edge_costs.sort(reverse=True)
+            top_n = min(5, len(edge_costs))
+            _, eq1, eq2 = edge_costs[random.randint(0, top_n - 1)]
+            pq1, pq2 = m[eq1], m[eq2]
+            neighbors_of_pq2 = list(hw_adj.get(pq2, set()))
+            if neighbors_of_pq2:
+                target = random.choice(neighbors_of_pq2)
+                if target != pq1:
+                    do_swap(m, rm, pq1, target)
+                else:
+                    do_swap(m, rm, pq1, pq2)
+            else:
+                do_swap(m, rm, pq1, pq2)
 
-            if no_improve >= reheat_interval:
-                T = max(T, T_start * 0.12)
-                no_improve = 0
+        def perturb_lns(m, rm, nbrs=None, alpha_exp=1.5, **kw):
+            """Pressure-guided LNS: blends current cost with accumulated
+            routing pressure to select which qubits to destroy."""
+            if nbrs is None or len(interacting_logical) < 3:
+                perturb_random(m, rm)
+                return
+            base_lo = 3 + rsdiwr_iter_ref[0]
+            base_hi = 8 + rsdiwr_iter_ref[0] * 2
+            k = min(random.randint(base_lo, base_hi), len(interacting_logical))
 
-        # ================================================================== #
-        # 13. Adaptive weight boosting + re-optimization                      #
-        # ================================================================== #
-        # Identify pairs still far apart, boost their weights, re-run local search
-        pair_costs = []
-        for (q1, q2), w in interaction_weight.items():
-            pc = w * cost_dist[best_md[q1]][best_md[q2]]
-            pair_costs.append(((q1, q2), w, pc))
+            acc_pressure = accumulated_routing_pressure_ref[0]
+            qubit_acc_pressure = defaultdict(float)
+            for (q1, q2), cnt in acc_pressure.items():
+                qubit_acc_pressure[q1] += cnt
+                qubit_acc_pressure[q2] += cnt
+            max_acc = max(qubit_acc_pressure.values()) if qubit_acc_pressure else 1.0
 
-        if pair_costs:
-            pair_costs.sort(key=lambda x: x[2], reverse=True)
-            median_cost = pair_costs[len(pair_costs) // 2][2]
+            qcost = {}
+            for lq in interacting_logical:
+                c = 0.0
+                for partner, w in nbrs.get(lq, {}).items():
+                    if m[partner] >= 0 and m[lq] >= 0:
+                        c += w * (dist[m[lq]][m[partner]] ** alpha_exp)
+                pressure_bonus = qubit_acc_pressure.get(lq, 0.0) / (max_acc + 1e-10)
+                qcost[lq] = c * (1.0 + 0.5 * pressure_bonus)
 
-            # Boost weights of above-median-cost pairs
-            boosted_combined = defaultdict(dict)
-            for (q1, q2), w_orig in combined_weight.items():
-                pc = interaction_weight.get((q1, q2), 0) * cost_dist[best_md[q1]][best_md[q2]]
-                boost = 1.5 if pc > median_cost else 1.0
-                boosted_combined[q1][q2] = w_orig * boost
-                boosted_combined[q2][q1] = w_orig * boost
+            sorted_qs = sorted(qcost, key=lambda q: qcost[q], reverse=True)
+            top_half = sorted_qs[:max(k, len(sorted_qs) // 2)]
+            subset = random.sample(top_half, min(k, len(top_half)))
 
-            # Temporarily swap lq_combined for boosted version
-            old_lq_combined = lq_combined
-            lq_combined = boosted_combined
+            freed_phys = []
+            for lq in subset:
+                freed_phys.append(m[lq])
+                rm[m[lq]] = -1
+                m[lq] = -1
 
-            md = best_md[:]
-            rmd = best_rmd[:]
-            md, rmd = local_search_full(md, rmd, max_iters=300)
+            placed_set = set(lq for lq in interacting_logical if m[lq] >= 0)
+            for lq in sorted(subset, key=lambda q: qcost[q], reverse=True):
+                best_pq, best_sc = None, float('inf')
+                for pq in freed_phys:
+                    if rm[pq] != -1:
+                        continue
+                    sc = 0.0
+                    for partner, w in nbrs.get(lq, {}).items():
+                        if partner in placed_set and m[partner] >= 0:
+                            sc += w * (dist[pq][m[partner]] ** alpha_exp)
+                    if sc < best_sc:
+                        best_sc = sc
+                        best_pq = pq
+                if best_pq is not None:
+                    m[lq] = best_pq
+                    rm[best_pq] = lq
+                    placed_set.add(lq)
+                else:
+                    for pq in freed_phys:
+                        if rm[pq] == -1:
+                            m[lq] = pq
+                            rm[pq] = lq
+                            placed_set.add(lq)
+                            break
 
-            # Evaluate with ORIGINAL weights
-            lq_combined = old_lq_combined
-            c = qap_cost(md)
+        perturbation_modes = [perturb_random, perturb_segment_shuffle,
+                            perturb_worst_pair, perturb_edge_targeted, perturb_lns]
+        K = len(perturbation_modes)
+
+        WINDOW_SIZE = 100
+        EPSILON = 0.1
+        window = []
+        mode_successes = [0] * K
+        mode_attempts = [0] * K
+
+        def select_perturbation_mode():
+            if random.random() < EPSILON or sum(mode_attempts) < K * 2:
+                return random.randint(0, K - 1)
+            rates = []
+            for k in range(K):
+                if mode_attempts[k] > 0:
+                    rates.append(mode_successes[k] / mode_attempts[k])
+                else:
+                    rates.append(1.0)
+            total = sum(rates)
+            if total < 1e-12:
+                return random.randint(0, K - 1)
+            r = random.random() * total
+            cumul = 0.0
+            for k in range(K):
+                cumul += rates[k]
+                if r <= cumul:
+                    return k
+            return K - 1
+
+        def update_window(mode_idx, success):
+            window.append((mode_idx, success))
+            mode_attempts[mode_idx] += 1
+            if success:
+                mode_successes[mode_idx] += 1
+            if len(window) > WINDOW_SIZE:
+                old_mode, old_success = window.pop(0)
+                mode_attempts[old_mode] -= 1
+                if old_success:
+                    mode_successes[old_mode] -= 1
+
+        # ---------------------------------------------------------------
+        # Step 14: Build initial mapping candidates
+        # ---------------------------------------------------------------
+        candidates = []
+
+        for s_lq in seed_lqs:
+            for s_pq in seed_pqs:
+                m, rm = run_greedy_placement(s_lq, s_pq, static_nbrs, static_deg,
+                                            weights=static_weight)
+                fill_unmapped(m, rm)
+                cost = compute_cost(m, static_weight)
+                candidates.append((cost, m, rm))
+
+        for s_pq in seed_pqs:
+            cg_m, cg_rm = conflict_graph_seed(s_pq, static_nbrs, static_deg, static_weight)
+            if cg_m is not None:
+                fill_unmapped(cg_m, cg_rm)
+                cost = compute_cost(cg_m, static_weight)
+                candidates.append((cost, cg_m, cg_rm))
+
+        spec_m, spec_rm = spectral_seed()
+        if spec_m is not None:
+            fill_unmapped(spec_m, spec_rm)
+            spec_cost = compute_cost(spec_m, static_weight)
+            candidates.append((spec_cost, spec_m, spec_rm))
+
+        m_rand = [-1] * num_q
+        rm_rand = [-1] * num_q
+        shuffled_phys = list(physical_qubits)
+        random.shuffle(shuffled_phys)
+        for i, lq in enumerate(logical_qubits):
+            m_rand[lq] = shuffled_phys[i]
+            rm_rand[shuffled_phys[i]] = lq
+        fill_unmapped(m_rand, rm_rand)
+        c = compute_cost(m_rand, static_weight)
+        candidates.append((c, m_rand, rm_rand))
+
+        if not candidates:
+            self.mapping_dict = list(range(num_q))
+            self.reverse_mapping_dict = list(range(num_q))
+            if self.use_isl:
+                self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+            return
+
+        candidates.sort(key=lambda x: x[0])
+
+        _, best_m, best_rm = candidates[0]
+        best_m, best_rm = list(best_m), list(best_rm)
+        local_search(best_m, best_rm, static_nbrs, static_weight, alpha_exp=2.0, max_rounds=6)
+        best_cost = compute_cost(best_m, static_weight)
+
+        for idx in range(1, min(5, len(candidates))):
+            _, m_c, rm_c = candidates[idx]
+            m_c, rm_c = list(m_c), list(rm_c)
+            local_search(m_c, rm_c, static_nbrs, static_weight, alpha_exp=2.0, max_rounds=4)
+            c = compute_cost(m_c, static_weight)
             if c < best_cost:
                 best_cost = c
-                best_md = md[:]
-                best_rmd = rmd[:]
+                best_m = list(m_c)
+                best_rm = list(rm_c)
 
-        # ================================================================== #
-        # 14. Final full local search                                         #
-        # ================================================================== #
-        best_md, best_rmd = local_search_full(best_md, best_rmd, max_iters=500)
+        # ---------------------------------------------------------------
+        # Step 15: RSDIWR + ILS with A*-guided first iteration,
+        #   asymmetric bidirectional routing, pressure-adaptive blending,
+        #   routing-pressure MIS reseeding, and pressure-guided LNS
+        # ---------------------------------------------------------------
+        time_budget = 25.0
+        t_start = _time()
+        n_rsdiwr = 4
 
-        self.mapping_dict = best_md
-        self.reverse_mapping_dict = best_rmd
+        cur_m = list(best_m)
+        cur_rm = list(best_rm)
+        swap_counts = defaultdict(float)
+        accumulated_routing_pressure = defaultdict(float)
+        accumulated_routing_pressure_ref[0] = accumulated_routing_pressure
+
+        for rsdiwr_iter in range(n_rsdiwr):
+            rsdiwr_iter_ref[0] = rsdiwr_iter
+            elapsed = _time() - t_start
+            if elapsed > time_budget:
+                break
+
+            remaining_time = time_budget - elapsed
+            remaining_iters = n_rsdiwr - rsdiwr_iter
+            time_for_this_iter = remaining_time / max(remaining_iters, 1)
+            n_ils = max(55, int(num_q * time_for_this_iter / 0.5)) if time_for_this_iter > 1.0 else max(30, num_q // 3)
+
+            # Pressure-adaptive blending: alpha_blend decreases faster when
+            # accumulated pressure is high (routing feedback is more informative)
+            if rsdiwr_iter == 0 or not swap_counts:
+                eff_weights = dict(static_weight)
+            else:
+                max_sw = max(swap_counts.values()) if swap_counts else 1.0
+                scale = max(static_weight.values()) / max(max_sw, 1e-10)
+
+                # Compute pressure magnitude to adapt blend coefficient
+                total_pressure = sum(accumulated_routing_pressure.values())
+                n_pairs = len(accumulated_routing_pressure)
+                avg_pressure = total_pressure / max(n_pairs, 1)
+                # Higher pressure → trust routing feedback more (lower alpha_blend)
+                pressure_adapt = min(0.15, 0.05 * avg_pressure / max(max_sw, 1e-10))
+                alpha_blend = max(0.25, 1.0 - 0.3 * rsdiwr_iter - pressure_adapt)
+
+                eff_weights = defaultdict(float)
+                all_keys = set(static_weight.keys()) | set(swap_counts.keys())
+                for key in all_keys:
+                    w_s = static_weight.get(key, 0.0)
+                    w_r = swap_counts.get(key, 0.0) * scale
+                    eff_weights[key] = alpha_blend * w_s + (1.0 - alpha_blend) * w_r
+
+            eff_nbrs, eff_deg = build_neighbors(eff_weights)
+
+            # Re-seed with routing-informed weights + routing-pressure MIS
+            if rsdiwr_iter > 0 and swap_counts and (_time() - t_start) < time_budget * 0.7:
+                eff_sorted = sorted(interacting_logical,
+                                    key=lambda q: eff_deg.get(q, 0), reverse=True)
+                reseed_lqs = eff_sorted[:min(2, len(eff_sorted))]
+                reseed_pqs = seed_pqs[:min(2, len(seed_pqs))]
+
+                for s_lq in reseed_lqs:
+                    for s_pq in reseed_pqs:
+                        rm_new, rmm_new = run_greedy_placement(
+                            s_lq, s_pq, eff_nbrs, eff_deg, weights=eff_weights)
+                        fill_unmapped(rm_new, rmm_new)
+                        local_search(rm_new, rmm_new, eff_nbrs, eff_weights,
+                                    alpha_exp=2.0, max_rounds=3)
+                        sc = compute_cost(rm_new, static_weight)
+                        if sc < best_cost:
+                            best_cost = sc
+                            best_m = list(rm_new)
+                            best_rm = list(rmm_new)
+                            cur_m = list(rm_new)
+                            cur_rm = list(rmm_new)
+
+                # Routing-pressure-aware MIS reseeding
+                for s_pq in reseed_pqs:
+                    cg_m, cg_rm = conflict_graph_seed(
+                        s_pq, eff_nbrs, eff_deg, eff_weights,
+                        routing_pressure=accumulated_routing_pressure)
+                    if cg_m is not None:
+                        fill_unmapped(cg_m, cg_rm)
+                        local_search(cg_m, cg_rm, eff_nbrs, eff_weights,
+                                    alpha_exp=2.0, max_rounds=3)
+                        sc = compute_cost(cg_m, static_weight)
+                        if sc < best_cost:
+                            best_cost = sc
+                            best_m = list(cg_m)
+                            best_rm = list(cg_rm)
+                            cur_m = list(cg_m)
+                            cur_rm = list(cg_rm)
+
+            alpha_start = 2.0
+            alpha_end = 1.0
+
+            ls_rounds = 6 if rsdiwr_iter == 0 else 4
+            cur_cost_nl = local_search(cur_m, cur_rm, eff_nbrs, eff_weights,
+                                    alpha_exp=alpha_start, max_rounds=ls_rounds)
+
+            static_cost = compute_cost(cur_m, static_weight)
+            if static_cost < best_cost:
+                best_cost = static_cost
+                best_m = list(cur_m)
+                best_rm = list(cur_rm)
+
+            # Reset bandit window
+            window.clear()
+            for k in range(K):
+                mode_successes[k] = 0
+                mode_attempts[k] = 0
+
+            T = max(cur_cost_nl * 0.05, 1.0)
+            T_init = T
+            alpha_sa = 0.94
+            reheat_interval = max(n_ils // 4, 8)
+
+            for ils_iter in range(n_ils):
+                if _time() - t_start > time_budget:
+                    break
+
+                progress = ils_iter / max(n_ils - 1, 1)
+                alpha_exp = alpha_start + (alpha_end - alpha_start) * progress
+
+                saved_m = list(cur_m)
+                saved_rm = list(cur_rm)
+                saved_cost = cur_cost_nl
+
+                mode = select_perturbation_mode()
+                perturbation_modes[mode](cur_m, cur_rm,
+                                        nbrs=eff_nbrs, weights=eff_weights,
+                                        alpha_exp=alpha_exp)
+
+                new_cost_nl = local_search(cur_m, cur_rm, eff_nbrs, eff_weights,
+                                        alpha_exp=alpha_exp, max_rounds=3)
+
+                success = new_cost_nl < saved_cost - 1e-12
+
+                improvement = saved_cost - new_cost_nl
+                if improvement > 0:
+                    cur_cost_nl = new_cost_nl
+                    sc = compute_cost(cur_m, static_weight)
+                    if sc < best_cost:
+                        best_cost = sc
+                        best_m = list(cur_m)
+                        best_rm = list(cur_rm)
+                elif random.random() < math.exp(min(0, improvement / max(T, 1e-10))):
+                    cur_cost_nl = new_cost_nl
+                else:
+                    cur_m[:] = saved_m
+                    cur_rm[:] = saved_rm
+                    cur_cost_nl = saved_cost
+
+                update_window(mode, success)
+
+                T *= alpha_sa
+                if (ils_iter + 1) % reheat_interval == 0:
+                    T = max(T, T_init * 0.35)
+
+            # Routing simulation for RSDIWR feedback
+            if rsdiwr_iter < n_rsdiwr - 1:
+                sim_depth = 14 + rsdiwr_iter * 7
+
+                if rsdiwr_iter == 0 and early_layer_gates:
+                    # First iteration: A*-guided hybrid routing for exact early-layer feedback
+                    swap_counts, _ = simulate_routing_hybrid(best_m, best_rm, max_layers=sim_depth)
+                elif rsdiwr_iter == 1 and early_layer_gates:
+                    # Second iteration: A* + asymmetric bidirectional for full-spectrum feedback
+                    swap_counts, _ = simulate_routing_hybrid_bidir(best_m, best_rm, max_layers=sim_depth)
+                else:
+                    # Later iterations: asymmetric bidirectional only (faster, A* less useful)
+                    swap_counts, _ = simulate_routing_asymmetric_bidir(best_m, best_rm, max_layers=sim_depth)
+
+                # Accumulate routing pressure across iterations
+                for pair_key, cnt in swap_counts.items():
+                    accumulated_routing_pressure[pair_key] += cnt
+
+            cur_m = list(best_m)
+            cur_rm = list(best_rm)
+            cur_cost_nl = compute_cost_nonlinear(cur_m, eff_weights, alpha_end)
+
+        # ---------------------------------------------------------------
+        # Step 16: Set final mapping
+        # ---------------------------------------------------------------
+        self.mapping_dict = best_m
+        self.reverse_mapping_dict = best_rm
 
         if self.use_isl:
             self.isl_mapping = dict_to_isl_map(self.mapping_dict)
-        
-        
+    
     def init_front_layer(self):
         self.front_layer = set()
         for gate in self.dag_full:

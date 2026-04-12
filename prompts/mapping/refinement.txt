@@ -12,3 +12,5 @@ Please follow these steps:
 3. IMPLEMENTATION: Write the complete, updated Python code for the new `init_mapping` function. 
 
 Ensure your new code guarantees a valid 1-to-1 mapping and maintains the required function signature.
+
+CRITICAL: Do NOT ask for permission to write to a file. Output the Python code immediately within a ```python markdown block.

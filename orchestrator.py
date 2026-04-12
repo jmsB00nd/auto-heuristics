@@ -23,7 +23,7 @@ class OrchestratorV2:
         self.prompts = PromptManager(config.prompts_dir, config.problem)
         self.llm = LLMClient(config)
         self.evaluator = CodeEvaluator(config)
-        self.memory = MemoryManager(config.history_file)
+        self.memory = MemoryManager(config.history_file, active_limit=getattr(config, 'active_memory_limit', 20))
         
         # State
         self.literature_insights = ""
@@ -70,27 +70,43 @@ class OrchestratorV2:
         start_time = time.time()
         console.print(Rule("STAGE II: Idea Generation", style="bold magenta"))
         
+        memory_dump = self.memory.get_all_summarized()
+        memory_resume = ""
+        
+        if memory_dump != "No past ideas in memory.":
+            console.print("[cyan]Synthesizing all past memory into a global resume...[/cyan]")
+            summary_prompt = f"{self.prompts.memory_summary_prompt}\n\nPAST EXPERIMENTS LOG:\n{memory_dump}"
+            
+            # Query LLM to generate the resume
+            memory_resume = self.llm.query(summary_prompt, reset_conversation=True)
+            save_log(self.stage2_dir, "global_memory_resume.txt", memory_resume or "")
+            console.print("[green]✓ Memory resume generated.[/green]")
+        
         lit_context = f"\nLiterature Context:\n{self.literature_insights}\n" if self.literature_insights else ""
+        memory_context = f"\nGLOBAL RESUME OF PAST EXPERIMENTS:\n{memory_resume}\n" if memory_resume else ""
         
-        # Inject Memory into Generation
-        top_past_ideas = self.memory.get_top_k(3)
-        memory_context = ""
-        if top_past_ideas:
-            memory_context = "\nPAST SUCCESSFUL IDEAS (For Inspiration):\n"
-            for past in top_past_ideas:
-                memory_context += f"- {past['name']}: {past['description']} (Score: {past['mean_swaps']})\n"
+        # Build the final prompt
+        prompt = (
+            f"{self.prompts.system_generator}\n"
+            f"{lit_context}\n"
+            f"{memory_context}\n"
+            f"{self.prompts.idea_prompt}\n"
+            f"{self.prompts.code}"
+        )
         
-        prompt = f"{self.prompts.system_generator}\n{lit_context}\n{memory_context}\n{self.prompts.idea_prompt}\n{self.prompts.code}"
+        console.print("[cyan]Generating new novel ideas based on global context...[/cyan]")
         response = self.llm.query(prompt, reset_conversation=not getattr(self.config, 'use_conversation_mode', True))
         save_log(self.stage2_dir, "raw_ideas.txt", response or "")
 
+        # Parse ideas
         kept, eliminated = IdeaParser.parse_ideas(response or "")
         self.top_ideas = kept[:getattr(self.config, 'target_top_ideas', 5)]
         
         save_json(self.stage2_dir, "top_ideas.json", self.top_ideas)
         console.print(f"[bold green]✓ Stage II complete. Found {len(self.top_ideas)} ideas.[/bold green]\n")
         self.stage_times["ideas_generation"] = time.time() - start_time
-
+        
+        
     def implementation(self):
         start_time = time.time()
         console.print(Rule("STAGE III: Implementation", style="bold green"))
@@ -184,27 +200,27 @@ class OrchestratorV2:
             console.print("[yellow]Skipping Iterative Refinement per config.[/yellow]")
             return initial_results
 
-        best_idea_name = None
         best_score = float('inf')
-        
         for name, stats in initial_results.items():
             if stats.get('error') is None and stats.get('mean_swaps', float('inf')) < best_score:
                 best_score = stats['mean_swaps']
-                best_idea_name = name
 
         all_results = initial_results.copy()
         refinement_rounds = getattr(self.config, 'refinement_rounds', 3)
+        stagnation_threshold = getattr(self.config, 'stagnation_threshold', 3)
+        diversity_pool_size = getattr(self.config, 'diversity_pool_size', 5)
+        improvement_history = []
+        force_diversity = False
 
         for round_idx in range(1, refinement_rounds + 1):
-            # Fetch fresh from memory every round to ensure we have the absolute best
             top_memory_ideas = self.memory.get_top_k(2)
             if not top_memory_ideas:
                 console.print("[red]No successful ideas in memory to refine. Exiting stage.[/red]")
                 break
-                
+
             current_best = top_memory_ideas[0]
             best_score = current_best['mean_swaps']
-            
+
             console.print(f"\n[bold]Refinement Round {round_idx}/{refinement_rounds} (Current Best Score: {best_score:.2f})[/bold]")
             round_dir = os.path.join(self.stage4_dir, f"round_{round_idx}")
             os.makedirs(round_dir, exist_ok=True)
@@ -215,7 +231,9 @@ class OrchestratorV2:
             # Decide Operation: Mutation or Crossover
             if len(top_memory_ideas) >= 2 and random.random() < getattr(self.config, 'crossover_rate', 0.5):
                 operation = "CROSSOVER"
-                parent1, parent2 = top_memory_ideas[0], top_memory_ideas[1]
+                # Use diverse parent selection instead of fixed top 2
+                parents = self.memory.get_diverse_parents(k=2)
+                parent1, parent2 = parents[0], parents[1]
                 context = (
                     f"PARENT 1 ({parent1['name']} - Score {parent1['mean_swaps']}):\n```python\n{parent1['code']}\n```\n\n"
                     f"PARENT 2 ({parent2['name']} - Score {parent2['mean_swaps']}):\n```python\n{parent2['code']}\n```\n"
@@ -223,8 +241,20 @@ class OrchestratorV2:
                 prompt_template = getattr(self.prompts, 'crossover_prompt', 'Combine these two algorithms into a better one.')
             else:
                 operation = "MUTATION"
-                context = f"CURRENT BEST HEURISTIC ({current_best['name']} - Score {current_best['mean_swaps']}):\n```python\n{current_best['code']}\n```\n"
+                # Rotate through top pool instead of always mutating top 1
+                top_pool = self.memory.get_top_k(diversity_pool_size)
+                if force_diversity and len(top_pool) > 1:
+                    # Skip top 1 when forced diversity is active
+                    mutation_idx = ((round_idx - 1) % (len(top_pool) - 1)) + 1
+                else:
+                    mutation_idx = (round_idx - 1) % len(top_pool)
+                mutation_target = top_pool[mutation_idx]
+                context = f"CURRENT HEURISTIC TO IMPROVE ({mutation_target['name']} - Score {mutation_target['mean_swaps']}):\n```python\n{mutation_target['code']}\n```\n"
                 prompt_template = getattr(self.prompts, 'refinement_prompt', 'Improve the current best heuristic.')
+
+            if force_diversity:
+                console.print(f"[yellow]Diversity mode active — exploring beyond top performers[/yellow]")
+                force_diversity = False  # Reset after one round
 
             console.print(f"[magenta]Applying Operation: {operation}[/magenta]")
 
@@ -233,46 +263,70 @@ class OrchestratorV2:
                 f"{reflection_str}"
                 f"{context}\n"
                 f"{prompt_template}\n"
-                f"{getattr(self.prompts, 'output_format', '')}\n"
-                f"{getattr(self.prompts, 'baseline', '')}"
+                f"IMPORTANT: Before your code block, provide a short NAME and DESCRIPTION for the new algorithmic approach you are taking.\n"
+                f"Format strictly as:\nNAME: <your_name>\nDESCRIPTION: <your_description>\n\n"
+                f"{getattr(self.prompts, 'code', '')}"
             )
-            
+
             save_log(round_dir, "prompt.txt", prompt)
             response = self.llm.query(prompt, reset_conversation=True)
             save_log(round_dir, "raw_response.txt", response or "")
-            
+
+            # Extract custom Name and Description
+            name_match = re.search(r'NAME:\s*(.+)', response or "", re.IGNORECASE)
+            desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=\n```|$)', response or "", re.IGNORECASE | re.DOTALL)
+
+            idea_name = name_match.group(1).strip() if name_match else f"Refined_{operation}_R{round_idx}"
+            idea_desc = desc_match.group(1).strip() if desc_match else f"Generated via {operation}"
+
             target_func = "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
             code = IdeaParser.extract_code(response or "", target_func)
-            idea_name = f"Refined_Idea_{operation}_Round_{round_idx}"
 
             if not code:
                 console.print(f"[red]Failed to extract code in round {round_idx}[/red]")
                 all_results[idea_name] = {"mean_swaps": float('inf'), "mean_depth": 0, "error": "Extraction Failed"}
+                improvement_history.append(False)
                 continue
-                
+
             with open(os.path.join(round_dir, "heuristic.py"), "w") as f:
                 f.write(code)
 
             # Evaluate
             stats = self.evaluator.evaluate(code)
             save_json(round_dir, "evaluation_results.json", stats)
-            
-            # Save to memory immediately so it can be used in the next round
-            self.memory.add_idea(idea_name, f"Generated via {operation}", code, stats.get('mean_swaps', float('inf')), stats.get('mean_depth', 0), stats.get('error'))
-            
+
+            self.memory.add_idea(
+                name=idea_name,
+                description=idea_desc,
+                code=code,
+                mean_swaps=stats.get('mean_swaps', float('inf')),
+                mean_depth=stats.get('mean_depth', 0),
+                error=stats.get('error')
+            )
+
             if not stats.get('error'):
                 current_score = stats['mean_swaps']
                 console.print(f"[green]✔ SUCCESS: {current_score:.2f} avg swaps[/green]")
                 all_results[idea_name] = stats
-                
+
                 if current_score < best_score:
                     console.print(f"[bold green] New Best Score! {best_score:.2f} -> {current_score:.2f}[/bold green]")
                     os.makedirs("heuristics", exist_ok=True)
                     with open(f"heuristics/best_refined_round_{round_idx}.py", "w") as f:
                         f.write(code)
+                    improvement_history.append(True)
+                else:
+                    improvement_history.append(False)
             else:
                 console.print(f"[red]✘ FAILED: {stats.get('error')}[/red]")
                 all_results[idea_name] = stats
+                improvement_history.append(False)
+
+            # Check for stagnation
+            recent = improvement_history[-stagnation_threshold:]
+            if len(recent) >= stagnation_threshold and not any(recent):
+                console.print(f"[yellow]Stagnation detected ({stagnation_threshold} rounds without improvement). Forcing diversity restart.[/yellow]")
+                force_diversity = True
 
         save_json(self.stage4_dir, "refinement_results.json", all_results)
         self.stage_times["iterative_refinement"] = time.time() - start_time
@@ -362,7 +416,7 @@ class OrchestratorV2:
         self.literature_review()
         self.ideas_generation()        
         stage3_results = self.implementation()
-        self.reflection() # NEW STAGE
+        self.reflection() 
         final_results = self.iterative_refinement(stage3_results)        
         self.stage_times["total_pipeline"] = time.time() - self.pipeline_start_time
         console.print("[bold]Generating final cross-idea comparison report...[/bold]")

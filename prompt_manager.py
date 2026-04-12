@@ -18,7 +18,7 @@ class PromptManager:
         self.idea_history = self._load(f"{self.problem}/ideas_history.txt")
         self.lit_review_prompt = self._load(f"{self.problem}/literature_review.txt")
         self.refinement_prompt = self._load(f"{self.problem}/refinement.txt")
-        
+        self.memory_summary_prompt = self._load(f"{self.problem}/memory_summary.txt")
         self.crossover_prompt = self._load(f"{self.problem}/crossover.txt")
         self.reflection_prompt = self._load(f"{self.problem}/reflection.txt")
 

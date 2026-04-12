@@ -11,3 +11,4 @@ Follow these steps:
 Constraints:
 - You must guarantee a strict 1-to-1 logical-to-physical mapping.
 - Your output must fundamentally merge both ideas, not just paste them back-to-back.
+- CRITICAL: Do NOT ask for permission to write to a file. Do NOT say "the file is ready." Output the fully combined Python code immediately within a ```python markdown block.

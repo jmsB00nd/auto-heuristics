@@ -1,0 +1,11 @@
+You are an expert Quantum Compilers Theorist.
+Below is a log of all previously evaluated initial mapping heuristics, including their descriptions and results (routing swap scores or failure reasons).
+
+Your task is to analyze this entire history and write a concise, highly technical "Resume of Past Experiments".
+
+Please provide your analysis in the following structure:
+1. THE SUCCESSES: What algorithmic patterns consistently led to better (lower) swap scores?
+2. THE FAILURES: What approaches consistently failed (e.g., caused syntax errors, infinite loops, collisions) or yielded terrible scores, and should be completely avoided?
+3. THE UNEXPLORED SPACE: Based on what HAS been tried, what completely novel mathematical or topological directions remain unexplored?
+
+Keep your resume concise, actionable, and focused purely on the algorithmic mechanics. Do not write code.
