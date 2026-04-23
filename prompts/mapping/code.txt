@@ -1,4 +1,4 @@
-Reference code to see the variables can be accessed and how the initial mapping fit within the code
+The following code is provided to help you understand the overall compilation pipeline and where the initial mapping step fits within it.
 
 import random
 import copy
@@ -31,6 +31,12 @@ class Qlosure():
         self.access, self.write_dict = self.data["read"], self.data["write"]
         self.macro_gates = self.data.get("macro_gates", {})
         self.access2q = None
+        
+        self.qubit_interaction_graph = self.build_qubit_interaction_graph()
+        self.temporal_interaction_graph = self.build_temporal_interaction_graph(decay_factor=0.95)
+        self.logical_activity = self.build_logical_activity_scores()
+        self.physical_centrality = self.build_physical_centrality_scores()
+        
         self.decay_parameter = [1 for _ in range(self.num_qubits)]
         self.qubit_depth = {q: 0 for q in range(self.num_qubits)}
         self.reset = 5
@@ -47,7 +53,7 @@ class Qlosure():
         self.results = {}
         self.instruction_times = defaultdict(int)
 
-    def run(self, heuristic_method="Qlosure", enforce_read_after_read=True, transitive_reduction=True, initial_mapping_method="trivial", dag_mode="default", num_iter=1, look_ahead_param=5, verbose=0):
+    def run(self, enforce_read_after_read=True, transitive_reduction=True, dag_mode="default", num_iter=1, look_ahead_param=5, verbose=0):
         """
         Execute the mapping/scheduling loop and return (min_swaps, min_depth, exec_time).
         The method alternates between forward and backward DAG passes when
@@ -56,7 +62,7 @@ class Qlosure():
 
         # Initialize the logical->physical mapping
         self.init_mapping()
-
+        
         self.results = {}
         min_swaps = float('inf')
         min_depth = float('inf')
@@ -101,8 +107,7 @@ class Qlosure():
             self.init_front_layer()
             self.qubit_depth = {q: 0 for q in range(self.num_qubits)}
             start = time()
-            swap_count = self.execute_algorithm(
-                heuristic_method, look_ahead_param, verbose)
+            swap_count = self.execute_algorithm(look_ahead_param, verbose)
             exec_time = time()-start
             if i % 2 == 0:
                 if swap_count < min_swaps:
@@ -112,19 +117,82 @@ class Qlosure():
                     min_depth = min(min_depth, self.get_circuit_depth())
 
         return min_swaps, min_depth, exec_time
+    
+    def build_qubit_interaction_graph(self):
+        """
+        Builds a graph representing the interactions between logical qubits.
+        Nodes are logical qubits, and edges are weighted by the number of 2-qubit operations.
+        Returns a dictionary of dictionaries where graph[q1][q2] = weight.
+        """
+        qig = defaultdict(lambda: defaultdict(int))
+        for gate_id, qubits in self.access.items():
+            # Only consider 2-qubit interactions
+            if len(qubits) == 2:
+                q1, q2 = qubits
+                # Undirected graph: increment weight in both directions
+                qig[q1][q2] += 1
+                qig[q2][q1] += 1
+        return qig
+    
+    def build_temporal_interaction_graph(self, decay_factor=0.95):
+        """
+        Builds a time-decayed Qubit Interaction Graph.
+        Gates earlier in the sequence get exponentially higher weights.
+        """
+        tqig = defaultdict(lambda: defaultdict(float))
+        
+        # Sort gates to process them chronologically
+        sorted_gates = sorted(self.access.keys())
+        
+        for index, gate_id in enumerate(sorted_gates):
+            qubits = self.access[gate_id]
+            if len(qubits) == 2:
+                q1, q2 = qubits
+                # Weight decreases as the index (time) increases
+                weight = decay_factor ** index
+                tqig[q1][q2] += weight
+                tqig[q2][q1] += weight
+                
+        return tqig
+    
+    def build_logical_activity_scores(self):
+        """
+        Computes the total number of 2-qubit interactions for each logical qubit.
+        """
+        activity = defaultdict(int)
+        for q1, neighbors in self.qubit_interaction_graph.items():
+            activity[q1] = sum(neighbors.values())
+        return activity
+
+    def build_physical_centrality_scores(self):
+        """
+        Computes the centrality of each physical qubit based on the precomputed distance matrix.
+        Lower sum of distances = higher centrality score.
+        """
+        centrality = {}
+        num_physical_nodes = len(self.distance_matrix)
+        for i in range(num_physical_nodes):
+            total_distance = sum(self.distance_matrix[i])
+            
+            centrality[i] = 1.0 / total_distance if total_distance > 0 else 0
+            
+        return centrality
+    
+    def to_qasm(self):
+        return self.data.get("qasm_code", "")
 
 ################################################################################################################################################################
-#                                                                  Initial Mapping Function                                                                       #
+#                                                                  Initial Mapping                                                                       #
 ################################################################################################################################################################    
-
+    
     def init_mapping(self):
-        self.mapping = list(range(self.num_qubits))          # mapping[i] = i
-        self.reverse_mapping = list(range(self.num_qubits))  # reverse_mapping[i] = i
+
+        self.mapping_dict, self.reverse_mapping_dict = generate_trivial_initial_mapping(self.num_qubits)
+    
         if self.use_isl:
             self.isl_mapping = dict_to_isl_map(self.mapping_dict)
 
-################################################################################################################################################################    
-
+################################################################################################################################################################
 
     def init_front_layer(self):
         self.front_layer = set()
@@ -132,7 +200,7 @@ class Qlosure():
             if len(self.dag_predecessors_full[gate]) == 0:
                 self.front_layer.add(gate)
 
-    def execute_algorithm(self, huristic_method, param, verbose):
+    def execute_algorithm(self, param, verbose):
         swap_count = 0
         total_gates = len(self.access)
         self.decay_parameter = [1 for _ in range(self.num_qubits)]
@@ -247,9 +315,7 @@ class Qlosure():
 
         return 1
     
-################################################################################################################################################################
-#                                                                  Qlosure Cost Function                                                                       #
-################################################################################################################################################################    
+
     def qlosure_poly_heuristic(self, swap_gate):
         W = 1
         front_layer_size = len(self.front_layer)
@@ -280,4 +346,4 @@ class Qlosure():
                         ((e_distance / extended_layer_size) if extended_layer_size else 0))
 
         return H
-################################################################################################################################################################
+

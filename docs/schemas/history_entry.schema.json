@@ -1,0 +1,59 @@
+{
+  "additionalProperties": true,
+  "description": "Formalizes entries appended to ``outputs/experiment_history.json`` ``history``.",
+  "properties": {
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "code": {
+      "title": "Code",
+      "type": "string"
+    },
+    "mean_swaps": {
+      "title": "Mean Swaps",
+      "type": "number"
+    },
+    "mean_depth": {
+      "default": 0.0,
+      "title": "Mean Depth",
+      "type": "number"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Id"
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "code",
+    "mean_swaps"
+  ],
+  "title": "HistoryEntry",
+  "type": "object"
+}

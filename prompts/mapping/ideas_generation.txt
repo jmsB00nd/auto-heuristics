@@ -1,26 +1,41 @@
-Your TASK: Generate, Evaluate, Score, Filter, and Report Novel Ideas for Quantum Circuit Initial Mapping (Placement) Algorithms.
+Your TASK: Brainstorm candidate algorithms for the Initial Mapping (Placement) problem in quantum circuit compilation — assigning logical qubits to physical qubits on a fixed coupling graph BEFORE routing. The objective is to minimize future SWAP insertion.
 
-PART 1: GENERATE DIVERSE NOVEL IDEAS
-Propose at least 10 fundamentally novel, highly mathematical algorithmic concepts for initial mapping. 
-Think deeply about graph theory, subgraph isomorphism approximations, force-directed placement, or DAG-critical-path weighting. Explicitly consider how to map heavily interacting logical qubits (using dag_dependencies_count and extended_layer) to physically close qubits (using distance_matrix).
+Propose diverse, novel, and efficient ideas. Analyze the problem from multiple angles, compare candidate strategies internally, and KEEP ONLY THE BEST ones. Favor ideas that are:
+- algorithmically simple
+- low complexity
+- scalable
+- practical
+- clearly applicable to real circuits
+- different from each other (no minor variants of the same strategy)
 
-PART 2: EVALUATE, SCORE, AND FILTER ALL IDEAS
-Score using four metrics (1–10 scale):
-- Novelty (N): 10 = revolutionary, 1 = incremental  
-- Probability of Outperforming SOTA (P): 10 = very likely, 1 = unlikely  
-- Effort (E): 10 = easy to implement efficiently in Python, 1 = requires exponential time (O(2^N))
-- Feasibility/Validity (F): 10 = perfectly guarantees 1-to-1 mapping, 1 = high risk of physical collisions.
+Use available STATIC information: qubits interaction, gate frequencies, circuit depth patterns, hardware topology, centrality, clustering, and locality. 
 
-Compute: AVERAGE_SCORE = (N + P + E + F) / 4  
-Round to one decimal place. Eliminate ideas that score (F < 9).
+CONSTRAINTS
+- Focus only on INITIAL MAPPING, not routing.
+- Do not propose expensive optimization methods (no ILP/SAT/SMT solvers, no deep RL, no simulated annealing with long schedules).
+- Do not repeat the same strategy with minor changes.
+- Prefer methods with low runtime overhead (O(N²) or better where N = num_qubits, M = number of 2-qubit gates).
+- Each idea must be implementable as a single self-contained Python function.
+- Do not code the ideas
 
-REQUIRED OUTPUT FORMAT (one block per idea, separated by ---):
-IDEA_NAME: [Short descriptive name]  
-DESCRIPTION: [Explanation of the core mechanism]  
-VARIABLE_UTILIZATION: [Which self.* variables will this use and how?]
-COLLISION_PREVENTION: [How it guarantees a valid 1-to-1 physical-logical assignment]
-NOVELTY_SCORE: [1–10]  
-PROBABILITY_SCORE: [1–10]  
-EFFORT_SCORE: [1–10]
-FEASIBILITY_SCORE: [1-10]
-AVERAGE_SCORE: [1-10]
+ADDITIONAL GUIDANCE
+- Prioritize strategies that explicitly align strongly interacting logical qubits with physically adjacent or well-connected qubits on the backend.
+- Favor mappings that respect and exploit backend connectivity structure (e.g., coupling graph topology, bottlenecks, hubs, and limited-degree regions).
+- Emphasize minimizing interaction distance for high-frequency logical qubit pairs as a primary objective.
+
+
+OUTPUT FORMAT
+For each retained idea, output a block in EXACTLY this format. Separate blocks with a line containing only `---`.
+
+NAME: <short_snake_case_name>
+DESCRIPTION: <2–4 sentences summarizing the core idea and what it optimizes>
+STATUS: KEPT
+CORE_IDEA: <one concise sentence — the primitive in one phrase>
+HOW_IT_WORKS: <3–6 sentences: concrete steps, which static inputs are used (self.* attributes such as interaction graph, coupling graph, gate frequencies, centrality, etc.), and how the mapping is produced>
+WHY_IT_REDUCES_SWAPS: <1–3 sentences linking the primitive to SWAP reduction — which part of future routing cost it attacks and why>
+TIME_COMPLEXITY: <big-O in N and M>
+STRENGTHS: <bullet-like short list>
+LIMITATIONS: <bullet-like short list; include the input shape that would make this idea underperform>
+COLLISION_PREVENTION: <why the returned mapping is guaranteed 1-to-1>
+
+Return only the final best ideas. No preamble, no closing commentary.

@@ -1,0 +1,34 @@
+MINIMAL API REFERENCE for the Qlosure router (context for `init_mapping(self)`).
+
+WRITE-TARGETS (your function MUST populate these, indexed by logical qubit id)
+- self.mapping_dict:          list-like, mapping_dict[logical_q] = physical_q
+- self.reverse_mapping_dict:  list-like, reverse_mapping_dict[physical_q] = logical_q
+
+HARDWARE / TOPOLOGY (read-only)
+- self.num_qubits:            int, total physical qubits on the backend
+- self.backend:               adjacency list of the hardware coupling graph
+- self.backend_connections:   set of (phys_qA, phys_qB) tuples — directed edges (both orientations present)
+- self.distance_matrix:       2D matrix, distance_matrix[p_i][p_j] = shortest-path distance (≥1 for connected, 0 for self)
+
+CIRCUIT / DAG (read-only; NOTE: some fields are only available AFTER `init_mapping` returns, set by the outer `run()` — do NOT depend on them inside `init_mapping` unless guarded by `getattr(self, "...", None)`)
+- self.access:                dict, gate_id -> list of logical qubits (1- or 2-qubit gates)
+- self.access2q:              dict, gate_id -> pair of logical qubits (2-qubit gates only). MAY be None at init_mapping time; use `self.access` to enumerate 2-qubit interactions instead.
+- self.write_dict:            write-dependency metadata
+- self.data:                  raw input dict (has "qasm_code", "read", "write", optionally "macro_gates")
+
+PRECOMPUTED (usually None at init_mapping time — guard with getattr if you reference them)
+- self.front_layer, self.extended_layer, self.extended_layer_index, self.dag_dependencies_count
+
+SAFE PATTERN for init_mapping
+At the moment init_mapping is called, the DAG has not yet been built. Therefore, to extract logical-qubit interactions you should iterate over `self.access` directly:
+    interactions = []        # list of (logical_q1, logical_q2)
+    for gate_id, qubits in self.access.items():
+        if len(qubits) == 2:
+            interactions.append(tuple(qubits))
+
+This gives the full interaction graph over logical qubits used by the circuit, independent of DAG layering.
+
+INVARIANTS TO PRESERVE
+- `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS (not dicts) of length `self.num_qubits`, indexed by qubit id.
+- For every logical qubit L appearing in `self.access`, `self.reverse_mapping_dict[self.mapping_dict[L]] == L`.
+- `len(set(self.mapping_dict)) == len(self.mapping_dict)` (injection).

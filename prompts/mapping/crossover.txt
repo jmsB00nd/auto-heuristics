@@ -1,14 +1,32 @@
-You are an expert Quantum Compiler Algorithm Engineer.
-Above, you have been provided with TWO of our best-performing INITIAL MAPPING HEURISTICS (Parent 1 and Parent 2) and their routing swap scores (lower is better).
+You are a Quantum Compiler Algorithm Engineer performing a CROSSOVER that synthesizes two well-performing parent heuristics into a child better than either. You are NOT doing incremental mutation.
 
-Your task is to perform a CROSSOVER OPERATION. You must synthesize a completely new initial mapping algorithm that combines the unique strengths of both parents while discarding their weaknesses.
+INPUT (injected above this prompt)
+- Parent 1: NAME, description, full code, mean_swaps.
+- Parent 2: NAME, description, full code, mean_swaps.
+- Optional: reflection insights, stagnation flag.
 
-Follow these steps:
-1. PARENT ANALYSIS: Identify the core mathematical or topological strategy of Parent 1 (e.g., depth lookahead) and Parent 2 (e.g., centrality matching).
-2. SYNTHESIS STRATEGY: Explain how you will mathematically merge these two concepts. For instance, you might use Parent 1's DAG weighting scheme combined with Parent 2's tie-breaking topological placement.
-3. IMPLEMENTATION: Write the complete, valid Python code for the new `init_mapping` function.
+CROSSOVER DISCIPLINE
+A valid crossover combines ORTHOGONAL primitives from the two parents — one contributes how to SCORE / RANK candidates, the other contributes how to COMMIT / ORDER assignments. Forbidden:
+  • Running Parent 1 then Parent 2 on leftover qubits (concatenation, not crossover).
+  • Averaging the two parents' mappings (averaging permutations is meaningless).
+  • Reusing the same primitive from both parents with a minor tweak (that is mutation).
 
-Constraints:
-- You must guarantee a strict 1-to-1 logical-to-physical mapping.
-- Your output must fundamentally merge both ideas, not just paste them back-to-back.
-- CRITICAL: Do NOT ask for permission to write to a file. Do NOT say "the file is ready." Output the fully combined Python code immediately within a ```python markdown block.
+ALLOWED PATTERNS
+  • P1 scores logical qubits, P2 scores physical qubits → combine via weighted bipartite matching.
+  • P1 partitions logical qubits into clusters, P2 assigns clusters to physical regions, then P1 orders within each cluster.
+  • P1 provides the primary cost term, P2 provides the tie-breaker.
+
+RESPONSE FORMAT (in this order)
+1. PARENT_SIGNATURES: one line each — "Parent 1: primary = …, auxiliary = …" / "Parent 2: primary = …, auxiliary = …". Infer from description and code.
+2. ORTHOGONALITY_CHECK: one sentence stating which primitive from each parent you keep, and why they are complementary (not redundant).
+3. SYNTHESIS_PLAN: 3–6 bullets describing the merged algorithm in pseudocode.
+4. WHERE_THIS_HELPS: one sentence naming the input shape (not a benchmark name) the child should handle better and why.
+5. NAME: <short snake_case name>
+6. DESCRIPTION: <one-line summary of the synthesis>
+7. Code: a single ```python block containing the complete `init_mapping(self)` function. `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS indexed by qubit id. Include `assert len(set(self.mapping_dict)) == len(self.mapping_dict)` as the last line.
+
+HARD RULES
+- The child must be a merge, not a concatenation or rewrap.
+- Function signature and side-effect contract identical to parents (writes `self.mapping_dict` and `self.reverse_mapping_dict` only).
+- Maintain O(N²) or better. If Hungarian matching is used, bound the matrix dimension by the number of logical qubits actually present in `self.access`.
+- No meta-commentary. Emit the sections above and the code, nothing else.

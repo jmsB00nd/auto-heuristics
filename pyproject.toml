@@ -1,0 +1,14 @@
+[project]
+name = "auto-heuristics"
+version = "0.1.0"
+description = "LLM-driven framework for automatic heuristic generation for quantum compilation passes."
+requires-python = ">=3.10"
+dependencies = [
+    "qiskit",
+    "numpy",
+    "tqdm",
+    "rich",
+    "pandas",
+    "matplotlib",
+    "pydantic>=2.0",
+]

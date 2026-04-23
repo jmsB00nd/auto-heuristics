@@ -2,9 +2,12 @@ import argparse
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Dict, Tuple, Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from qiskit.qasm2 import dump
 
@@ -17,7 +20,7 @@ from qpu.src.load_backend import load_backend_edges
 parser = argparse.ArgumentParser(
     description="Run Qlosure with optional parameters")
 parser.add_argument("--circuit", type=str,
-                    default="/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-54qbt/54QBT_600CYC_QSE_6.json", help="Path to circuit JSON file")
+                    default="/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-16qbt/16QBT_100CYC_QSE_6.json", help="Path to circuit JSON file")
 parser.add_argument("--backend", type=str,
                     default="ibm_sherbrooke", help="Name of the backend")
 parser.add_argument("--initial", type=str, default="trivial",
@@ -44,8 +47,7 @@ print("✅ Backend topology loaded.")
 
 # Run Qlosure
 poly_mapper = Qlosure(edges, data)
-qlosure_results = poly_mapper.run(initial_mapping_method=args.initial, verbose=args.verbose,
-                                  heuristic_method=args.heuristic, num_iter=args.num_iterations)
+qlosure_results = poly_mapper.run(verbose=args.verbose, num_iter=args.num_iterations)
 # Store results
 results = {
     "qlosure": {"swaps": qlosure_results[0], "depth": qlosure_results[1], "time": qlosure_results[2]},

@@ -1,726 +1,220 @@
 def init_mapping(self):
-    """
-    DAG-Aware K-Core Refined Placement v2
+    import collections, math
+    from qiskit import QuantumCircuit
+    from qiskit.converters import circuit_to_dag
+    from qiskit.transpiler import CouplingMap
+    from qiskit.transpiler.passes import SabreLayout
 
-    Improvements over v1 (527.82 mean swaps):
-    - Nonlinear cost distance (dist-1)^1.3: adjacent=free, penalizes far placements
-    - Steeper temporal decay with front-layer premium for first few DAG layers
-    - Cost-biased simulated annealing (focus on highest-cost pairs)
-    - Adaptive weight boosting round after initial optimization
-    - Front-layer focused seed for better layer-0 adjacency
-    - Radius-3 neighborhood in ILS local search
-    - More ILS restarts and SA iterations
-    """
-    from collections import defaultdict, deque
-    import math
-    import random
+    distance_matrix = self.distance_matrix
+    num_qubits = self.num_qubits
+    backend = self.backend
+    access = self.access
+    dag_predecessors2q = getattr(self, 'dag_predecessors2q', {}) or {}
+    dag2q = getattr(self, 'dag2q', {}) or {}
+    dag_dependencies_count = getattr(self, 'dag_dependencies_count', []) or []
 
-    rng = random.Random(42)
-
-    # ================================================================== #
-    # 1. Build DAG and compute gate layers + critical path               #
-    # ================================================================== #
-    all_gates = sorted(self.access.keys())
-    two_qubit_gates = [g for g in all_gates if len(self.access[g]) == 2]
-
-    logical_qubit_set = set()
-    for qubits in self.access.values():
-        logical_qubit_set.update(qubits)
-    logical_qubits = sorted(logical_qubit_set)
-    physical_qubits = sorted(self.backend.keys())
-
-    if not logical_qubits or not two_qubit_gates:
-        self.mapping_dict = list(range(self.num_qubits))
-        self.reverse_mapping_dict = list(range(self.num_qubits))
-        if self.use_isl:
-            self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+    # --- 1. Logical qubits in use ---
+    logical_qubits_used = set()
+    for qubits in access.values():
+        logical_qubits_used.update(qubits)
+    if not logical_qubits_used:
+        self.mapping_dict = list(range(num_qubits))
+        self.reverse_mapping_dict = list(range(num_qubits))
+        if getattr(self, 'use_isl', False):
+            self.isl_mapping = dict_to_isl_map(dict(enumerate(self.mapping_dict)))
+        assert len(set(self.mapping_dict)) == len(self.mapping_dict)
         return
 
-    n_lq = len(logical_qubits)
-    n_pq = len(physical_qubits)
-
-    # Build DAG via last-gate-on-qubit tracking
-    last_gate_on_qubit = {}
-    successors_dag = defaultdict(set)
-    predecessors_dag = defaultdict(set)
-    for g in all_gates:
-        for q in self.access[g]:
-            if q in last_gate_on_qubit:
-                pred = last_gate_on_qubit[q]
-                successors_dag[pred].add(g)
-                predecessors_dag[g].add(pred)
-            last_gate_on_qubit[q] = g
-
-    # Gate layer via topological BFS (Kahn's algorithm)
-    in_degree = {g: len(predecessors_dag[g]) for g in all_gates}
-    gate_layer = {g: 0 for g in all_gates}
-    queue = deque(g for g in all_gates if in_degree[g] == 0)
-    topo_order = []
-    temp_in = dict(in_degree)
-    while queue:
-        g = queue.popleft()
-        topo_order.append(g)
-        for s in successors_dag[g]:
-            gate_layer[s] = max(gate_layer[s], gate_layer[g] + 1)
-            temp_in[s] -= 1
-            if temp_in[s] == 0:
-                queue.append(s)
-
-    # Critical path: remaining depth from each gate
-    critical_path = {g: 0 for g in all_gates}
-    for g in reversed(topo_order):
-        for s in successors_dag[g]:
-            if critical_path[s] + 1 > critical_path[g]:
-                critical_path[g] = critical_path[s] + 1
-
-    max_layer = max((gate_layer[g] for g in two_qubit_gates), default=1)
-    max_cp = max((critical_path[g] for g in two_qubit_gates), default=1)
-
-    # ================================================================== #
-    # 2. Precompute nonlinear cost distance matrix                        #
-    # ================================================================== #
-    # (dist-1)^1.3: dist=1 (adjacent) costs 0, dist=2 costs 1,
-    # dist=3 costs ~2.46, dist=4 costs ~4.17 -- penalizes far more
-    n_total = self.num_qubits
-    cost_dist = [[0.0] * n_total for _ in range(n_total)]
-    for p1 in physical_qubits:
-        for p2 in physical_qubits:
-            d = self.distance_matrix[p1][p2]
-            if d <= 1:
-                cost_dist[p1][p2] = 0.0
-            else:
-                cost_dist[p1][p2] = (d - 1) ** 1.3
-
-    # ================================================================== #
-    # 3. Build temporally-decayed, criticality-weighted interactions      #
-    # ================================================================== #
-    # Steeper decay + front-layer premium
-    alpha_decay = 1.8 * math.log(10.0) / (max_layer + 1)
-    front_layer_cutoff = max(3, int(max_layer * 0.08))
-
-    interaction_weight = defaultdict(float)
-    interaction_neighbors = defaultdict(dict)
-
-    for g in two_qubit_gates:
-        q1, q2 = self.access[g]
-        layer = gate_layer[g]
-        cp = critical_path[g]
-
-        # Temporal decay (steeper than v1)
-        w = math.exp(-alpha_decay * layer)
-        # Critical path boost
-        w *= (1.0 + 1.8 * cp / max_cp) if max_cp > 0 else 1.0
-        # Front-layer premium: first few layers get extra weight
-        if layer <= front_layer_cutoff:
-            w *= 2.0 + (front_layer_cutoff - layer) * 0.5
-        # Floor
-        w = max(w, 0.03)
-
-        key = (min(q1, q2), max(q1, q2))
-        interaction_weight[key] += w
-        interaction_neighbors[q1][q2] = interaction_neighbors[q1].get(q2, 0.0) + w
-        interaction_neighbors[q2][q1] = interaction_neighbors[q2].get(q1, 0.0) + w
-
-    # Second-order (transitive) interactions
-    alpha2 = 0.12
-    second_order = defaultdict(float)
-    for mid in logical_qubits:
-        neighbors = list(interaction_neighbors[mid].items())
-        for i in range(len(neighbors)):
-            for j in range(i + 1, len(neighbors)):
-                nb1, w1 = neighbors[i]
-                nb2, w2 = neighbors[j]
-                key = (min(nb1, nb2), max(nb1, nb2))
-                second_order[key] += alpha2 * math.sqrt(w1 * w2)
-
-    # Combined weights
-    combined_weight = defaultdict(float)
-    for k, v in interaction_weight.items():
-        combined_weight[k] += v
-    for k, v in second_order.items():
-        combined_weight[k] += v
-
-    lq_combined = defaultdict(dict)
-    for (q1, q2), w in combined_weight.items():
-        lq_combined[q1][q2] = w
-        lq_combined[q2][q1] = w
-
-    weighted_degree = {q: sum(lq_combined[q].values()) for q in logical_qubits}
-
-    # ================================================================== #
-    # 4. Hardware topology analysis                                       #
-    # ================================================================== #
-    pq_set = set(physical_qubits)
-    pq_adj = {pq: [nb for nb in self.backend.get(pq, []) if nb in pq_set]
-              for pq in physical_qubits}
-    pq_degree = {pq: len(pq_adj[pq]) for pq in physical_qubits}
-
-    # Harmonic centrality
-    pq_centrality = {}
-    for pq in physical_qubits:
-        c = sum(
-            1.0 / self.distance_matrix[pq][other]
-            for other in physical_qubits
-            if other != pq and self.distance_matrix[pq][other] not in (0, float('inf'))
-        )
-        pq_centrality[pq] = c
-
-    # Radius-2 neighborhoods
-    pq_r2 = {}
-    for pq in physical_qubits:
-        nbrs = set(pq_adj[pq])
-        for nb in pq_adj[pq]:
-            nbrs.update(pq_adj[nb])
-        nbrs.discard(pq)
-        pq_r2[pq] = list(nbrs)
-
-    # Radius-3 neighborhoods for broader ILS search
-    pq_r3 = {}
-    for pq in physical_qubits:
-        nbrs = set(pq_r2[pq])
-        for nb in pq_r2[pq]:
-            nbrs.update(pq_adj.get(nb, []))
-        nbrs.discard(pq)
-        pq_r3[pq] = list(nbrs)
-
-    phys_by_centrality = sorted(physical_qubits, key=lambda p: pq_centrality[p], reverse=True)
-
-    # ================================================================== #
-    # 5. K-core decomposition for placement ordering                      #
-    # ================================================================== #
-    adj = defaultdict(set)
-    for q in logical_qubits:
-        for nb in interaction_neighbors[q]:
-            adj[q].add(nb)
-
-    degree_kcore = {q: len(adj[q]) for q in logical_qubits}
-    remaining = set(logical_qubits)
-    peeling_order = []
-
-    while remaining:
-        min_q = min(remaining, key=lambda q: degree_kcore[q])
-        peeling_order.append(min_q)
-        remaining.remove(min_q)
-        for nb in adj[min_q]:
-            if nb in remaining:
-                degree_kcore[nb] -= 1
-
-    # Reverse: most interconnected first
-    kcore_placement_order = list(reversed(peeling_order))
-
-    # ================================================================== #
-    # 6. Greedy BFS placement using combined weights + nonlinear dist     #
-    # ================================================================== #
-    def greedy_bfs_seed(placement_order, anchor_pq=None):
-        lq_phys = {}
-        used_phys = set()
-
-        for lq in placement_order:
-            neighbors_placed = [
-                nb for nb in lq_combined[lq] if nb in lq_phys
-            ]
-
-            if not neighbors_placed:
-                if anchor_pq is not None and anchor_pq not in used_phys:
-                    best_phys = anchor_pq
-                    anchor_pq = None
-                else:
-                    best_phys = None
-                    for p in phys_by_centrality:
-                        if p not in used_phys:
-                            best_phys = p
-                            break
-                    if best_phys is None:
-                        best_phys = next(p for p in physical_qubits if p not in used_phys)
-            else:
-                best_phys = None
-                best_score = float('inf')
-                unplaced_nb_count = sum(1 for nb in lq_combined[lq] if nb not in lq_phys)
-                for p in physical_qubits:
-                    if p in used_phys:
-                        continue
-                    # Use nonlinear cost distance
-                    dist_cost = sum(
-                        lq_combined[lq][nb] * cost_dist[p][lq_phys[nb]]
-                        for nb in neighbors_placed
-                    )
-                    free_nb = sum(1 for adj_p in pq_adj[p] if adj_p not in used_phys)
-                    capacity_penalty = max(0, unplaced_nb_count - free_nb) * 0.2
-                    score = dist_cost + capacity_penalty
-                    if score < best_score:
-                        best_score = score
-                        best_phys = p
-
-            lq_phys[lq] = best_phys
-            used_phys.add(best_phys)
-
-        return lq_phys
-
-    # ================================================================== #
-    # 7. Hungarian assignment seed (rearrangement inequality)             #
-    # ================================================================== #
-    def hungarian_seed():
-        try:
-            import numpy as np
-            from scipy.optimize import linear_sum_assignment
-        except ImportError:
-            return None
-
-        lq_sorted_weights = {
-            lq: sorted(lq_combined[lq].values(), reverse=True)
-            for lq in logical_qubits
-        }
-        # Use sorted nonlinear cost distances
-        pq_sorted_cdists = {
-            pq: sorted(
-                cost_dist[pq][other]
-                for other in physical_qubits
-                if other != pq
-            )
-            for pq in physical_qubits
-        }
-
-        cost_matrix_np = np.zeros((n_lq, n_pq))
-        for i, lq in enumerate(logical_qubits):
-            weights = lq_sorted_weights[lq]
-            if not weights:
+    # --- 2. P2 primary: SabreLayout reference anchors ---
+    ref_anchor = {}
+    try:
+        circuit = QuantumCircuit.from_qasm_str(self.data["qasm_code"])
+        dag_circuit = circuit_to_dag(circuit)
+        coupling_map = CouplingMap(list(self.backend_connections))
+        sl = SabreLayout(coupling_map, seed=21)
+        sl.run(dag_circuit)
+        layout = sl.property_set["layout"]
+        for v, pq in layout._v2p.items():
+            if v._register.name == "ancilla":
                 continue
-            for j, pq in enumerate(physical_qubits):
-                dists = pq_sorted_cdists[pq]
-                cost = 0.0
-                for k, w_val in enumerate(weights):
-                    d = dists[k] if k < len(dists) else (dists[-1] + k - len(dists) + 1)
-                    cost += w_val * d
-                cost_matrix_np[i, j] = cost
+            lq = v._index
+            if 0 <= lq < num_qubits and 0 <= pq < num_qubits:
+                ref_anchor[lq] = pq
+    except Exception:
+        ref_anchor = {}
 
-        row_ind, col_ind = linear_sum_assignment(cost_matrix_np)
-        return {
-            logical_qubits[r]: physical_qubits[c]
-            for r, c in zip(row_ind, col_ind)
-        }
-
-    # ================================================================== #
-    # 8. Bijection builder + cost utilities (using nonlinear distance)    #
-    # ================================================================== #
-    def make_mapping(lq_phys):
-        md = list(range(self.num_qubits))
-        rmd = list(range(self.num_qubits))
-        for lq, pq in lq_phys.items():
-            cur = md[lq]
-            if cur == pq:
-                continue
-            displaced = rmd[pq]
-            md[lq] = pq
-            md[displaced] = cur
-            rmd[pq] = lq
-            rmd[cur] = displaced
-        return md, rmd
-
-    def qap_cost(md):
-        return sum(
-            w * cost_dist[md[q1]][md[q2]]
-            for (q1, q2), w in interaction_weight.items()
-        )
-
-    def swap_delta(p1, p2, md, rmd):
-        a, b = rmd[p1], rmd[p2]
-        delta = 0.0
-        for nb, w in lq_combined[a].items():
-            pp = md[nb]
-            if pp == p2:
-                continue
-            delta += w * (cost_dist[p2][pp] - cost_dist[p1][pp])
-        for nb, w in lq_combined[b].items():
-            pp = md[nb]
-            if pp == p1:
-                continue
-            delta += w * (cost_dist[p1][pp] - cost_dist[p2][pp])
-        return delta
-
-    def do_swap(p1, p2, md, rmd):
-        a, b = rmd[p1], rmd[p2]
-        md[a], md[b] = p2, p1
-        rmd[p1], rmd[p2] = b, a
-
-    # ================================================================== #
-    # 9. Two-tier local search (radius-3 for ILS, full for seeds)         #
-    # ================================================================== #
-    lq_by_degree = sorted(
-        logical_qubits,
-        key=lambda lq: weighted_degree.get(lq, 0),
-        reverse=True
-    )
-
-    def local_search(md, rmd, max_iters=350, full_every=6):
-        for iteration in range(max_iters):
-            improved = False
-            do_full = (iteration % full_every == 0)
-            for lq in lq_by_degree:
-                p1 = md[lq]
-                best_d, best_p2 = -1e-9, -1
-                # Use radius-3 for broader neighborhood
-                for p2 in pq_r3[p1]:
-                    d = swap_delta(p1, p2, md, rmd)
-                    if d < best_d:
-                        best_d, best_p2 = d, p2
-                if do_full:
-                    r3_set = set(pq_r3[p1])
-                    r3_set.add(p1)
-                    for p2 in physical_qubits:
-                        if p2 in r3_set:
-                            continue
-                        d = swap_delta(p1, p2, md, rmd)
-                        if d < best_d:
-                            best_d, best_p2 = d, p2
-                if best_p2 != -1:
-                    do_swap(p1, best_p2, md, rmd)
-                    improved = True
-            if not improved:
-                break
-        return md, rmd
-
-    def local_search_full(md, rmd, max_iters=450):
-        for _ in range(max_iters):
-            improved = False
-            for lq in lq_by_degree:
-                p1 = md[lq]
-                best_d, best_p2 = -1e-9, -1
-                for p2 in physical_qubits:
-                    if p2 == p1:
-                        continue
-                    d = swap_delta(p1, p2, md, rmd)
-                    if d < best_d:
-                        best_d, best_p2 = d, p2
-                if best_p2 != -1:
-                    do_swap(p1, best_p2, md, rmd)
-                    improved = True
-            if not improved:
-                break
-        return md, rmd
-
-    # ================================================================== #
-    # 10. Multi-start seeds                                               #
-    # ================================================================== #
-    best_md, best_rmd, best_cost = None, None, float('inf')
-    population = []
-
-    # Seed 1: K-core order, default centrality anchor
-    kcore_map = greedy_bfs_seed(kcore_placement_order)
-    md, rmd = make_mapping(kcore_map)
-    md, rmd = local_search_full(md, rmd)
-    c = qap_cost(md)
-    population.append((c, md[:], rmd[:]))
-    if c < best_cost:
-        best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    # Seed 2: K-core order, different anchor points
-    for anchor in phys_by_centrality[1:4]:
-        kcore_map2 = greedy_bfs_seed(kcore_placement_order, anchor_pq=anchor)
-        md, rmd = make_mapping(kcore_map2)
-        md, rmd = local_search_full(md, rmd)
-        c = qap_cost(md)
-        population.append((c, md[:], rmd[:]))
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    # Seed 3: Weighted-degree order
-    wd_order = sorted(logical_qubits, key=lambda q: weighted_degree.get(q, 0), reverse=True)
-    wd_map = greedy_bfs_seed(wd_order)
-    md, rmd = make_mapping(wd_map)
-    md, rmd = local_search_full(md, rmd)
-    c = qap_cost(md)
-    population.append((c, md[:], rmd[:]))
-    if c < best_cost:
-        best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    # Seed 4: Hungarian assignment
-    hung_map = hungarian_seed()
-    if hung_map is not None:
-        md, rmd = make_mapping(hung_map)
-        md, rmd = local_search_full(md, rmd)
-        c = qap_cost(md)
-        population.append((c, md[:], rmd[:]))
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    # Seed 5: Strongest-pair seed with k-core fill
-    if combined_weight:
-        top_pair = max(combined_weight, key=combined_weight.__getitem__)
-        sq1, sq2 = top_pair
-        best_pair_score = float('inf')
-        best_pp1, best_pp2 = physical_qubits[0], physical_qubits[min(1, n_pq - 1)]
-        for p1 in phys_by_centrality[:20]:
-            for p2 in pq_adj[p1]:
-                s = (1.0 / (pq_centrality[p1] + 0.01)) + (1.0 / (pq_centrality[p2] + 0.01))
-                if s < best_pair_score:
-                    best_pair_score = s
-                    best_pp1, best_pp2 = p1, p2
-
-        for a, b in [(sq1, sq2), (sq2, sq1)]:
-            partial = {a: best_pp1, b: best_pp2}
-            remaining_order = [lq for lq in kcore_placement_order if lq not in partial]
-            used = set(partial.values())
-            for lq in remaining_order:
-                neighbors_placed = [nb for nb in lq_combined[lq] if nb in partial]
-                if not neighbors_placed:
-                    for p in phys_by_centrality:
-                        if p not in used:
-                            partial[lq] = p
-                            used.add(p)
-                            break
-                else:
-                    best_p, best_s = None, float('inf')
-                    for p in physical_qubits:
-                        if p in used:
-                            continue
-                        s = sum(lq_combined[lq][nb] * cost_dist[p][partial[nb]]
-                                for nb in neighbors_placed)
-                        if s < best_s:
-                            best_s, best_p = s, p
-                    partial[lq] = best_p
-                    used.add(best_p)
-
-            md, rmd = make_mapping(partial)
-            md, rmd = local_search_full(md, rmd)
-            c = qap_cost(md)
-            population.append((c, md[:], rmd[:]))
-            if c < best_cost:
-                best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    # Seed 6: Front-layer focused seed
-    # Place qubits involved in layer-0 gates first, prioritizing adjacency
-    layer0_gates = [g for g in two_qubit_gates if gate_layer[g] == 0]
-    if layer0_gates:
-        fl_adj = defaultdict(set)
-        for g in layer0_gates:
-            q1, q2 = self.access[g]
-            fl_adj[q1].add(q2)
-            fl_adj[q2].add(q1)
-        fl_order = sorted(
-            logical_qubits,
-            key=lambda q: (len(fl_adj[q]), weighted_degree.get(q, 0)),
-            reverse=True
-        )
-        fl_map = greedy_bfs_seed(fl_order)
-        md, rmd = make_mapping(fl_map)
-        md, rmd = local_search_full(md, rmd)
-        c = qap_cost(md)
-        population.append((c, md[:], rmd[:]))
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
-
-    population = sorted(population, key=lambda x: x[0])[:8]
-
-    # ================================================================== #
-    # 11. ILS with diversified perturbations                              #
-    # ================================================================== #
-    n_restarts = min(35, max(10, n_lq // 2))
-
-    for restart in range(n_restarts):
-        base_idx = restart % len(population)
-        _, base_md, base_rmd = population[base_idx]
-        md = base_md[:]
-        rmd = base_rmd[:]
-        strategy = restart % 5
-
-        if strategy == 0:
-            # Cyclic rotation of random subset
-            k = rng.randint(max(3, n_lq // 4), max(4, n_lq // 2 + 1))
-            k = min(k, n_lq)
-            sample = rng.sample(logical_qubits, k)
-            positions = [md[lq] for lq in sample]
-            offset = rng.randint(1, k - 1)
-            rotated = positions[offset:] + positions[:offset]
-            for lq, tgt in zip(sample, rotated):
-                cur = md[lq]
-                if cur != tgt:
-                    do_swap(cur, tgt, md, rmd)
-
-        elif strategy == 1:
-            # Random pairwise swaps
-            n_swaps = rng.randint(2, max(3, n_lq // 3))
-            pool = rng.sample(logical_qubits, min(n_swaps * 2, n_lq))
-            for i in range(0, len(pool) - 1, 2):
-                do_swap(md[pool[i]], md[pool[i + 1]], md, rmd)
-
-        elif strategy == 2:
-            # Worst-pair relocation
-            worst = sorted(
-                interaction_weight.items(),
-                key=lambda x: x[1] * cost_dist[md[x[0][0]]][md[x[0][1]]],
-                reverse=True
-            )
-            moved = set()
-            for (q1, q2), _ in worst[:max(2, n_lq // 5)]:
-                if q1 in moved or q2 in moved:
+    # --- 3. P1 primary: floored depth-decay + frontier-boosted interaction weights ---
+    all_2q_gates = {g: qs for g, qs in access.items() if len(qs) == 2}
+    if dag_predecessors2q and dag2q:
+        in_count = {g: sum(1 for p in dag_predecessors2q.get(g, set()) if p in all_2q_gates) for g in all_2q_gates}
+        gate_depth = {g: 0 for g in all_2q_gates}
+        bfs = collections.deque(g for g in all_2q_gates if in_count[g] == 0)
+        while bfs:
+            g = bfs.popleft()
+            d = gate_depth[g]
+            for succ in dag2q.get(g, set()):
+                if succ not in all_2q_gates:
                     continue
-                best_cost_pair = float('inf')
-                best_pp1, best_pp2 = md[q1], md[q2]
-                for pp1 in phys_by_centrality[:max(8, n_pq // 4)]:
-                    for pp2 in pq_adj[pp1]:
-                        cost_pair = 0.0
-                        for nb, w in lq_combined[q1].items():
-                            pnb = pp2 if nb == q2 else md[nb]
-                            cost_pair += w * cost_dist[pp1][pnb]
-                        for nb, w in lq_combined[q2].items():
-                            pnb = pp1 if nb == q1 else md[nb]
-                            cost_pair += w * cost_dist[pp2][pnb]
-                        if cost_pair < best_cost_pair:
-                            best_cost_pair = cost_pair
-                            best_pp1, best_pp2 = pp1, pp2
-                cur_p1 = md[q1]
-                if best_pp1 != cur_p1:
-                    do_swap(cur_p1, best_pp1, md, rmd)
-                cur_p2 = md[q2]
-                if best_pp2 != cur_p2:
-                    do_swap(cur_p2, best_pp2, md, rmd)
-                moved.update([q1, q2])
+                if d + 1 > gate_depth[succ]:
+                    gate_depth[succ] = d + 1
+                in_count[succ] -= 1
+                if in_count[succ] == 0:
+                    bfs.append(succ)
+    else:
+        gate_depth = {g: 0 for g in all_2q_gates}
+    max_depth = max(gate_depth.values(), default=1) or 1
 
-        elif strategy == 3:
-            # Population crossover
-            if len(population) >= 2:
-                other_idx = rng.randint(0, len(population) - 1)
-                _, other_md, _ = population[other_idx]
-                crossover_size = max(1, n_lq // 3)
-                crossover_lqs = lq_by_degree[:crossover_size]
-                for lq in crossover_lqs:
-                    target_pq = other_md[lq]
-                    cur_pq = md[lq]
-                    if cur_pq != target_pq:
-                        do_swap(cur_pq, target_pq, md, rmd)
+    ALPHA = 4.0
+    DEPTH_FLOOR = 0.18  # MUTATION: prevent exp(-ALPHA*d/D) from crushing late-layer weights
+    interaction = collections.defaultdict(float)
+    for gate_id, qubits in access.items():
+        if len(qubits) != 2:
+            continue
+        q0, q1 = qubits[0], qubits[1]
+        crit = dag_dependencies_count[gate_id] if gate_id < len(dag_dependencies_count) else 1
+        depth = gate_depth.get(gate_id, 0)
+        frontier = not dag_predecessors2q.get(gate_id)
+        decay = max(math.exp(-ALPHA * depth / max_depth), DEPTH_FLOOR)
+        w = math.sqrt(max(crit, 1)) * decay * (4.0 if frontier else 1.0)
+        interaction[(q0, q1)] += w
+        interaction[(q1, q0)] += w
 
-        else:
-            # Strategy 4: Segment reversal of high-degree qubits
-            seg_size = rng.randint(max(2, n_lq // 6), max(3, n_lq // 3))
-            start = rng.randint(0, max(0, len(lq_by_degree) - seg_size))
-            segment = lq_by_degree[start:start + seg_size]
-            positions = [md[lq] for lq in segment]
-            positions.reverse()
-            for lq, tgt in zip(segment, positions):
-                cur = md[lq]
-                if cur != tgt:
-                    do_swap(cur, tgt, md, rmd)
+    logical_degree = collections.defaultdict(float)
+    for (l0, l1), w in interaction.items():
+        if l0 < l1:
+            logical_degree[l0] += w
+            logical_degree[l1] += w
 
-        md, rmd = local_search(md, rmd)
-        c = qap_cost(md)
-        if c < best_cost:
-            best_cost, best_md, best_rmd = c, md[:], rmd[:]
-        if len(population) < 8 or c < population[-1][0]:
-            population.append((c, md[:], rmd[:]))
-            population = sorted(population, key=lambda x: x[0])[:8]
+    # --- 4. CROSSOVER: anchor-referenced L×N cost + Hungarian matching ---
+    logical_list = sorted(logical_qubits_used)
+    L = len(logical_list)
+    lq_index = {lq: i for i, lq in enumerate(logical_list)}
 
-    # ================================================================== #
-    # 12. Cost-biased simulated annealing                                 #
-    # ================================================================== #
-    md = best_md[:]
-    rmd = best_rmd[:]
-    current_cost = best_cost
+    SELF_ANCHOR_WEIGHT = 0.5
+    neighbor_anchors = {}
+    for lq in logical_list:
+        entries = []
+        for olq in logical_list:
+            if olq == lq:
+                continue
+            w = interaction.get((lq, olq), 0.0)
+            if w > 0 and olq in ref_anchor:
+                entries.append((ref_anchor[olq], w))
+        neighbor_anchors[lq] = entries
 
-    active_pqs = list(set(md[lq] for lq in logical_qubits if lq_combined[lq]))
-    if len(active_pqs) < 2:
-        active_pqs = physical_qubits
+    cost = [[0.0] * num_qubits for _ in range(L)]
+    for i, lq in enumerate(logical_list):
+        na = neighbor_anchors[lq]
+        own_a = ref_anchor.get(lq, -1)
+        for pq in range(num_qubits):
+            c = 0.0
+            for apq, w in na:
+                c += w * distance_matrix[pq][apq]
+            if own_a >= 0:
+                c += SELF_ANCHOR_WEIGHT * distance_matrix[pq][own_a]
+            cost[i][pq] = c
 
-    # Precompute per-qubit cost contributions for biased sampling
-    def compute_qubit_costs(cur_md):
-        qcost = defaultdict(float)
-        for (q1, q2), w in interaction_weight.items():
-            c_val = w * cost_dist[cur_md[q1]][cur_md[q2]]
-            qcost[cur_md[q1]] += c_val
-            qcost[cur_md[q2]] += c_val
-        return qcost
+    placed, placed_rev = {}, {}
+    matched = False
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+        cm = np.array(cost, dtype=float)
+        row_ind, col_ind = linear_sum_assignment(cm)
+        for i, pq in zip(row_ind, col_ind):
+            lq = logical_list[int(i)]
+            placed[lq] = int(pq)
+            placed_rev[int(pq)] = lq
+        matched = True
+    except Exception:
+        matched = False
 
-    n_sa_iters = max(6000, n_lq * 500)
-    T_start = max(current_cost * 0.04, 0.5)
-    T_end = max(current_cost * 0.00002, 1e-4)
-    sa_alpha = (T_end / T_start) ** (1.0 / n_sa_iters) if n_sa_iters > 0 else 1.0
-    T = T_start
+    if not matched:
+        remaining_lq = set(logical_list)
+        remaining_pq = set(range(num_qubits))
+        while remaining_lq:
+            best_regret = -1.0
+            best_choice = None
+            for lq in remaining_lq:
+                i = lq_index[lq]
+                pairs = sorted((cost[i][pq], pq) for pq in remaining_pq)
+                if not pairs:
+                    break
+                regret = (pairs[1][0] - pairs[0][0]) if len(pairs) > 1 else 0.0
+                if regret > best_regret or best_choice is None:
+                    best_regret = regret
+                    best_choice = (lq, pairs[0][1])
+            lq, pq = best_choice
+            placed[lq] = pq
+            placed_rev[pq] = lq
+            remaining_lq.remove(lq)
+            remaining_pq.remove(pq)
 
-    no_improve = 0
-    reheat_interval = n_sa_iters // 4
+    # --- 5. P1 refinement: bounded unbiased 2-opt polish ---
+    ll = sorted(placed.keys(), key=lambda lq: -logical_degree.get(lq, 0.0))
+    nbr = {lq: [(olq, interaction[(lq, olq)]) for olq in ll
+                if lq != olq and interaction[(lq, olq)] > 0] for lq in ll}
+    nbr_sets = {lq: {olq for olq, _ in nbr[lq]} for lq in ll}
+    swap_pairs = [(l0, l1) for i, l0 in enumerate(ll) for l1 in ll[i + 1:]
+                  if l1 in nbr_sets[l0] or (nbr_sets[l0] & nbr_sets[l1])]
 
-    # Initialize cost-biased sampling
-    qubit_costs = compute_qubit_costs(md)
-    high_cost_pqs = sorted(active_pqs, key=lambda p: qubit_costs.get(p, 0), reverse=True)
-    top_half = max(2, len(high_cost_pqs) // 2)
+    for _ in range(40):
+        improved = False
+        for l0, l1 in swap_pairs:
+            p0, p1 = placed[l0], placed[l1]
+            delta = 0.0
+            for lq in ll:
+                if lq == l0 or lq == l1:
+                    continue
+                pq = placed[lq]
+                w0 = interaction.get((l0, lq), 0.0)
+                w1 = interaction.get((l1, lq), 0.0)
+                if w0:
+                    delta += w0 * (distance_matrix[p1][pq] - distance_matrix[p0][pq])
+                if w1:
+                    delta += w1 * (distance_matrix[p0][pq] - distance_matrix[p1][pq])
+            if delta < -1e-9:
+                placed[l0], placed[l1] = p1, p0
+                placed_rev[p0], placed_rev[p1] = l1, l0
+                improved = True
+        for lq in ll:
+            pq_cur = placed[lq]
+            cost_cur = sum(w * distance_matrix[pq_cur][placed[olq]] for olq, w in nbr[lq] if olq in placed)
+            best_pq, best_cost_lq = pq_cur, cost_cur
+            for pq_new in range(num_qubits):
+                if pq_new == pq_cur or pq_new in placed_rev:
+                    continue
+                c = sum(w * distance_matrix[pq_new][placed[olq]] for olq, w in nbr[lq] if olq in placed)
+                if c < best_cost_lq - 1e-9:
+                    best_cost_lq = c
+                    best_pq = pq_new
+            if best_pq != pq_cur:
+                del placed_rev[pq_cur]
+                placed[lq] = best_pq
+                placed_rev[best_pq] = lq
+                improved = True
+        if not improved:
+            break
 
-    for sa_iter in range(n_sa_iters):
-        # Cost-biased sampling: 60% from high-cost qubits, 40% random
-        if rng.random() < 0.6 and len(high_cost_pqs) >= 2:
-            p1 = high_cost_pqs[rng.randint(0, min(top_half - 1, len(high_cost_pqs) - 1))]
-            p2 = rng.choice(active_pqs)
-            while p2 == p1:
-                p2 = rng.choice(active_pqs)
-        else:
-            p1, p2 = rng.sample(active_pqs, 2)
+    # --- 6. Assemble injective list mappings ---
+    mapping = [-1] * num_qubits
+    reverse_mapping = [-1] * num_qubits
+    for lq, pq in placed.items():
+        if 0 <= lq < num_qubits:
+            mapping[lq] = pq
+            reverse_mapping[pq] = lq
+    used_phys = {pq for pq in mapping if pq >= 0}
+    free_phys = [p for p in range(num_qubits) if p not in used_phys]
+    fi = 0
+    for lq in range(num_qubits):
+        if mapping[lq] < 0:
+            mapping[lq] = free_phys[fi]
+            reverse_mapping[free_phys[fi]] = lq
+            fi += 1
 
-        delta = swap_delta(p1, p2, md, rmd)
-        if delta < 0 or (T > 1e-9 and rng.random() < math.exp(-delta / T)):
-            do_swap(p1, p2, md, rmd)
-            current_cost += delta
-            if current_cost < best_cost:
-                best_cost = current_cost
-                best_md = md[:]
-                best_rmd = rmd[:]
-                no_improve = 0
-            else:
-                no_improve += 1
-        else:
-            no_improve += 1
-        T *= sa_alpha
+    self.mapping_dict = mapping
+    self.reverse_mapping_dict = reverse_mapping
+    if getattr(self, 'use_isl', False):
+        self.isl_mapping = dict_to_isl_map(dict(enumerate(self.mapping_dict)))
 
-        # Periodically refresh cost-biased sampling
-        if sa_iter % 1000 == 999:
-            qubit_costs = compute_qubit_costs(md)
-            high_cost_pqs = sorted(active_pqs, key=lambda p: qubit_costs.get(p, 0), reverse=True)
-
-        if no_improve >= reheat_interval:
-            T = max(T, T_start * 0.12)
-            no_improve = 0
-
-    # ================================================================== #
-    # 13. Adaptive weight boosting + re-optimization                      #
-    # ================================================================== #
-    # Identify pairs still far apart, boost their weights, re-run local search
-    pair_costs = []
-    for (q1, q2), w in interaction_weight.items():
-        pc = w * cost_dist[best_md[q1]][best_md[q2]]
-        pair_costs.append(((q1, q2), w, pc))
-
-    if pair_costs:
-        pair_costs.sort(key=lambda x: x[2], reverse=True)
-        median_cost = pair_costs[len(pair_costs) // 2][2]
-
-        # Boost weights of above-median-cost pairs
-        boosted_combined = defaultdict(dict)
-        for (q1, q2), w_orig in combined_weight.items():
-            pc = interaction_weight.get((q1, q2), 0) * cost_dist[best_md[q1]][best_md[q2]]
-            boost = 1.5 if pc > median_cost else 1.0
-            boosted_combined[q1][q2] = w_orig * boost
-            boosted_combined[q2][q1] = w_orig * boost
-
-        # Temporarily swap lq_combined for boosted version
-        old_lq_combined = lq_combined
-        lq_combined = boosted_combined
-
-        md = best_md[:]
-        rmd = best_rmd[:]
-        md, rmd = local_search_full(md, rmd, max_iters=300)
-
-        # Evaluate with ORIGINAL weights
-        lq_combined = old_lq_combined
-        c = qap_cost(md)
-        if c < best_cost:
-            best_cost = c
-            best_md = md[:]
-            best_rmd = rmd[:]
-
-    # ================================================================== #
-    # 14. Final full local search                                         #
-    # ================================================================== #
-    best_md, best_rmd = local_search_full(best_md, best_rmd, max_iters=500)
-
-    self.mapping_dict = best_md
-    self.reverse_mapping_dict = best_rmd
-
-    if self.use_isl:
-        self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+    assert len(set(self.mapping_dict)) == len(self.mapping_dict)

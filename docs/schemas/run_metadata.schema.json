@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "BackendInfo": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "n_qubits": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Qubits"
+        },
+        "topology_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topology Hash"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "BackendInfo",
+      "type": "object"
+    },
+    "BenchmarksInfo": {
+      "additionalProperties": true,
+      "properties": {
+        "dir": {
+          "title": "Dir",
+          "type": "string"
+        },
+        "circuits": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Circuits",
+          "type": "array"
+        },
+        "set_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Set Hash"
+        }
+      },
+      "required": [
+        "dir"
+      ],
+      "title": "BenchmarksInfo",
+      "type": "object"
+    },
+    "LLMInfo": {
+      "additionalProperties": true,
+      "properties": {
+        "cli_command": {
+          "title": "Cli Command",
+          "type": "string"
+        },
+        "model_reported": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Reported"
+        }
+      },
+      "required": [
+        "cli_command"
+      ],
+      "title": "LLMInfo",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Written once per run to ``outputs/logs/{run_id}/run_metadata.json``.",
+  "properties": {
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "experiment_name": {
+      "title": "Experiment Name",
+      "type": "string"
+    },
+    "timestamp_utc": {
+      "title": "Timestamp Utc",
+      "type": "string"
+    },
+    "git_commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Git Commit"
+    },
+    "git_dirty": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Git Dirty"
+    },
+    "framework_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Framework Version"
+    },
+    "python_version": {
+      "title": "Python Version",
+      "type": "string"
+    },
+    "platform": {
+      "title": "Platform",
+      "type": "string"
+    },
+    "llm": {
+      "$ref": "#/$defs/LLMInfo"
+    },
+    "seeds": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "title": "Seeds",
+      "type": "object"
+    },
+    "config": {
+      "additionalProperties": true,
+      "title": "Config",
+      "type": "object"
+    },
+    "feature_flags": {
+      "additionalProperties": {
+        "type": "boolean"
+      },
+      "title": "Feature Flags",
+      "type": "object"
+    },
+    "backend": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BackendInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "benchmarks": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BenchmarksInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "prompts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "prompt_filename -> sha256 hash",
+      "title": "Prompts",
+      "type": "object"
+    }
+  },
+  "required": [
+    "run_id",
+    "experiment_name",
+    "timestamp_utc",
+    "python_version",
+    "platform",
+    "llm"
+  ],
+  "title": "RunMetadata",
+  "type": "object"
+}

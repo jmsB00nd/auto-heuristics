@@ -1,16 +1,26 @@
-You are an expert Quantum Compiler Algorithm Engineer. 
-Your objective is to write the complete, executable Python code for the Initial Mapping (Placement) problem in quantum circuit compilation based EXACTLY on the provided algorithm idea.
+Task : implement a given algorithmic idea as an executable `init_mapping(self)` function. The idea NAME and DESCRIPTION are provided Below.
 
-CRITICAL ENGINEERING CONSTRAINTS:
-1. GUARANTEE VALIDITY: You must generate a strict 1-to-1 mapping. Every logical qubit used in the circuit must be mapped to exactly one unique physical qubit.
-2. COMPUTATIONAL STABILITY: Your algorithm must run efficiently. Avoid exponential time complexities.
-3. VARIABLES: You must populate `self.mapping_dict` (logical to physical) and `self.reverse_mapping_dict` (physical to logical).
-4. NO INTERACTIVE TOOLS: You are interacting with a fully automated pipeline via standard text output. DO NOT ask for write permissions. DO NOT try to save files. DO NOT use external tools or artifacts. You MUST output the complete code immediately in this exact response.
+FUNCTION CONTRACT
+- Signature: `def init_mapping(self):` — method on the Qlosure class.
+- Must populate:
+  • `self.mapping_dict`: a list-like where `self.mapping_dict[logical_q] = physical_q`.
+  • `self.reverse_mapping_dict`: inverse — `self.reverse_mapping_dict[physical_q] = logical_q`.
+- Must NOT modify `self.access2q`, the DAG, or any other circuit state.
+- Must NOT raise. If the chosen strategy cannot produce a full mapping, fall back to identity for remaining qubits.
+- Must be self-contained: any helper functions go inside `init_mapping`. Do not assume imports beyond the standard scientific Python stack (numpy, scipy, networkx, collections, heapq, math, itertools, random). If you use scipy or networkx, `import` them inside the function.
 
-REQUIRED OUTPUT FORMAT :
+RESPONSE FORMAT (in this exact order)
 
-```python
-def init_mapping(self):
-    # Your code here
-    # MUST populate self.mapping_dict and self.reverse_mapping_dict
-```
+PLAN: 3–6 numbered lines describing the algorithm at pseudocode level. Reference the specific `self.*` attributes each step reads.
+
+VALIDITY_ARGUMENT: 2–4 sentences explaining why the produced mapping is guaranteed to be a strict 1-to-1 injection across all logical qubits appearing in `self.access2q`. Name the mechanism (e.g., "Hungarian assignment on a square padded cost matrix", "greedy placement with a physical-qubit `used` set").
+
+COMPLEXITY: one line — big-O in N = `self.num_qubits` and M = number of 2-qubit gates.
+
+Code: a single ```python block with the complete `init_mapping(self)` function. Note: `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS indexed by qubit id (NOT dicts). The LAST executable line inside the function must be:
+    assert len(set(self.mapping_dict)) == len(self.mapping_dict)
+to enforce the 1-to-1 invariant at runtime.
+
+HARD RULES
+- No prose after the code block. No file-writing language. No "let me know if…".
+- The algorithm must match the idea DESCRIPTION provided above; do not substitute a different strategy.

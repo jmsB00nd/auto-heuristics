@@ -2,12 +2,24 @@
 import random
 import islpy as isl
 import networkx as nx
+import re
 
 from qiskit import QuantumCircuit
 from qiskit.transpiler import CouplingMap
 from qiskit.transpiler.passes import SabreLayout
 from qiskit.converters import circuit_to_dag
+from qiskit import QuantumCircuit                                                                                                    
+from qiskit.transpiler import CouplingMap
 
+from mqt.qmap.plugins.qiskit.sc import compile_                                                                                      
+from mqt.qmap.sc import Architecture, Method, InitialLayout  
+
+from pytket.qasm import circuit_from_qasm_str
+from pytket.architecture import Architecture
+from pytket.placement import GraphPlacement                                                                                                                
+
+import cirq
+from cirq.contrib.qasm_import import circuit_from_qasm
 
 def generate_random_initial_mapping(num_qubits: int):
     """
@@ -38,6 +50,121 @@ def generate_trivial_initial_mapping(num_qubits: int):
     """
     mapping = list(range(num_qubits))          # mapping[i] = i
     reverse_mapping = list(range(num_qubits))  # reverse_mapping[i] = i
+    return mapping, reverse_mapping
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                   
+                                                                                                                                    
+def generate_qmap_initial_mapping(qasm_code, backend_edges, num_qubits):                                                             
+    circuit = QuantumCircuit.from_qasm_str(qasm_code)                                                                                
+                                                                                                                                    
+    edges = {tuple(e) for e in CouplingMap(backend_edges).get_edges()}                                                               
+    max_q = max(max(u, v) for u, v in edges) + 1                                                                                     
+                                                                                                                                    
+    arch = Architecture()
+    arch.num_qubits = max_q                                                                                                          
+    arch.coupling_map = edges
+                                                                                                                                    
+    mapped_circuit, results = compile_(
+        circuit,                                                                                                                     
+        arch=arch,
+        method=Method.heuristic,                                                                                                     
+        initial_layout=InitialLayout.dynamic,
+        post_mapping_optimizations=False,                                                                                            
+        add_measurements_to_mapped_circuit=False,                                                                                    
+    )                                                                                                                                
+                                                                                                                                    
+    layout = mapped_circuit.layout.initial_layout                                                                                    
+                
+    mapping = [-1] * num_qubits                                                                                                      
+    reverse_mapping = [-1] * num_qubits
+                                                                                                                                    
+    for v, p in layout.get_virtual_bits().items():
+        if v._register.name == "ancilla":                                                                                            
+            continue                                                                                                                 
+        logical_idx = v._index
+        physical_idx = p                                                                                                             
+        if logical_idx < num_qubits and physical_idx < num_qubits:
+            mapping[logical_idx] = physical_idx                                                                                      
+            reverse_mapping[physical_idx] = logical_idx
+                                                                                                                                    
+    return mapping, reverse_mapping
+
+
+
+def generate_pytket_initial_mapping(qasm_code, backend_edges, num_qubits):
+    """
+    Use pytket's GraphPlacement to generate an initial layout.
+    Returns:
+    - mapping[logical] = physical
+    - reverse_mapping[physical] = logical
+    """
+
+    circuit = circuit_from_qasm_str(qasm_code)
+
+    # Architecture needs a sequence, not a set
+    edges = list(backend_edges)
+
+    # If your edges are flat integer pairs, this is enough:
+    architecture = Architecture(edges)
+
+    placer = GraphPlacement(architecture)
+    placement_map = placer.get_placement_map(circuit)
+
+    mapping = [-1] * num_qubits
+    reverse_mapping = [-1] * num_qubits
+
+    for logical_qb, physical_node in placement_map.items():
+        if logical_qb.reg_name == "ancilla":
+            continue
+
+        logical_idx = logical_qb.index[0]
+        physical_idx = physical_node.index[0]
+
+        if 0 <= logical_idx < num_qubits and 0 <= physical_idx < num_qubits:
+            mapping[logical_idx] = physical_idx
+            reverse_mapping[physical_idx] = logical_idx
+
+    return mapping, reverse_mapping
+
+def generate_cirq_initial_mapping(qasm_code, backend_edges, num_qubits):
+    """
+    Use Cirq's RouteCQC transformer to generate an initial layout.
+    Returned as arrays:
+    - mapping[logical] = physical
+    - reverse_mapping[physical] = logical
+    """
+    circuit = circuit_from_qasm(qasm_code)
+    
+    device_graph = nx.Graph()
+    for source, target in backend_edges:
+        device_graph.add_edge(cirq.LineQubit(source), cirq.LineQubit(target))
+        
+    router = cirq.RouteCQC(device_graph)
+    
+    routed_circuit, initial_map, swap_map = router.route_circuit(circuit)
+    
+    mapping = [-1] * num_qubits
+    reverse_mapping = [-1] * num_qubits
+    
+    for logical_q, physical_q in initial_map.items():
+        if "ancilla" in str(logical_q).lower():
+            continue
+
+        physical_idx = physical_q.x
+        
+        if isinstance(logical_q, cirq.LineQubit):
+            logical_idx = logical_q.x
+        else:
+            match = re.search(r'\d+', str(logical_q))
+            if match:
+                logical_idx = int(match.group())
+            else:
+                continue  # Skip if we can't parse a valid index
+                
+        if 0 <= logical_idx < num_qubits and 0 <= physical_idx < num_qubits:
+            mapping[logical_idx] = physical_idx
+            reverse_mapping[physical_idx] = logical_idx
+            
     return mapping, reverse_mapping
 
 

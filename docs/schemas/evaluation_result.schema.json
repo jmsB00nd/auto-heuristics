@@ -1,0 +1,40 @@
+{
+  "additionalProperties": true,
+  "description": "Formalizes ``evaluation_results.json`` emitted per idea / refinement round.",
+  "properties": {
+    "mean_swaps": {
+      "title": "Mean Swaps",
+      "type": "number"
+    },
+    "mean_depth": {
+      "default": 0.0,
+      "title": "Mean Depth",
+      "type": "number"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    },
+    "failures": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Failures",
+      "type": "array"
+    }
+  },
+  "required": [
+    "mean_swaps"
+  ],
+  "title": "EvaluationResult",
+  "type": "object"
+}

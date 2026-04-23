@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+
+# Volatile run artifacts (keep heuristics/ and experiment_history.json tracked)
+outputs/logs/
+outputs/results/
+outputs/experiment_results/

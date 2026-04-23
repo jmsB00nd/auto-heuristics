@@ -99,6 +99,39 @@ def compute_dependencies_length(graph, predecessors,):
     return dependents_length
 
 
+def compute_longest_chain_lengths(graph, predecessors):
+    """
+    For each node in the DAG, compute the length of the longest outgoing chain
+    (i.e., this node's critical-path length). Leaves have length 1; interior
+    nodes have 1 + max(length of successors).
+
+    Returns a list indexed by node id (same shape as compute_transitive_closure_bitset).
+    """
+    all_nodes = list(graph.keys())
+    if not all_nodes:
+        return []
+
+    out_degree = {n: len(graph.get(n, [])) for n in all_nodes}
+    queue = deque([n for n in all_nodes if out_degree[n] == 0])
+
+    length = [0] * (max(all_nodes) + 1)
+    for n in all_nodes:
+        length[n] = 1
+
+    while queue:
+        x = queue.popleft()
+        x_len = length[x]
+        for p in predecessors.get(x, []):
+            candidate = x_len + 1
+            if length[p] < candidate:
+                length[p] = candidate
+            out_degree[p] -= 1
+            if out_degree[p] == 0:
+                queue.append(p)
+
+    return length
+
+
 def compute_transitive_closure_bitset(graph, predecessors):
 
     all_nodes = list(graph.keys())

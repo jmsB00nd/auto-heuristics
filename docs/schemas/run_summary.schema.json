@@ -1,0 +1,145 @@
+{
+  "$defs": {
+    "BestEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "idea_name": {
+          "title": "Idea Name",
+          "type": "string"
+        },
+        "mean_swaps": {
+          "title": "Mean Swaps",
+          "type": "number"
+        },
+        "code_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Path"
+        }
+      },
+      "required": [
+        "idea_name",
+        "mean_swaps"
+      ],
+      "title": "BestEntry",
+      "type": "object"
+    },
+    "RankingEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "rank": {
+          "title": "Rank",
+          "type": "integer"
+        },
+        "idea_name": {
+          "title": "Idea Name",
+          "type": "string"
+        },
+        "mean_swaps": {
+          "title": "Mean Swaps",
+          "type": "number"
+        },
+        "mean_depth": {
+          "title": "Mean Depth",
+          "type": "number"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "code_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Path"
+        }
+      },
+      "required": [
+        "rank",
+        "idea_name",
+        "mean_swaps",
+        "mean_depth"
+      ],
+      "title": "RankingEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Written at end of pipeline to ``outputs/logs/{run_id}/summary.json``.",
+  "properties": {
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "stage_timings_seconds": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Stage Timings Seconds",
+      "type": "object"
+    },
+    "token_totals": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Token Totals",
+      "type": "object"
+    },
+    "counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Counts",
+      "type": "object"
+    },
+    "ranking": {
+      "items": {
+        "$ref": "#/$defs/RankingEntry"
+      },
+      "title": "Ranking",
+      "type": "array"
+    },
+    "best": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BestEntry"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "run_id",
+    "status"
+  ],
+  "title": "RunSummary",
+  "type": "object"
+}
