@@ -1,0 +1,22 @@
+TASK: Extract discrete algorithmic Traits from the `init_mapping(self)` heuristics below. A Trait is a single, recognizable algorithmic primitive that a heuristic uses (e.g. "uses_priority_queue", "places_high_degree_first", "applies_spectral_embedding"). Traits should be small, composable concepts — not full strategy descriptions.
+
+You will be shown the top heuristics in the current population (heuristic name, mean SWAPs, code).
+
+[HEURISTICS]
+{heuristics_block}
+
+OUTPUT FORMAT — strict JSON, nothing else, no markdown fence:
+
+{{
+  "traits": [
+    {{"label": "<short_snake_case_label>", "exemplars": ["<heuristic_name>", ...]}},
+    ...
+  ]
+}}
+
+Rules:
+- ≤10 traits total. Prefer fewer if the population is homogeneous.
+- Labels are 1–4 words, snake_case, lowercase.
+- "exemplars" lists the names of heuristics where the trait clearly appears.
+- Do NOT include traits that appear in only one heuristic unless they are highly distinctive.
+- Do NOT describe strengths or weaknesses; just name the primitive.

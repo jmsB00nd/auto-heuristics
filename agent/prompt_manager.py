@@ -18,7 +18,10 @@ class PromptManager:
         self.refinement_prompt = self._load(f"{self.problem}/refinement.txt")
         self.memory_summary_prompt = self._load(f"{self.problem}/memory_summary.txt")
         self.crossover_prompt = self._load(f"{self.problem}/crossover.txt")
-        self.reflection_prompt = self._load(f"{self.problem}/reflection.txt")
+        self.system_reflector = self._load(f"{self.problem}/system_reflector.txt")
+        self.trait_extraction_prompt = self._load(f"{self.problem}/trait_extraction.txt")
+        self.hypothesis_generation_prompt = self._load(f"{self.problem}/hypothesis_generation.txt")
+        self.exploration_ideas_prompt = self._load(f"{self.problem}/exploration_ideas.txt")
 
     def _load(self, relative_path: str) -> str:
         path = self.prompts_dir / relative_path

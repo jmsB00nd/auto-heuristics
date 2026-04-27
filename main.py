@@ -31,8 +31,7 @@ def main() -> None:
         benchmark_dir="benchmarks/qasmbench-large/",
         prompts_dir="/home/jmsb00nd/Documents/auto-heuristics/prompts",
         problem="mapping",
-        run_stage3_5_reflection=True,
-        run_stage4_iterative_refinement=True,
+        run_evolution=True,
         experiment_name=args.experiment_name,
         seed=args.seed,
     )

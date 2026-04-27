@@ -13,23 +13,33 @@ def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
 
-def save_log(stage_dir: str, filename: str, content: str):
-    """Save a text log file inside the given stage directory."""
+def save_log(stage_dir: str, filename: str, content: str, quiet: bool = False):
+    """Save a text log file inside the given stage directory.
+
+    ``quiet=True`` suppresses the console echo — useful in high-volume
+    stages (e.g. per-child crossover artifacts) where printing one line
+    per file drowns the meaningful output.
+    """
     ensure_dir(stage_dir)
     filepath = os.path.join(stage_dir, filename)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
-    console.print(f"[dim]  -> Saved {filepath}[/dim]")
+    if not quiet:
+        console.print(f"[dim]  -> Saved {filepath}[/dim]")
     return filepath
 
 
-def save_json(stage_dir: str, filename: str, data):
-    """Save a JSON log file inside the given stage directory."""
+def save_json(stage_dir: str, filename: str, data, quiet: bool = False):
+    """Save a JSON log file inside the given stage directory.
+
+    See ``save_log`` for ``quiet``.
+    """
     ensure_dir(stage_dir)
     filepath = os.path.join(stage_dir, filename)
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
-    console.print(f"[dim]  -> Saved {filepath}[/dim]")
+    if not quiet:
+        console.print(f"[dim]  -> Saved {filepath}[/dim]")
     return filepath
 
 

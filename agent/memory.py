@@ -4,11 +4,12 @@ import random
 from typing import List, Dict, Optional
 
 class MemoryManager:
-    """Manages persistent history of evaluated ideas and reflections."""
+    """Manages persistent history of evaluated ideas and the cross-run
+    Hypothesis-Driven Knowledge Graph."""
     def __init__(self, filepath: str, active_limit: int = 20):
         self.filepath = filepath
         self.history: List[Dict] = []
-        self.reflections: List[str] = []
+        self.knowledge_graph: Optional[Dict] = None
         self.archive: List[Dict] = []
         self.active_limit = active_limit
         self.load()
@@ -19,18 +20,18 @@ class MemoryManager:
                 with open(self.filepath, 'r') as f:
                     data = json.load(f)
                     self.history = data.get('history', [])
-                    self.reflections = data.get('reflections', [])
+                    self.knowledge_graph = data.get('knowledge_graph')  # legacy 'reflections' key silently dropped
                     self.archive = data.get('archive', [])
             except json.JSONDecodeError:
                 self.history = []
-                self.reflections = []
+                self.knowledge_graph = None
                 self.archive = []
 
     def save(self):
         with open(self.filepath, 'w') as f:
             json.dump({
                 'history': self.history,
-                'reflections': self.reflections,
+                'knowledge_graph': self.knowledge_graph,
                 'archive': self.archive
             }, f, indent=2)
 
@@ -47,11 +48,12 @@ class MemoryManager:
         self._maybe_archive()
         self.save()
 
-    def add_reflection(self, reflection: str):
-        self.reflections.append(reflection)
-        if len(self.reflections) > 3:
-            self.reflections = self.reflections[-3:]
+    def set_knowledge_graph(self, kg_dict: Optional[Dict]):
+        self.knowledge_graph = kg_dict
         self.save()
+
+    def get_knowledge_graph(self) -> Optional[Dict]:
+        return self.knowledge_graph
 
     def get_top_k(self, k: int = 3) -> List[Dict]:
         """Returns the top K successful ideas sorted by mean_swaps."""
@@ -62,9 +64,6 @@ class MemoryManager:
         """Returns the worst K successful ideas (to learn from mistakes)."""
         valid = [x for x in self.history if x['error'] is None]
         return sorted(valid, key=lambda x: x['mean_swaps'], reverse=True)[:k]
-
-    def get_latest_reflection(self) -> str:
-        return self.reflections[-1] if self.reflections else ""
 
     def get_diverse_parents(self, k: int = 2) -> List[Dict]:
         """Select k parents from top performers, preferring diversity."""

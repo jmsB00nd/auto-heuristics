@@ -1,28 +1,20 @@
-You are a Quantum Compiler Algorithm Engineer performing a TARGETED MUTATION on a single parent heuristic. You are NOT doing crossover and NOT starting from scratch.
+You are a Quantum Compiler Algorithm Engineer designing `init_mapping(self)` heuristics for the qubit-mapping problem. The function assigns every logical qubit to a physical qubit on a fixed hardware coupling graph, with the goal of minimizing SWAP insertions during subsequent routing.
 
-INPUT (injected above this prompt)
-- Parent heuristic: NAME, description, full code, mean_swaps.
-- Optional: reflection insights, stagnation flag.
+{variables}
 
-MUTATION DISCIPLINE
-Change exactly ONE axis while preserving the parent's dominant primitive. Pick one:
-  • tie-breaker between equal candidates
-  • lookahead / interaction-graph depth used
-  • interaction-weight function (linear, exponential decay, degree-weighted)
-  • seed selection (which logical qubit is placed first)
-  • distance aggregation (sum vs. max vs. weighted sum)
-  • boundary / leaf handling
+[Hypothesis to test]
+{hypothesis}
 
-Do NOT restructure the algorithm. Do NOT replace the dominant primitive. If the parent looks stuck in a local optimum, still make the smallest meaningful mutation — Stage IV switches to crossover or diversity restart on the next round.
+[Code]
+{elitist_code}
 
-RESPONSE FORMAT (in this order)
-1. DIAGNOSIS: 2–3 sentences on the parent's likely dominant failure mode, inferred from its description and code. Do not invent benchmark names or numbers.
-2. MUTATION_AXIS: name the single axis you are changing; state old vs. new behavior.
-3. EXPECTED_EFFECT: one sentence on what kind of circuit shape this should improve and why.
-4. NAME: <short snake_case name>
-5. DESCRIPTION: <one-line summary>
-6. Code: a single ```python block containing the complete `init_mapping(self)` function. `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS indexed by qubit id. Include `assert len(set(self.mapping_dict)) == len(self.mapping_dict)` as the last line.
+[Improved code]
+Treat this as a controlled experiment: produce a mutated `init_mapping(self)` that applies the hypothesis above as a targeted perturbation of the elite code. The hypothesis must be visibly applied — don't ignore it. The function must populate `self.mapping_dict` and `self.reverse_mapping_dict` (both lists of length `self.num_qubits`, indexed by qubit id). The LAST executable line inside the function must be `assert len(set(self.mapping_dict)) == len(self.mapping_dict)`.
 
-HARD RULES
-- Keep the function signature and side-effect contract identical to the parent (writes `self.mapping_dict` and `self.reverse_mapping_dict` only).
-- No meta-commentary, no file-writing language. Emit the sections above and the code, nothing else.
+RESPONSE FORMAT (in this exact order):
+
+NAME: a concise snake_case name summarising the main algorithmic primitive of the mutated heuristic (e.g. heavy_path_linearization, spectral_coordinate_embedding, kcore_shell_concentric). Do NOT use generic tags like "mutation" or "refined_version".
+
+DESCRIPTION: one or two sentences describing the actual algorithmic approach of the mutant (primary primitive plus how the hypothesis was applied). Do NOT say "mutation of elitist" — state what the heuristic concretely does.
+
+Then output the code enclosed in a Python code block: ```python ... ```.

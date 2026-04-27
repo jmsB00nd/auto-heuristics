@@ -49,8 +49,7 @@ def _config_dump(config: OrchestratorConfig) -> Dict[str, Any]:
 def _feature_flags(config: OrchestratorConfig) -> Dict[str, bool]:
     return {
         "literature_review": bool(getattr(config, "run_stage1_literature_review", False)),
-        "reflection": bool(getattr(config, "run_stage3_5_reflection", False)),
-        "refinement": bool(getattr(config, "run_stage4_iterative_refinement", False)),
+        "evolution": bool(getattr(config, "run_evolution", True)),
         "conversation_mode": bool(getattr(config, "use_conversation_mode", False)),
     }
 

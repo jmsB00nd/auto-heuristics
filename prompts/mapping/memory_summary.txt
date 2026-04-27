@@ -1,25 +1,22 @@
-TASK : produce a STRUCTURED EXTRACT of our past initial-mapping experiments to feed the next idea-generation stage. The past-experiments log is injected below this prompt.
+TASK: Produce a structured extract of past initial-mapping experiments (log provided below).
+Not a summary—output must be condensed and machine-readable-ish.
+Constraints: one-line bullets, no code, ≤300 words.
 
-This is NOT a narrative summary. It is a condensed, machine-readable-ish extract. Keep every bullet to ONE line. Total output should be under 300 words. No code.
-
-OUTPUT FORMAT (use these section headers literally)
+OUTPUT FORMAT (use exact headers):
 
 STRATEGY_COUNTS:
-  <one-phrase primitive>: <number of attempts>, best_swaps=<float or "none">, failed=<count>
-  (group by the primary algorithmic primitive inferred from each entry's description; one line per distinct primitive; sort by number of attempts descending)
+<primitive>: <#attempts>, best_swaps=<float|"none">, failed=<#>
+(group by main algorithmic primitive; one line each; sort by attempts ↓)
 
 BEST_STRATEGIES:
-  <one-phrase primitive>: <heuristic_name> — <mean_swaps> — <short restatement of approach>
-  (only for primitives with at least one successful attempt)
+<primitive>: <heuristic_name> — <mean_swaps> — <short approach>
+(only if ≥1 successful attempt)
 
 DEAD_ENDS:
-  <primitive or pattern>: <brief reason> (3+ failures or scores >50% worse than best)
-  (omit the section if empty)
-
-PLATEAU_SIGNAL:
-  <one line: has the best score improved in recent runs? yes/no/unknown, with the delta if known>
+<primitive/pattern>: <reason>
+(include only if ≥3 failures or >50% worse than best; omit if none)
 
 Rules:
-- Do NOT praise, do NOT narrate. Pure extract.
-- If a field is unknown from the log, write "unknown" — do not invent.
-- Use raw numbers from the log; do not round in a way that loses a unit.
+
+No narration or praise
+Preserve exact numeric values (no lossy rounding)

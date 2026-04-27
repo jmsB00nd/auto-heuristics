@@ -147,7 +147,8 @@ def plot_grouped_scatter_with_noise(data_grouped, ylabel, title,
         "funsearch" : "#2ca02c",
         "eoh" : "#ff7f0e",
         "Reevo" : "#d62728",
-        "mcts-ahd" : "#bcbd22"
+        "mcts-ahd" : "#bcbd22",
+        "partevo" : "#545454"
     }
 
     method_markers = {
@@ -161,7 +162,8 @@ def plot_grouped_scatter_with_noise(data_grouped, ylabel, title,
         "Reevo": "s",
         "hill_climb": "^",
         "funsearch": "*",
-        "mcts-ahd": "D"
+        "mcts-ahd": "D",
+        "partevo" : "^"
     }
 
     for i, (method, depth_dict) in enumerate(data_grouped.items()):

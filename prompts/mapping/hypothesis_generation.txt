@@ -1,0 +1,28 @@
+TASK: As a scientist studying qubit-mapping heuristics, formulate testable Hypotheses that explain why the top heuristics outperform the bottom ones. Each Hypothesis must be a falsifiable claim that ties a specific algorithmic Trait (or combination of Traits) to lower SWAP counts. These hypotheses will be tested empirically by injecting them into crossover/mutation prompts and measuring offspring scores.
+
+[TRAITS PRESENT IN TOP HEURISTICS]
+{top_traits_block}
+
+[TRAITS PRESENT IN BOTTOM HEURISTICS]
+{bottom_traits_block}
+
+[CURRENTLY ACTIVE HYPOTHESES — do NOT repeat these]
+{active_hypotheses_block}
+
+OUTPUT FORMAT — strict JSON, nothing else, no markdown fence:
+
+{{
+  "hypotheses": [
+    {{
+      "statement": "<single sentence claiming a causal mechanism, e.g. 'Pre-sorting qubits by interaction-graph degree before BFS placement reduces long-range SWAPs because high-degree nodes are placed in dense hardware regions.'>",
+      "related_traits": ["<trait_label>", ...]
+    }},
+    ...
+  ]
+}}
+
+Rules:
+- ≤5 hypotheses per call.
+- Each statement must be testable: name the mechanism (the "why"), not just the outcome.
+- Reference traits by their label exactly as given.
+- Avoid vague claims like "the top heuristic is better designed". A hypothesis must point to a concrete algorithmic choice.

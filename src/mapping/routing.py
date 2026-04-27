@@ -25,7 +25,7 @@ class Qlosure():
         # Precompute distances over the hardware graph
         self.distance_matrix = compute_distance_matrix(self.backend)
         # Number of physical qubits
-        self.num_qubits = len(self.distance_matrix) + 1
+        self.num_qubits = len(self.distance_matrix)
         # A dictionary mapping each gate to a list of the qubits it acts upon
         self.access, self.write_dict = self.data["read"], self.data["write"]
         self.macro_gates = self.data.get("macro_gates", {})
@@ -46,7 +46,7 @@ class Qlosure():
         self.extended_layer = None
 
         if with_circuit:
-            self.circuit = QuantumCircuit(self.num_qubits - 1)
+            self.circuit = QuantumCircuit(self.num_qubits)
             self.original_circuit = QuantumCircuit.from_qasm_str(data.get("qasm_code", ""))
 
         self.results = {}

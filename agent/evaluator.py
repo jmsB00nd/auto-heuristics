@@ -72,7 +72,7 @@ class CodeEvaluator:
         target = self.target_func_name
         timeout = self.config.timeout_seconds
 
-        for circuit_path in tqdm(self.circuit_files, desc="Run progress"):
+        for circuit_path in tqdm(self.circuit_files, desc="Run progress", leave=False):
             data = json_file_to_isl(str(circuit_path))
             queue: "mp.Queue" = self._mp_ctx.Queue()
             proc = self._mp_ctx.Process(

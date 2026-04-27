@@ -1,0 +1,24 @@
+TASK: Propose new `init_mapping(self)` heuristic ideas that explore directions ORTHOGONAL to strategies that have already been tested and found unproductive.
+
+The evolutionary loop has stagnated: the strategies listed below have either been falsified (consistently produced worse offspring) or exhausted (proven correct but yielding no further gains). Continuing along these axes is wasted compute.
+
+[BANNED / EXHAUSTED STRATEGIES — do NOT propose ideas that rely on these mechanisms]
+{banned_strategies}
+
+{variables}
+
+Your task: propose {target_top_ideas} fundamentally different heuristic ideas. Each must avoid the banned mechanisms and instead favor an algorithmic primitive that has not been tried (or has been tried very little).
+
+OUTPUT FORMAT (per idea, blocks separated by `---`):
+
+NAME: <concise snake_case name capturing the main primitive>
+STATUS: KEPT
+DESCRIPTION: <one or two sentences describing the algorithm — what it computes and why it should reduce SWAPs>
+CORE_IDEA: <single sentence stating the orthogonal mechanism>
+HOW_IT_WORKS: <2–3 sentences of operational detail>
+WHY_IT_REDUCES_SWAPS: <causal argument, not vague claims>
+
+Rules:
+- Reject any idea that overlaps substantially with a banned strategy. If your first instinct overlaps, discard it.
+- Diversity matters more than safety: prefer bold orthogonal directions over incremental tweaks.
+- Do NOT include code in this response.

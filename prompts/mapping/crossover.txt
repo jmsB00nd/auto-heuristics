@@ -1,32 +1,25 @@
-You are a Quantum Compiler Algorithm Engineer performing a CROSSOVER that synthesizes two well-performing parent heuristics into a child better than either. You are NOT doing incremental mutation.
+You are a Quantum Compiler Algorithm Engineer designing `init_mapping(self)` heuristics for the qubit-mapping problem. The function assigns every logical qubit to a physical qubit on a fixed hardware coupling graph, with the goal of minimizing SWAP insertions during subsequent routing.
 
-INPUT (injected above this prompt)
-- Parent 1: NAME, description, full code, mean_swaps.
-- Parent 2: NAME, description, full code, mean_swaps.
-- Optional: reflection insights, stagnation flag.
+{variables}
 
-CROSSOVER DISCIPLINE
-A valid crossover combines ORTHOGONAL primitives from the two parents — one contributes how to SCORE / RANK candidates, the other contributes how to COMMIT / ORDER assignments. Forbidden:
-  • Running Parent 1 then Parent 2 on leftover qubits (concatenation, not crossover).
-  • Averaging the two parents' mappings (averaging permutations is meaningless).
-  • Reusing the same primitive from both parents with a minor tweak (that is mutation).
+You are provided with two parent versions of `init_mapping(self)`: a worse one and a better one (measured by mean SWAPs; lower is better), plus a single Hypothesis to test in this experiment.
 
-ALLOWED PATTERNS
-  • P1 scores logical qubits, P2 scores physical qubits → combine via weighted bipartite matching.
-  • P1 partitions logical qubits into clusters, P2 assigns clusters to physical regions, then P1 orders within each cluster.
-  • P1 provides the primary cost term, P2 provides the tie-breaker.
+[Worse code]
+{worse_code}
 
-RESPONSE FORMAT (in this order)
-1. PARENT_SIGNATURES: one line each — "Parent 1: primary = …, auxiliary = …" / "Parent 2: primary = …, auxiliary = …". Infer from description and code.
-2. ORTHOGONALITY_CHECK: one sentence stating which primitive from each parent you keep, and why they are complementary (not redundant).
-3. SYNTHESIS_PLAN: 3–6 bullets describing the merged algorithm in pseudocode.
-4. WHERE_THIS_HELPS: one sentence naming the input shape (not a benchmark name) the child should handle better and why.
-5. NAME: <short snake_case name>
-6. DESCRIPTION: <one-line summary of the synthesis>
-7. Code: a single ```python block containing the complete `init_mapping(self)` function. `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS indexed by qubit id. Include `assert len(set(self.mapping_dict)) == len(self.mapping_dict)` as the last line.
+[Better code]
+{better_code}
 
-HARD RULES
-- The child must be a merge, not a concatenation or rewrap.
-- Function signature and side-effect contract identical to parents (writes `self.mapping_dict` and `self.reverse_mapping_dict` only).
-- Maintain O(N²) or better. If Hungarian matching is used, bound the matrix dimension by the number of logical qubits actually present in `self.access`.
-- No meta-commentary. Emit the sections above and the code, nothing else.
+[Hypothesis to test]
+{hypothesis}
+
+[Improved code]
+Treat this as a controlled experiment: produce an improved `init_mapping(self)` that combines the strengths of both parents AND embodies the hypothesis above as the experimental change. The hypothesis must be visibly applied — don't ignore it. The function must populate `self.mapping_dict` and `self.reverse_mapping_dict` (both lists of length `self.num_qubits`, indexed by qubit id). The LAST executable line inside the function must be `assert len(set(self.mapping_dict)) == len(self.mapping_dict)`.
+
+RESPONSE FORMAT (in this exact order):
+
+NAME: a concise snake_case name summarising the main algorithmic primitive of the new heuristic (e.g. heavy_path_linearization, spectral_coordinate_embedding, kcore_shell_concentric). Do NOT use generic tags like "crossover_child" or "improved_version".
+
+DESCRIPTION: one or two sentences describing the actual algorithmic approach (primary primitive plus how the hypothesis was applied). Do NOT say "combines parents" — state what the heuristic concretely does.
+
+Then output the code enclosed in a Python code block: ```python ... ```.

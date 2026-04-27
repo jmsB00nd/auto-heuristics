@@ -3,15 +3,20 @@ import re
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.rule import Rule
 from rich.panel import Panel
 
+from .budget import BudgetTracker
 from .config import OrchestratorConfig
 from .prompt_manager import PromptManager
 from .llm_client import LLMClient
 from .idea_parser import IdeaParser
 from .evaluator import CodeEvaluator
+from .evolution import EvolutionLoop
+from .knowledge_graph import KnowledgeGraph
 from .memory import MemoryManager
 from .run_context import build_run_metadata, write_run_metadata
 from .schemas import BestEntry, RankingEntry, RunSummary
@@ -59,6 +64,25 @@ class Qpilot:
         self.evaluator = CodeEvaluator(config)
         self.memory = MemoryManager(config.history_file, active_limit=getattr(config, 'active_memory_limit', 20))
 
+        # Shared FE counter — debited by EvolutionLoop._evaluate AND by
+        # exploration-phase re-implementations.
+        self.budget = BudgetTracker(max_fe=config.max_fe)
+
+        # Cross-run KG: load if memory has one, else fresh.
+        kg_dict = self.memory.get_knowledge_graph()
+        if kg_dict:
+            self.kg = KnowledgeGraph.from_dict(kg_dict, pop_size=config.pop_size)
+        else:
+            self.kg = KnowledgeGraph(
+                pop_size=config.pop_size,
+                alpha=getattr(config, "kg_alpha", 0.2),
+                confidence_threshold=getattr(config, "kg_confidence_threshold", 0.75),
+                open_sample_prob=getattr(config, "kg_open_sample_prob", 0.3),
+            )
+
+        self._consecutive_failed_restarts = 0
+        self._exploration_count = 0
+
         # Snapshot run metadata (config, seeds, prompt hashes, backend, benchmarks).
         metadata = build_run_metadata(
             config=config,
@@ -80,24 +104,26 @@ class Qpilot:
             "literature_review": 0.0,
             "ideas_generation": 0.0,
             "implementation": 0.0,
-            "reflection": 0.0,
-            "iterative_refinement": 0.0,
+            "evolution": 0.0,
             "total_pipeline": 0.0
         }
-        
+
         self.pipeline_start_time = None
-        
+
         # Setup Dirs
         self.literature_review_dir = os.path.join(self.config.log_dir, "literature_review")
         self.ideas_dir = os.path.join(self.config.log_dir, "idea_generation")
         self.implementation_dir = os.path.join(self.config.log_dir, "implementation")
-        self.reflection_dir = os.path.join(self.config.log_dir, "reflection")
-        self.iterative_refinement_dir = os.path.join(self.config.log_dir, "iterative_refinement")
-        for d in [self.literature_review_dir, self.ideas_dir, self.implementation_dir, self.reflection_dir, self.iterative_refinement_dir]:
+        self.evolution_dir = os.path.join(self.config.log_dir, "evolution")
+        for d in [self.literature_review_dir, self.ideas_dir, self.implementation_dir, self.evolution_dir]:
             os.makedirs(d, exist_ok=True)
 
-    def _record_eval(self, stage: str, label: str, stats: dict) -> None:
-        """Append one row to ``eval_trace`` capturing cumulative tokens at this eval."""
+    def _record_eval(self, stage: str, label: str, stats: dict, call_snapshot: Optional[dict] = None) -> None:
+        """Append one row to ``eval_trace`` capturing cumulative tokens *at the
+        moment THIS heuristic's LLM call committed* (when ``call_snapshot`` is
+        provided). Without a snapshot we fall back to the live global counter,
+        which is correct for sequential calls but stamps every heuristic in a
+        parallel batch with the same near-final value (the bug we're fixing)."""
         mean_swaps = stats.get("mean_swaps")
         mean_depth = stats.get("mean_depth")
         error = stats.get("error")
@@ -109,13 +135,23 @@ class Qpilot:
             mean_depth = float(mean_depth) if mean_depth is not None else None
         except (TypeError, ValueError):
             mean_depth = None
+        if call_snapshot:
+            cum_in = int(call_snapshot["cumulative_input_tokens"])
+            cum_out = int(call_snapshot["cumulative_output_tokens"])
+            cum_tot = int(call_snapshot["cumulative_total_tokens"])
+            cum_cost = float(call_snapshot["cumulative_cost_usd"])
+        else:
+            cum_in = int(self.llm.usage_totals["input_tokens"])
+            cum_out = int(self.llm.usage_totals["output_tokens"])
+            cum_tot = self.llm.total_tokens
+            cum_cost = float(self.llm.usage_totals["total_cost_usd"])
         self.eval_trace.append({
             "stage": stage,
             "label": label,
-            "cumulative_input_tokens": int(self.llm.usage_totals["input_tokens"]),
-            "cumulative_output_tokens": int(self.llm.usage_totals["output_tokens"]),
-            "cumulative_total_tokens": self.llm.total_tokens,
-            "cumulative_cost_usd": float(self.llm.usage_totals["total_cost_usd"]),
+            "cumulative_input_tokens": cum_in,
+            "cumulative_output_tokens": cum_out,
+            "cumulative_total_tokens": cum_tot,
+            "cumulative_cost_usd": cum_cost,
             "mean_swaps": mean_swaps,
             "mean_depth": mean_depth,
             "error": error,
@@ -126,16 +162,16 @@ class Qpilot:
         console.print(Rule("Literature Review", style="bold cyan"))
 
         if not getattr(self.config, 'run_stage1_literature_review', False):
-            console.print("[yellow]Skipping Literature Review per config.[/yellow]")
+            console.print("[yellow]Skipping Literature Review.[/yellow]")
             return
 
         with self.llm.stage("literature_review"):
-            response = self.llm.query(self.prompts.lit_review_prompt, reset_conversation=True)
+            response, _ = self.llm.query(self.prompts.lit_review_prompt, reset_conversation=True)
         self.literature_insights = response or ""
 
         if response:
             save_log(self.literature_review_dir, "literature_review.txt", response)
-            console.print("[bold green]✓ Stage I complete.[/bold green]\n")
+            console.print("[bold green]✓ Literature Review complete.[/bold green]\n")
 
         self.stage_times["literature_review"] = time.time() - start_time
 
@@ -158,7 +194,7 @@ class Qpilot:
 
                 save_log(self.ideas_dir, "memory_summary_prompt.txt", summary_prompt)
 
-                memory_resume = self.llm.query(summary_prompt, reset_conversation=True)
+                memory_resume, _ = self.llm.query(summary_prompt, reset_conversation=True)
                 save_log(self.ideas_dir, "global_memory_resume.txt", memory_resume or "")
                 console.print("[green]✓ Memory resume generated.[/green]")
 
@@ -171,13 +207,12 @@ class Qpilot:
                 f"{self.prompts.idea_prompt}\n\n"
                 f"{memory_context}\n\n"
                 f"Do not repeat or slightly modify past experiments. Use them only to understand what has already been explored and avoid previously tried or failed approaches. Focus on proposing new and distinct ideas.\n\n"
-                f"{self.prompts.variables}"
             )
 
             save_log(self.ideas_dir, "prompt.txt", prompt)
 
             console.print("[cyan]Generating new novel ideas based on global context...[/cyan]")
-            response = self.llm.query(prompt, reset_conversation=not getattr(self.config, 'use_conversation_mode', True))
+            response, _ = self.llm.query(prompt, reset_conversation=not getattr(self.config, 'use_conversation_mode', True))
             save_log(self.ideas_dir, "raw_ideas.txt", response or "")
 
         # Parse ideas
@@ -189,11 +224,12 @@ class Qpilot:
         self.stage_times["ideas_generation"] = time.time() - start_time
         
         
-    def _build_implementation_task(self, idx: int, idea: dict) -> dict:
+    def build_implementation_task(self, idx: int, idea: dict, output_dir: str = None) -> dict:
         idea_name = idea.get('name', f'Idea_{idx}')
         idea_desc = idea.get('description', '')
         safe_idea_name = re.sub(r'[^\w\-]', '_', idea_name)
-        idea_dir = os.path.join(self.implementation_dir, f"idea_{idx}_{safe_idea_name}")
+        base_dir = output_dir if output_dir is not None else self.implementation_dir
+        idea_dir = os.path.join(base_dir, f"idea_{idx}_{safe_idea_name}")
         os.makedirs(idea_dir, exist_ok=True)
 
         prompt = (
@@ -202,7 +238,7 @@ class Qpilot:
             f"ALGORITHM IDEA TO IMPLEMENT: {idea_name}\nDescription: {idea_desc}\n"
             f"{self.prompts.variables}"
         )
-        save_log(idea_dir, "prompt.txt", prompt)
+        save_log(idea_dir, "prompt.txt", prompt, quiet=True)
 
         return {
             "idx": idx,
@@ -213,42 +249,65 @@ class Qpilot:
             "prompt": prompt,
         }
 
-    def _fetch_llm_response(self, task: dict) -> dict:
-        """Worker executed in parallel — LLM call only, no shared mutation
-        beyond the thread-safe ``LLMClient.query``."""
-        console.print(f"[bold]Implementing {task['idea_name']}...[/bold]")
-        with self.llm.stage("implementation"):
-            response = self.llm.query(task["prompt"], reset_conversation=True)
-        save_log(task["idea_dir"], "raw_response.txt", response or "")
-        return {**task, "response": response}
-
     def implementation(self):
+        """Stage 3 entry point — implements & evaluates self.top_ideas. Stage-3
+        evals do NOT debit ``self.budget`` (those are seed work, not evolution FE).
+        """
         start_time = time.time()
-        console.print(Rule("Implementation", style="bold green"))
-        ideas_to_implement = self.top_ideas[:getattr(self.config, 'top_ideas_to_implement', 5)]
-        all_results = {}
+        ideas = self.top_ideas[:getattr(self.config, 'top_ideas_to_implement', 5)]
+        results = self._run_implementations(
+            ideas=ideas,
+            output_dir=self.implementation_dir,
+            stage_label="implementation",
+            count_against_budget=False,
+            heading="Implementation",
+        )
+        save_json(self.implementation_dir, "final_results.json", results)
+        self.stage_times["implementation"] = time.time() - start_time
+        return results
 
-        if not ideas_to_implement:
-            save_json(self.implementation_dir, "final_results.json", all_results)
-            self.stage_times["implementation"] = time.time() - start_time
+    def _run_implementations(
+        self,
+        ideas: list,
+        output_dir: str,
+        stage_label: str,
+        count_against_budget: bool,
+        heading: str,
+    ) -> dict:
+        """Shared core of implementation() — also called by _exploration_phase
+        with ``count_against_budget=True`` so restart-time evals debit
+        ``self.budget``."""
+        console.print(Rule(heading, style="bold green"))
+        all_results: dict = {}
+        if not ideas:
             return all_results
 
-        tasks = [self._build_implementation_task(idx, idea) for idx, idea in enumerate(ideas_to_implement)]
+        tasks = [self.build_implementation_task(idx, idea, output_dir=output_dir) for idx, idea in enumerate(ideas)]
 
-        # Phase 1: fan out LLM calls in parallel. Subprocess-backed CLI calls
-        # spend most of their time waiting on I/O, so threads overlap well.
         workers = max(1, min(getattr(self.config, 'implementation_workers', 4), len(tasks)))
-        console.print(f"[cyan]Dispatching {len(tasks)} LLM calls across {workers} workers...[/cyan]")
-        completed: list[dict] = [None] * len(tasks)  # preserve original idea order
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_idx = {pool.submit(self._fetch_llm_response, t): t["idx"] for t in tasks}
-            for fut in future_to_idx:
-                idx = future_to_idx[fut]
-                completed[idx] = fut.result()
+        completed: list[dict] = [None] * len(tasks)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            bar = progress.add_task(f"implementations ({workers} workers)", total=len(tasks))
 
-        # Phase 2: extract code, evaluate, and record memory serially. Evaluator
-        # uses mp.get_context("fork"), which is unsafe to call from worker threads
-        # while other threads may hold locks — keep this on the main thread.
+            def _run(t):
+                result = self._fetch_llm_response_in_stage(t, stage_label)
+                progress.advance(bar)
+                return result
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_to_idx = {pool.submit(_run, t): t["idx"] for t in tasks}
+                for fut in future_to_idx:
+                    idx = future_to_idx[fut]
+                    completed[idx] = fut.result()
+
         target_func = "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
         for task in completed:
             idea_name = task["idea_name"]
@@ -259,19 +318,25 @@ class Qpilot:
 
             code = IdeaParser.extract_code(response or "", target_func)
 
+            call_snapshot = task.get("call_snapshot")
+
             if not code:
                 console.print(f"[red]Failed to extract code for {idea_name}[/red]")
                 save_json(idea_dir, "evaluation_results.json", {"error": "Extraction Failed"})
-                all_results[idea_name] = {"mean_swaps": float('inf'), "mean_depth": 0, "error": "Extraction Failed", "code": ""}
-                self._record_eval("implementation", idea_name, {"mean_swaps": None, "mean_depth": None, "error": "Extraction Failed"})
+                if count_against_budget:
+                    self.budget.increment()
+                all_results[idea_name] = {"mean_swaps": float('inf'), "mean_depth": 0, "error": "Extraction Failed", "code": "", "description": idea_desc}
+                self._record_eval(stage_label, idea_name, {"mean_swaps": None, "mean_depth": None, "error": "Extraction Failed"}, call_snapshot=call_snapshot)
                 continue
 
             with open(os.path.join(idea_dir, "heuristic.py"), "w") as f:
                 f.write(code)
 
             stats = self.evaluator.evaluate(code)
+            if count_against_budget:
+                self.budget.increment()
             save_json(idea_dir, "evaluation_results.json", stats)
-            self._record_eval("implementation", idea_name, stats if isinstance(stats, dict) else {})
+            self._record_eval(stage_label, idea_name, stats if isinstance(stats, dict) else {}, call_snapshot=call_snapshot)
 
             self.memory.add_idea(
                 idea_name,
@@ -283,7 +348,7 @@ class Qpilot:
                 run_id=self.run_id,
             )
             log_event(
-                "implementation",
+                stage_label,
                 "idea_evaluated",
                 idea=idea_name,
                 mean_swaps=stats.get('mean_swaps'),
@@ -291,238 +356,243 @@ class Qpilot:
                 error=stats.get('error'),
             )
 
+            entry = {"code": code, "description": idea_desc, **stats}
             if not stats.get('error'):
                 console.print(f"[green]✔ SUCCESS {idea_name}: {stats['mean_swaps']:.2f} avg swaps[/green]")
-                all_results[idea_name] = {"code": code, **stats}
                 _save_heuristic(self.config.log_dir, safe_idea_name, code)
             else:
                 console.print(f"[red]✘ FAILED {idea_name}: {stats.get('error')}[/red]")
-                all_results[idea_name] = {"code": code, **stats}
+            all_results[idea_name] = entry
 
-        save_json(self.implementation_dir, "final_results.json", all_results)
-        self.stage_times["implementation"] = time.time() - start_time
         return all_results
 
-    def reflection(self):
+    def _fetch_llm_response_in_stage(self, task: dict, stage_label: str) -> dict:
+        with self.llm.stage(stage_label):
+            response, call_record = self.llm.query(task["prompt"], reset_conversation=True, show_counter=False)
+        save_log(task["idea_dir"], "raw_response.txt", response or "", quiet=True)
+        return {**task, "response": response, "call_snapshot": call_record}
+
+    def evolution(self, initial_results):
+        """Run evolutionary loop with stagnation-driven exploration restarts.
+
+        FE budget (``self.budget``) is shared across all restarts. Each restart
+        re-enters idea generation with banned strategies (falsified + exhausted
+        hypotheses from the carried-forward KG), re-implements the new ideas
+        (those evals debit the same shared budget), and re-seeds a fresh
+        ``EvolutionLoop`` with the surviving elite + new successes.
+        """
         start_time = time.time()
-        console.print(Rule("Reflection", style="bold yellow"))
-        
-        if not getattr(self.config, 'run_stage3_5_reflection', False):
-            console.print("[yellow]Skipping Reflection per config.[/yellow]")
-            return
-
-        top_ideas = self.memory.get_top_k(3)
-
-        if not top_ideas:
-            console.print("[yellow]No successful ideas to reflect upon.[/yellow]")
-            return
-
-        blocks = []
-        for rank, idea in enumerate(top_ideas, 1):
-            blocks.append(
-                f"TOP-{rank} HEURISTIC\n"
-                f"  Name: {idea['name']}\n"
-                f"  Score (mean_swaps): {idea['mean_swaps']:.3f}\n"
-                f"  Description: {(idea.get('description') or '')[:200]}\n"
-                f"  Code:\n```python\n{idea['code']}\n```\n"
-            )
-
-        reflection_context = "\n".join(blocks)
-        prompt = f"{self.prompts.reflection_prompt}\n\n{reflection_context}"
-        save_log(self.reflection_dir, "prompt.txt", prompt)
-        with self.llm.stage("reflection"):
-            response = self.llm.query(prompt, reset_conversation=True)
-        
-        if response:
-            self.memory.add_reflection(response)
-            save_log(self.reflection_dir, "reflection_insights.txt", response)
-            console.print("[bold green]✓ Reflection complete. Insights added to memory.[/bold green]\n")
-            
-        self.stage_times["reflection"] = time.time() - start_time
-
-    def iterative_refinement(self, initial_results):
-        start_time = time.time()
-        console.print(Rule("Iterative Refinement", style="bold blue"))
-
-        if not getattr(self.config, 'run_stage4_iterative_refinement', False):
-            console.print("[yellow]Skipping Iterative Refinement per config.[/yellow]")
+        if not getattr(self.config, "run_evolution", True):
+            console.print("[yellow]Skipping Evolution per config.[/yellow]")
+            self.stage_times["evolution"] = 0.0
             return initial_results
 
-        all_results = dict(initial_results)
-        refinement_rounds = getattr(self.config, 'refinement_rounds', 3)
-        stagnation_threshold = getattr(self.config, 'stagnation_threshold', 3)
-        diversity_pool_size = getattr(self.config, 'diversity_pool_size', 5)
-        improvement_history = []
-        force_diversity = False
+        pop_size = getattr(self.config, "pop_size", 10)
+        n_mutants = max(1, int(pop_size * getattr(self.config, "mutation_rate", 0.5)))
 
-        for round_idx in range(1, refinement_rounds + 1):
-            top_memory_ideas = self.memory.get_top_k(2)
-            if not top_memory_ideas:
-                console.print("[red]No successful ideas in memory to refine. Exiting stage.[/red]")
+        initial_population = self._build_initial_population(initial_results, pop_size)
+        console.print(
+            f"[cyan]Evolution seed pulled from global memory: "
+            f"{len(initial_population)} individuals (top-{pop_size}).[/cyan]"
+        )
+
+        all_results = dict(initial_results or {})
+        last_loop: EvolutionLoop = None
+        elite_carry = None
+
+        while self.budget.remaining() >= pop_size:
+            loop = EvolutionLoop(
+                config=self.config,
+                prompts=self.prompts,
+                llm=self.llm,
+                evaluator=self.evaluator,
+                memory=self.memory,
+                run_id=self.run_id,
+                evolution_dir=self.evolution_dir,
+                kg=self.kg,
+                budget=self.budget,
+                on_eval=self._record_eval,
+            )
+            loop.seed(initial_population)
+            final_population = loop.evolve()
+            last_loop = loop
+
+            for ind in final_population:
+                all_results[ind["name"]] = {
+                    "code": ind["code"],
+                    "mean_swaps": ind["mean_swaps"],
+                    "mean_depth": ind["mean_depth"],
+                    "error": ind["error"],
+                }
+
+            # Mirror final KG state to memory for cross-run continuity.
+            self.memory.set_knowledge_graph(self.kg.to_dict())
+
+            if not loop.stagnated:
+                break  # natural termination (FE exhausted or pool too small)
+
+            # Stagnated — decide whether to spend budget on an exploration restart.
+            if self.budget.remaining() < pop_size + n_mutants:
+                log_event("evolution", "restart_skipped_low_budget", remaining=self.budget.remaining())
                 break
 
-            current_best = top_memory_ideas[0]
-            best_score = current_best['mean_swaps']
+            new_seeds, n_success = self._exploration_phase(self.kg.banned_statements())
 
-            console.print(f"\n[bold]Refinement Round {round_idx}/{refinement_rounds} (Current Best Score: {best_score:.2f})[/bold]")
-            round_dir = os.path.join(self.iterative_refinement_dir, f"round_{round_idx}")
-            os.makedirs(round_dir, exist_ok=True)
-
-            reflection_insight = self.memory.get_latest_reflection()
-            reflection_str = f"\nREFLECTION INSIGHTS:\n{reflection_insight}\n" if reflection_insight else ""
-
-            stagnation_banner = ""
-            if force_diversity:
-                stagnation_banner = (
-                    "\n[STAGNATION FLAG] The last "
-                    f"{stagnation_threshold} rounds produced no improvement. "
-                    "Propose a qualitatively different algorithmic approach instead of "
-                    "refining the current primitive.\n"
-                )
-
-            # Decide Operation: Mutation or Crossover
-            parents = []
-            if len(top_memory_ideas) >= 2 and random.random() < getattr(self.config, 'crossover_rate', 0.5):
-                parents = self.memory.get_diverse_parents(k=2)
-
-            if len(parents) >= 2:
-                operation = "CROSSOVER"
-                parent1, parent2 = parents[0], parents[1]
-                context = (
-                    f"PARENT 1: {parent1['name']} — mean_swaps={parent1['mean_swaps']:.3f}\n"
-                    f"  Summary: {(parent1.get('description') or '')[:200]}\n"
-                    f"  Code:\n```python\n{parent1['code']}\n```\n\n"
-                    f"PARENT 2: {parent2['name']} — mean_swaps={parent2['mean_swaps']:.3f}\n"
-                    f"  Summary: {(parent2.get('description') or '')[:200]}\n"
-                    f"  Code:\n```python\n{parent2['code']}\n```\n"
-                )
-                prompt_template = getattr(self.prompts, 'crossover_prompt', 'Combine these two algorithms into a better one.')
-            else:
-                operation = "MUTATION"
-                if force_diversity:
-                    pool = self.memory.get_top_k(diversity_pool_size * 2)
-                    pool = pool[len(pool) // 2:] or pool
-                    mutation_target = random.choice(pool)
-                else:
-                    top_pool = self.memory.get_top_k(diversity_pool_size)
-                    mutation_idx = (round_idx - 1) % len(top_pool)
-                    mutation_target = top_pool[mutation_idx]
-                context = (
-                    f"PARENT: {mutation_target['name']} — mean_swaps={mutation_target['mean_swaps']:.3f}\n"
-                    f"  Summary: {(mutation_target.get('description') or '')[:200]}\n"
-                    f"  Code:\n```python\n{mutation_target['code']}\n```\n"
-                )
-                prompt_template = getattr(self.prompts, 'refinement_prompt', 'Improve the current best heuristic.')
-
-            if force_diversity:
-                console.print(f"[yellow]Diversity mode active — exploring beyond top performers[/yellow]")
-
-            console.print(f"[magenta]Applying Operation: {operation}[/magenta]")
-
-            variables_ref = getattr(self.prompts, 'variables', '') or self.prompts.code
-
-            prompt = (
-                f"{stagnation_banner}"
-                f"{reflection_str}\n\n"
-                f"{context}\n"
-                f"{prompt_template}\n"
-                f"{variables_ref}"
-            )
-
-            save_log(round_dir, "prompt.txt", prompt)
-            with self.llm.stage(f"refinement/round_{round_idx}"):
-                response = self.llm.query(prompt, reset_conversation=True)
-            save_log(round_dir, "raw_response.txt", response or "")
-
-            if response is None:
-                console.print(f"[red]LLM call failed in round {round_idx}[/red]")
-                fail_name = f"Refined_{operation}_R{round_idx}"
-                all_results[fail_name] = {"mean_swaps": float('inf'), "mean_depth": 0, "error": "LLM call failed"}
-                self._record_eval(f"refinement/round_{round_idx}", fail_name,
-                                  {"mean_swaps": None, "mean_depth": None, "error": "LLM call failed"})
-                improvement_history.append(False)
-                log_event("refinement", "llm_failed", round=round_idx, operation=operation)
-                continue
-
-            # Extract custom Name and Description
-            name_match = re.search(r'NAME:\s*(.+)', response, re.IGNORECASE)
-            desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=\n[A-Z_]{3,}\s*:|\n```|$)', response, re.IGNORECASE | re.DOTALL)
-
-            idea_name = name_match.group(1).strip() if name_match else f"Refined_{operation}_R{round_idx}"
-            idea_desc = desc_match.group(1).strip() if desc_match else f"Generated via {operation}"
-
-            target_func = "init_mapping" if self.config.problem == "mapping" else "qlosure_poly_heuristic"
-            code = IdeaParser.extract_code(response, target_func)
-
-            if not code:
-                console.print(f"[red]Failed to extract code in round {round_idx}[/red]")
-                all_results[idea_name] = {"mean_swaps": float('inf'), "mean_depth": 0, "error": "Extraction Failed"}
-                self._record_eval(f"refinement/round_{round_idx}", idea_name,
-                                  {"mean_swaps": None, "mean_depth": None, "error": "Extraction Failed"})
-                improvement_history.append(False)
-                continue
-
-            with open(os.path.join(round_dir, "heuristic.py"), "w") as f:
-                f.write(code)
-
-            # Evaluate
-            stats = self.evaluator.evaluate(code)
-            save_json(round_dir, "evaluation_results.json", stats)
-            self._record_eval(f"refinement/round_{round_idx}", idea_name,
-                              stats if isinstance(stats, dict) else {})
-
-            self.memory.add_idea(
-                name=idea_name,
-                description=idea_desc,
-                code=code,
-                mean_swaps=stats.get('mean_swaps', float('inf')),
-                mean_depth=stats.get('mean_depth', 0),
-                error=stats.get('error'),
-                run_id=self.run_id,
-            )
-            log_event(
-                "refinement",
-                "round_evaluated",
-                round=round_idx,
-                operation=operation,
-                idea=idea_name,
-                mean_swaps=stats.get('mean_swaps'),
-                error=stats.get('error'),
-            )
-
-            if not stats.get('error'):
-                current_score = stats['mean_swaps']
-                console.print(f"[green]✔ SUCCESS: {current_score:.2f} avg swaps[/green]")
-                all_results[idea_name] = stats
-
-                if current_score < best_score:
-                    console.print(f"[bold green] New Best Score! {best_score:.2f} -> {current_score:.2f}[/bold green]")
-                    _save_heuristic(self.config.log_dir, f"best_refined_round_{round_idx}", code)
+            if n_success == 0:
+                self._consecutive_failed_restarts += 1
+                if self._consecutive_failed_restarts >= 2:
                     log_event(
-                        "refinement",
-                        "new_best",
-                        round=round_idx,
-                        previous=best_score,
-                        current=current_score,
+                        "evolution",
+                        "restart_aborted_no_success",
+                        consecutive_failures=self._consecutive_failed_restarts,
                     )
-                    improvement_history.append(True)
-                    force_diversity = False
-                else:
-                    improvement_history.append(False)
+                    break
             else:
-                console.print(f"[red]✘ FAILED: {stats.get('error')}[/red]")
-                all_results[idea_name] = stats
-                improvement_history.append(False)
+                self._consecutive_failed_restarts = 0
 
-            # Check for stagnation
-            recent = improvement_history[-stagnation_threshold:]
-            if len(recent) >= stagnation_threshold and not any(recent):
-                console.print(f"[yellow]Stagnation detected ({stagnation_threshold} rounds without improvement). Forcing diversity restart.[/yellow]")
-                force_diversity = True
+            elite_carry = loop.best_individual_overall
+            initial_population = ([elite_carry] if elite_carry else []) + new_seeds
 
-        save_json(self.iterative_refinement_dir, "refinement_results.json", all_results)
-        self.stage_times["iterative_refinement"] = time.time() - start_time
+        if last_loop is None:
+            # Loop never ran (budget < pop_size from the start).
+            self.stage_times["evolution"] = time.time() - start_time
+            return all_results
+
+        if last_loop.best_individual_overall is not None:
+            safe = re.sub(r"[^\w\-]", "_", last_loop.best_individual_overall["name"])
+            _save_heuristic(self.config.log_dir, f"best_evolution_{safe}", last_loop.best_individual_overall["code"])
+
+        # Final artifacts — final_population from the last loop, plus KG path.
+        final_population = last_loop.population
+        save_json(self.evolution_dir, "final_population.json", [
+            {k: v for k, v in ind.items() if k != "code"} for ind in final_population
+        ])
+        kg_path = os.path.join(self.evolution_dir, "knowledge_graph_final.json")
+        save_json(self.evolution_dir, "knowledge_graph_final.json", self.kg.to_dict())
+        save_json(self.evolution_dir, "summary.json", {
+            "function_evals": self.budget.current,
+            "max_fe": self.config.max_fe,
+            "iterations": last_loop.iteration,
+            "best_obj_overall": last_loop.best_obj_overall if last_loop.best_obj_overall != float("inf") else None,
+            "best_name": last_loop.best_individual_overall["name"] if last_loop.best_individual_overall else None,
+            "knowledge_graph_path": kg_path,
+            "exploration_restarts": self._exploration_count,
+            "consecutive_failed_restarts": self._consecutive_failed_restarts,
+        })
+        self.stage_times["evolution"] = time.time() - start_time
         return all_results
+
+    def _build_initial_population(self, initial_results: dict, pop_size: int) -> list:
+        """Pull from global memory; fall back to current Stage 3 output if memory is empty."""
+        top_memory = self.memory.get_top_k(k=pop_size)
+        out: list = []
+        for entry in top_memory:
+            code = entry.get("code")
+            if not code:
+                continue
+            out.append({
+                "name": entry["name"],
+                "description": entry.get("description", ""),
+                "code": code,
+                "mean_swaps": entry.get("mean_swaps", float("inf")),
+                "mean_depth": entry.get("mean_depth", 0) or 0,
+                "error": entry.get("error"),
+            })
+        if not out:
+            for name, stats in (initial_results or {}).items():
+                out.append({
+                    "name": name,
+                    "description": stats.get("description", ""),
+                    "code": stats.get("code", ""),
+                    "mean_swaps": stats.get("mean_swaps", float("inf")),
+                    "mean_depth": stats.get("mean_depth", 0) or 0,
+                    "error": stats.get("error"),
+                })
+        return out
+
+    def _exploration_phase(self, banned_statements: list) -> tuple:
+        """Generate orthogonal ideas, implement+evaluate them (debits ``self.budget``),
+        register post-hoc hypotheses for survivors, return (seeds, n_success)."""
+        self._exploration_count += 1
+        console.print(Rule(
+            f"Exploration restart #{self._exploration_count} (stagnation)",
+            style="bold red",
+        ))
+        log_event(
+            "evolution",
+            "exploration_phase_start",
+            restart=self._exploration_count,
+            banned_count=len(banned_statements),
+            budget_remaining=self.budget.remaining(),
+        )
+
+        banned_block = (
+            "\n".join(f"- {s}" for s in banned_statements)
+            if banned_statements
+            else "(no banned strategies yet — push for orthogonal directions anyway)"
+        )
+        target_ideas = max(2, getattr(self.config, "target_top_ideas", 5))
+
+        prompt = (
+            f"{self.prompts.system_generator}\n"
+            + self.prompts.exploration_ideas_prompt.format(
+                banned_strategies=banned_block,
+                variables=self.prompts.variables,
+                target_top_ideas=target_ideas,
+            )
+        )
+        with self.llm.stage(f"evolution/exploration_{self._exploration_count}/idea_generation"):
+            response, _ = self.llm.query(prompt, reset_conversation=True)
+        exploration_dir = os.path.join(self.evolution_dir, f"exploration_{self._exploration_count}")
+        os.makedirs(exploration_dir, exist_ok=True)
+        save_log(exploration_dir, "ideas_prompt.txt", prompt, quiet=True)
+        save_log(exploration_dir, "ideas_raw.txt", response or "", quiet=True)
+
+        kept, _eliminated = IdeaParser.parse_ideas(response or "")
+        if not kept:
+            log_event("evolution", "exploration_phase_no_ideas", restart=self._exploration_count)
+            return [], 0
+
+        # Cap by budget — never queue more than budget can afford.
+        max_by_budget = self.budget.remaining()
+        new_ideas = kept[:min(target_ideas, max_by_budget)]
+
+        impl_results = self._run_implementations(
+            ideas=new_ideas,
+            output_dir=exploration_dir,
+            stage_label=f"exploration_{self._exploration_count}",
+            count_against_budget=True,
+            heading=f"Exploration implementations ({self._exploration_count})",
+        )
+
+        seeds: list = []
+        n_success = 0
+        for name, stats in impl_results.items():
+            if stats.get("error") is None and stats.get("mean_swaps") not in (None, float("inf")):
+                n_success += 1
+                seeds.append({
+                    "name": name,
+                    "description": stats.get("description", ""),
+                    "code": stats.get("code", ""),
+                    "mean_swaps": stats.get("mean_swaps"),
+                    "mean_depth": stats.get("mean_depth", 0) or 0,
+                    "error": None,
+                })
+                # Post-hoc hypothesis: first sentence of description, open + 0.5.
+                desc = stats.get("description") or name
+                first_sentence = re.split(r"(?<=[.!?])\s+", desc.strip(), maxsplit=1)[0].strip()
+                if first_sentence:
+                    self.kg.register_hypothesis(first_sentence, related_trait_labels=[], iter_idx=-1)
+
+        log_event(
+            "evolution",
+            "exploration_phase_end",
+            restart=self._exploration_count,
+            attempted=len(new_ideas),
+            n_success=n_success,
+            budget_remaining=self.budget.remaining(),
+        )
+        return seeds, n_success
 
     def _build_summary(self, all_results, idea_bests, best_idea, successful_ideas) -> RunSummary:
         ranking = []
@@ -633,8 +703,7 @@ class Qpilot:
         report += f"- **Literature Review:** {format_time(self.stage_times.get('literature_review', 0))}\n"
         report += f"- **Idea Generation:** {format_time(self.stage_times.get('ideas_generation', 0))}\n"
         report += f"- **Implementation:** {format_time(self.stage_times.get('implementation', 0))}\n"
-        report += f"- **Reflection:** {format_time(self.stage_times.get('reflection', 0))}\n"
-        report += f"- **Iterative Refinement:** {format_time(self.stage_times.get('iterative_refinement', 0))}\n"
+        report += f"- **Evolution:** {format_time(self.stage_times.get('evolution', 0))}\n"
         report += f"- **Total Pipeline:** {format_time(self.stage_times.get('total_pipeline', 0))}\n"
 
         idea_bests.sort(key=lambda x: x['mean_swaps'])
@@ -691,13 +760,9 @@ class Qpilot:
         stage3_results = self.implementation()
         log_event("implementation", "stage_end", seconds=self.stage_times["implementation"])
 
-        log_event("reflection", "stage_start")
-        self.reflection()
-        log_event("reflection", "stage_end", seconds=self.stage_times["reflection"])
-
-        log_event("iterative_refinement", "stage_start")
-        final_results = self.iterative_refinement(stage3_results)
-        log_event("iterative_refinement", "stage_end", seconds=self.stage_times["iterative_refinement"])
+        log_event("evolution", "stage_start")
+        final_results = self.evolution(stage3_results)
+        log_event("evolution", "stage_end", seconds=self.stage_times["evolution"])
 
         self.stage_times["total_pipeline"] = time.time() - self.pipeline_start_time
         console.print("[bold]Generating final cross-idea comparison report...[/bold]")
