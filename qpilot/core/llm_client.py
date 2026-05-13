@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Tuple
 from rich.console import Console
 
 from utils.utils import run_cli_json
-from .config import OrchestratorConfig
+from ..config.settings import OrchestratorConfig
 
 console = Console()
 
@@ -15,10 +15,10 @@ console = Console()
 class LLMClient:
     """Dedicated client for interacting with the LLM and managing context.
 
-    Token accounting comes from the Claude CLI's ``--output-format json``
-    envelope (authoritative, same numbers billed by the API). ``usage_totals``
-    accumulates input/output/cache tokens and USD cost across the whole run.
-    ``call_log`` keeps a per-call snapshot (useful for tokens-vs-metrics plots).
+    Token accounting is word-count based: each LLM call's tokens =
+    ``len(prompt.split()) + len(response.split())``. ``usage_totals``
+    accumulates that count across the whole run. ``call_log`` keeps a
+    per-call snapshot (useful for tokens-vs-metrics plots).
 
     Thread-safety: ``query()`` can be called from multiple threads concurrently.
     Subprocess invocations run without holding any lock (so calls truly run in
@@ -30,20 +30,14 @@ class LLMClient:
         self.config = config
         self.conversation_history: List[Dict[str, str]] = []
 
-        self.usage_totals: Dict[str, float] = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "total_cost_usd": 0.0,
-        }
+        self.usage_totals: Dict[str, int] = {"total_tokens": 0}
         self.call_log: List[Dict] = []
         self.current_stage: str = "init"
         self._lock = threading.Lock()
 
     @property
     def total_tokens(self) -> int:
-        return int(self.usage_totals["input_tokens"] + self.usage_totals["output_tokens"])
+        return int(self.usage_totals["total_tokens"])
 
     @contextmanager
     def stage(self, name: str):
@@ -90,20 +84,13 @@ class LLMClient:
             return None, None
 
         with self._lock:
-            for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
-                self.usage_totals[key] += usage.get(key, 0)
-            self.usage_totals["total_cost_usd"] += usage.get("total_cost_usd", 0.0)
+            self.usage_totals["total_tokens"] += usage.get("total_tokens", 0)
 
             call_record = {
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
                 "stage": stage_at_call,
-                "call_input_tokens": usage.get("input_tokens", 0),
-                "call_output_tokens": usage.get("output_tokens", 0),
-                "call_cost_usd": usage.get("total_cost_usd", 0.0),
-                "cumulative_input_tokens": int(self.usage_totals["input_tokens"]),
-                "cumulative_output_tokens": int(self.usage_totals["output_tokens"]),
+                "call_total_tokens": int(usage.get("total_tokens", 0)),
                 "cumulative_total_tokens": self.total_tokens,
-                "cumulative_cost_usd": float(self.usage_totals["total_cost_usd"]),
             }
             self.call_log.append(call_record)
 

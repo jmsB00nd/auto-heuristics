@@ -9,18 +9,18 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.rule import Rule
 from rich.panel import Panel
 
-from .budget import BudgetTracker
-from .config import OrchestratorConfig
-from .prompt_manager import PromptManager
+from ..state.budget import BudgetTracker
+from ..config.settings import OrchestratorConfig
+from ..prompting.prompt_manager import PromptManager
 from .llm_client import LLMClient
-from .idea_parser import IdeaParser
+from ..prompting.idea_parser import IdeaParser
 from .evaluator import CodeEvaluator
 from .evolution import EvolutionLoop
-from .knowledge_graph import KnowledgeGraph
-from .memory import MemoryManager
-from .run_context import build_run_metadata, write_run_metadata
-from .schemas import BestEntry, RankingEntry, RunSummary
-from .plotting import plot_tokens_vs_metrics
+from ..state.knowledge_graph import KnowledgeGraph
+from ..state.memory import MemoryManager
+from ..config.run_context import build_run_metadata, write_run_metadata
+from ..config.schemas import BestEntry, RankingEntry, RunSummary
+from ..viz.plotting import plot_tokens_vs_metrics
 from utils.utils import save_log, save_json
 from utils.logging_setup import log_event, setup_run_logging
 
@@ -65,7 +65,7 @@ class Qpilot:
         self.memory = MemoryManager(config.history_file, active_limit=getattr(config, 'active_memory_limit', 20))
 
         # Shared FE counter — debited by EvolutionLoop._evaluate AND by
-        # exploration-phase re-implementations.
+        # re-ideation-phase re-implementations.
         self.budget = BudgetTracker(max_fe=config.max_fe)
 
         # Cross-run KG: load if memory has one, else fresh.
@@ -81,7 +81,7 @@ class Qpilot:
             )
 
         self._consecutive_failed_restarts = 0
-        self._exploration_count = 0
+        self._reideation_count = 0
 
         # Snapshot run metadata (config, seeds, prompt hashes, backend, benchmarks).
         metadata = build_run_metadata(
@@ -136,22 +136,13 @@ class Qpilot:
         except (TypeError, ValueError):
             mean_depth = None
         if call_snapshot:
-            cum_in = int(call_snapshot["cumulative_input_tokens"])
-            cum_out = int(call_snapshot["cumulative_output_tokens"])
             cum_tot = int(call_snapshot["cumulative_total_tokens"])
-            cum_cost = float(call_snapshot["cumulative_cost_usd"])
         else:
-            cum_in = int(self.llm.usage_totals["input_tokens"])
-            cum_out = int(self.llm.usage_totals["output_tokens"])
             cum_tot = self.llm.total_tokens
-            cum_cost = float(self.llm.usage_totals["total_cost_usd"])
         self.eval_trace.append({
             "stage": stage,
             "label": label,
-            "cumulative_input_tokens": cum_in,
-            "cumulative_output_tokens": cum_out,
             "cumulative_total_tokens": cum_tot,
-            "cumulative_cost_usd": cum_cost,
             "mean_swaps": mean_swaps,
             "mean_depth": mean_depth,
             "error": error,
@@ -274,8 +265,8 @@ class Qpilot:
         count_against_budget: bool,
         heading: str,
     ) -> dict:
-        """Shared core of implementation() — also called by _exploration_phase
-        with ``count_against_budget=True`` so restart-time evals debit
+        """Shared core of implementation() — also called by _reideation_phase
+        with ``count_against_budget=True`` so re-ideation evals debit
         ``self.budget``."""
         console.print(Rule(heading, style="bold green"))
         all_results: dict = {}
@@ -373,14 +364,11 @@ class Qpilot:
         return {**task, "response": response, "call_snapshot": call_record}
 
     def evolution(self, initial_results):
-        """Run evolutionary loop with stagnation-driven exploration restarts.
+        """Outer cycle: run ONE evolution iteration (crossover + single mutation),
+        then re-ideate against the current KG to inject novel directions, then
+        reseed and run the next iteration. No stagnation gate — every cycle
+        re-enters ideation/implementation as long as the FE budget allows."""
 
-        FE budget (``self.budget``) is shared across all restarts. Each restart
-        re-enters idea generation with banned strategies (falsified + exhausted
-        hypotheses from the carried-forward KG), re-implements the new ideas
-        (those evals debit the same shared budget), and re-seeds a fresh
-        ``EvolutionLoop`` with the surviving elite + new successes.
-        """
         start_time = time.time()
         if not getattr(self.config, "run_evolution", True):
             console.print("[yellow]Skipping Evolution per config.[/yellow]")
@@ -388,7 +376,9 @@ class Qpilot:
             return initial_results
 
         pop_size = getattr(self.config, "pop_size", 10)
-        n_mutants = max(1, int(pop_size * getattr(self.config, "mutation_rate", 0.5)))
+        crossover_count = getattr(self.config, "crossover_count", 5)
+        # One evolve iteration costs `crossover_count` (children) + 1 (mutation).
+        iter_cost = crossover_count + 1
 
         initial_population = self._build_initial_population(initial_results, pop_size)
         console.print(
@@ -398,9 +388,8 @@ class Qpilot:
 
         all_results = dict(initial_results or {})
         last_loop: EvolutionLoop = None
-        elite_carry = None
 
-        while self.budget.remaining() >= pop_size:
+        while self.budget.remaining() >= iter_cost:
             loop = EvolutionLoop(
                 config=self.config,
                 prompts=self.prompts,
@@ -414,7 +403,7 @@ class Qpilot:
                 on_eval=self._record_eval,
             )
             loop.seed(initial_population)
-            final_population = loop.evolve()
+            final_population = loop.evolve(max_iterations=1)
             last_loop = loop
 
             for ind in final_population:
@@ -428,22 +417,19 @@ class Qpilot:
             # Mirror final KG state to memory for cross-run continuity.
             self.memory.set_knowledge_graph(self.kg.to_dict())
 
-            if not loop.stagnated:
-                break  # natural termination (FE exhausted or pool too small)
-
-            # Stagnated — decide whether to spend budget on an exploration restart.
-            if self.budget.remaining() < pop_size + n_mutants:
-                log_event("evolution", "restart_skipped_low_budget", remaining=self.budget.remaining())
+            # Budget gate: need room for one more evolve iteration after re-ideation.
+            if self.budget.remaining() < iter_cost:
+                log_event("evolution", "cycle_skipped_low_budget", remaining=self.budget.remaining())
                 break
 
-            new_seeds, n_success = self._exploration_phase(self.kg.banned_statements())
+            new_seeds, n_success = self._reideation_phase(self.kg.all_explored_statements())
 
             if n_success == 0:
                 self._consecutive_failed_restarts += 1
                 if self._consecutive_failed_restarts >= 2:
                     log_event(
                         "evolution",
-                        "restart_aborted_no_success",
+                        "reideation_aborted_no_success",
                         consecutive_failures=self._consecutive_failed_restarts,
                     )
                     break
@@ -476,7 +462,7 @@ class Qpilot:
             "best_obj_overall": last_loop.best_obj_overall if last_loop.best_obj_overall != float("inf") else None,
             "best_name": last_loop.best_individual_overall["name"] if last_loop.best_individual_overall else None,
             "knowledge_graph_path": kg_path,
-            "exploration_restarts": self._exploration_count,
+            "reideation_cycles": self._reideation_count,
             "consecutive_failed_restarts": self._consecutive_failed_restarts,
         })
         self.stage_times["evolution"] = time.time() - start_time
@@ -510,47 +496,49 @@ class Qpilot:
                 })
         return out
 
-    def _exploration_phase(self, banned_statements: list) -> tuple:
-        """Generate orthogonal ideas, implement+evaluate them (debits ``self.budget``),
-        register post-hoc hypotheses for survivors, return (seeds, n_success)."""
-        self._exploration_count += 1
+    def _reideation_phase(self, explored_statements: list) -> tuple:
+        """Generate fresh ideas that avoid every direction the KG already
+        tracks (open / confident / falsified / exhausted), implement +
+        evaluate them (debits ``self.budget``), and return surviving seeds
+        plus the count of successful implementations."""
+        self._reideation_count += 1
         console.print(Rule(
-            f"Exploration restart #{self._exploration_count} (stagnation)",
+            f"Re-ideation cycle #{self._reideation_count}",
             style="bold red",
         ))
         log_event(
             "evolution",
-            "exploration_phase_start",
-            restart=self._exploration_count,
-            banned_count=len(banned_statements),
+            "reideation_phase_start",
+            cycle=self._reideation_count,
+            explored_count=len(explored_statements),
             budget_remaining=self.budget.remaining(),
         )
 
-        banned_block = (
-            "\n".join(f"- {s}" for s in banned_statements)
-            if banned_statements
-            else "(no banned strategies yet — push for orthogonal directions anyway)"
+        explored_block = (
+            "\n".join(f"- {s}" for s in explored_statements)
+            if explored_statements
+            else "(no strategies explored yet — push for diverse directions anyway)"
         )
         target_ideas = max(2, getattr(self.config, "target_top_ideas", 5))
 
         prompt = (
             f"{self.prompts.system_generator}\n"
-            + self.prompts.exploration_ideas_prompt.format(
-                banned_strategies=banned_block,
+            + self.prompts.ideas_regeneration_prompt.format(
+                explored_strategies=explored_block,
                 variables=self.prompts.variables,
                 target_top_ideas=target_ideas,
             )
         )
-        with self.llm.stage(f"evolution/exploration_{self._exploration_count}/idea_generation"):
+        with self.llm.stage(f"evolution/reideation_{self._reideation_count}/idea_generation"):
             response, _ = self.llm.query(prompt, reset_conversation=True)
-        exploration_dir = os.path.join(self.evolution_dir, f"exploration_{self._exploration_count}")
-        os.makedirs(exploration_dir, exist_ok=True)
-        save_log(exploration_dir, "ideas_prompt.txt", prompt, quiet=True)
-        save_log(exploration_dir, "ideas_raw.txt", response or "", quiet=True)
+        reideation_dir = os.path.join(self.evolution_dir, f"reideation_{self._reideation_count}")
+        os.makedirs(reideation_dir, exist_ok=True)
+        save_log(reideation_dir, "ideas_prompt.txt", prompt, quiet=True)
+        save_log(reideation_dir, "ideas_raw.txt", response or "", quiet=True)
 
         kept, _eliminated = IdeaParser.parse_ideas(response or "")
         if not kept:
-            log_event("evolution", "exploration_phase_no_ideas", restart=self._exploration_count)
+            log_event("evolution", "reideation_phase_no_ideas", cycle=self._reideation_count)
             return [], 0
 
         # Cap by budget — never queue more than budget can afford.
@@ -559,10 +547,10 @@ class Qpilot:
 
         impl_results = self._run_implementations(
             ideas=new_ideas,
-            output_dir=exploration_dir,
-            stage_label=f"exploration_{self._exploration_count}",
+            output_dir=reideation_dir,
+            stage_label=f"reideation_{self._reideation_count}",
             count_against_budget=True,
-            heading=f"Exploration implementations ({self._exploration_count})",
+            heading=f"Re-ideation implementations ({self._reideation_count})",
         )
 
         seeds: list = []
@@ -586,8 +574,8 @@ class Qpilot:
 
         log_event(
             "evolution",
-            "exploration_phase_end",
-            restart=self._exploration_count,
+            "reideation_phase_end",
+            cycle=self._reideation_count,
             attempted=len(new_ideas),
             n_success=n_success,
             budget_remaining=self.budget.remaining(),
@@ -620,15 +608,7 @@ class Qpilot:
                 code_path=candidate if os.path.exists(candidate) else None,
             )
 
-        usage = self.llm.usage_totals
-        token_totals = {
-            "input": int(usage["input_tokens"]),
-            "output": int(usage["output_tokens"]),
-            "cache_creation": int(usage["cache_creation_input_tokens"]),
-            "cache_read": int(usage["cache_read_input_tokens"]),
-            "total": int(self.llm.total_tokens),
-            "total_cost_usd": float(usage["total_cost_usd"]),
-        }
+        token_totals = {"total": int(self.llm.total_tokens)}
 
         return RunSummary(
             run_id=self.run_id,

@@ -137,28 +137,8 @@ def create_leveled_extended_successor_set(front_points, dag, access, extended_se
     return visited, layer_index
 
 
-
 def find_min_score_swap_gate(heuristic_score, epsilon=1e-10):
     random.seed(21)
-
-    if not heuristic_score:
-        return None
-
-    # Detect tuple (lexicographic) scoring and handle it directly.
-    sample = next(iter(heuristic_score.values()))
-    if isinstance(sample, tuple):
-        min_score = None
-        best_swaps = []
-        for gate, score in heuristic_score.items():
-            if min_score is None or score < min_score:
-                min_score = score
-                best_swaps = [gate]
-            elif score == min_score:
-                best_swaps.append(gate)
-        best_swaps.sort()
-        return random.choice(best_swaps)
-
-    # Scalar path (existing behaviour).
     min_score = float('inf')
     best_swaps = []
 
@@ -173,3 +153,4 @@ def find_min_score_swap_gate(heuristic_score, epsilon=1e-10):
     best_swaps.sort()
 
     return random.choice(best_swaps)
+    # return best_swaps[0] if best_swaps else None

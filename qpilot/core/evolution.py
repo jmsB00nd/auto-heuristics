@@ -11,14 +11,14 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.rule import Rule
 
-from .budget import BudgetTracker
-from .config import OrchestratorConfig
+from ..state.budget import BudgetTracker
+from ..config.settings import OrchestratorConfig
 from .evaluator import CodeEvaluator
-from .idea_parser import IdeaParser
-from .knowledge_graph import Hypothesis, KnowledgeGraph
+from ..prompting.idea_parser import IdeaParser
+from ..state.knowledge_graph import Hypothesis, KnowledgeGraph
 from .llm_client import LLMClient
-from .memory import MemoryManager
-from .prompt_manager import PromptManager
+from ..state.memory import MemoryManager
+from ..prompting.prompt_manager import PromptManager
 from utils.utils import save_log, save_json
 from utils.logging_setup import log_event
 
@@ -28,12 +28,11 @@ console = Console()
 EvalCallback = Callable[[str, str, Dict, Optional[Dict]], None]
 
 
-def _target_func(problem: str) -> str:
+def target_func(problem: str) -> str:
     return "init_mapping" if problem == "mapping" else "qlosure_poly_heuristic"
 
 
-def _extract_json(text: str) -> Optional[Dict]:
-    """Tolerant JSON extractor — handles fenced and bare JSON, returns None on failure."""
+def extract_json(text: str) -> Optional[Dict]:
     if not text:
         return None
     fenced = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
@@ -55,14 +54,7 @@ COLD_HYPOTHESIS_FALLBACK = "(no hypothesis yet — use your own judgment to comb
 
 
 class EvolutionLoop:
-    """Owns one evolutionary run with HD-KG hypothesis-driven reflection.
-
-    Each iteration: extract traits from the top/bottom of the population,
-    generate testable hypotheses comparing them, then run hypothesis-conditioned
-    crossover and mutation. Offspring scores update hypothesis confidence
-    empirically. Loop exits early on stagnation so Qpilot can trigger an
-    exploration-phase restart.
-    """
+    """Owns one evolutionary run with HD-KG hypothesis-driven reflection."""
 
     def __init__(
         self,
@@ -93,30 +85,24 @@ class EvolutionLoop:
         self.best_obj_overall: float = float("inf")
         self.best_individual_overall: Optional[Dict] = None
         self.iteration: int = 0
-        self.iters_without_improvement: int = 0
-        self.last_best_for_stagnation: float = float("inf")
-        self.stagnated: bool = False
 
         seed = getattr(config, "seed", None)
         self._rng = random.Random(seed)
 
         os.makedirs(self.evolution_dir, exist_ok=True)
-        self._target = _target_func(config.problem)
+        self._target = target_func(config.problem)
 
-    # ---------- seeding & state ----------
 
     def seed(self, initial_population: List[Dict]) -> None:
-        """Install initial population. Each entry needs ``name``, ``description``,
-        ``code``, ``mean_swaps``, ``mean_depth``, and ``error``."""
-        self.population = [self._normalize_individual(ind, origin="initial") for ind in initial_population]
-        self._update_elite()
+        self.population = [self.normalize_individual(ind, origin="initial") for ind in initial_population]
+        self.update_elite()
         console.print(
             f"[cyan]Evolution seeded with {len(self.population)} individuals "
             f"({sum(1 for p in self.population if p['exec_success'])} successful).[/cyan]"
         )
 
     @staticmethod
-    def _parse_strategy_meta(response: str) -> Tuple[str, str]:
+    def parse_strategy_meta(response: str) -> Tuple[str, str]:
         if not response:
             return "", ""
         name_m = re.search(r'^\s*NAME\s*:\s*(.+)$', response, re.MULTILINE | re.IGNORECASE)
@@ -133,7 +119,7 @@ class EvolutionLoop:
         return slug, desc
 
     @staticmethod
-    def _normalize_individual(ind: Dict, origin: str) -> Dict:
+    def normalize_individual(ind: Dict, origin: str) -> Dict:
         mean_swaps = ind.get("mean_swaps", float("inf"))
         error = ind.get("error")
         exec_success = error is None and mean_swaps not in (None, float("inf"))
@@ -149,7 +135,7 @@ class EvolutionLoop:
             "hypothesis_id": ind.get("hypothesis_id"),
         }
 
-    def _update_elite(self) -> None:
+    def update_elite(self) -> None:
         successful = [p for p in self.population if p["exec_success"]]
         if not successful:
             return
@@ -167,14 +153,13 @@ class EvolutionLoop:
                 name=best["name"],
             )
 
-    # ---------- selection ----------
 
-    def _random_select(self, pool: List[Dict]) -> Optional[List[Dict]]:
+    def random_select(self, pool: List[Dict]) -> Optional[List[Dict]]:
         pool = [p for p in pool if p["exec_success"]]
         if len(pool) < 2:
             return None
         selected: List[Dict] = []
-        target_size = 2 * self.config.pop_size
+        target_size = 2 * self.config.crossover_count
         trial = 0
         while len(selected) < target_size:
             trial += 1
@@ -187,9 +172,8 @@ class EvolutionLoop:
                 return None
         return selected[:target_size]
 
-    # ---------- HD-KG: trait extraction ----------
 
-    def _split_top_bottom(self) -> Tuple[List[Dict], List[Dict]]:
+    def split_top_bottom(self) -> Tuple[List[Dict], List[Dict]]:
         successful = [p for p in self.population if p["exec_success"]]
         if not successful:
             return [], []
@@ -199,7 +183,7 @@ class EvolutionLoop:
         bottom = ranked[-k:] if len(ranked) > k else []
         return top, bottom
 
-    def _format_heuristics_block(self, individuals: List[Dict], group_label: str) -> str:
+    def format_heuristics_block(self, individuals: List[Dict], group_label: str) -> str:
         chunks = []
         for ind in individuals:
             chunks.append(
@@ -208,14 +192,12 @@ class EvolutionLoop:
             )
         return "\n\n".join(chunks)
 
-    def _extract_traits(self, top: List[Dict], bottom: List[Dict], iter_dir: str) -> List[str]:
-        """One LLM call. Registers traits in self.kg. Returns the labels of
-        registered traits (so callers can decide how to summarize)."""
+    def extract_traits(self, top: List[Dict], bottom: List[Dict], iter_dir: str) -> List[str]:
         if not top and not bottom:
             return []
         block = "\n\n".join(filter(None, [
-            self._format_heuristics_block(top, "TOP"),
-            self._format_heuristics_block(bottom, "BOTTOM"),
+            self.format_heuristics_block(top, "TOP"),
+            self.format_heuristics_block(bottom, "BOTTOM"),
         ]))
         user = self.prompts.trait_extraction_prompt.format(heuristics_block=block)
         prompt = f"{self.prompts.system_reflector}\n\n{user}"
@@ -225,7 +207,7 @@ class EvolutionLoop:
         save_log(iter_dir, "trait_extraction_prompt.txt", prompt, quiet=True)
         save_log(iter_dir, "trait_extraction_response.txt", response or "", quiet=True)
 
-        data = _extract_json(response or "")
+        data = extract_json(response or "")
         if not data or not isinstance(data.get("traits"), list):
             log_event("evolution", "trait_extraction_failed", iteration=self.iteration)
             return []
@@ -235,9 +217,8 @@ class EvolutionLoop:
         ], quiet=True)
         return [t.label for t in registered]
 
-    # ---------- HD-KG: hypothesis generation ----------
 
-    def _partition_traits_by_group(
+    def partition_traits_by_group(
         self, top: List[Dict], bottom: List[Dict]
     ) -> Tuple[List[str], List[str]]:
         top_names = {p["name"] for p in top}
@@ -253,10 +234,10 @@ class EvolutionLoop:
                 bottom_labels.append(trait.label)
         return top_labels, bottom_labels
 
-    def _generate_hypotheses(
+    def generate_hypotheses(
         self, top: List[Dict], bottom: List[Dict], iter_dir: str
     ) -> List[Hypothesis]:
-        top_labels, bottom_labels = self._partition_traits_by_group(top, bottom)
+        top_labels, bottom_labels = self.partition_traits_by_group(top, bottom)
         if not top_labels and not bottom_labels:
             return []
 
@@ -273,7 +254,7 @@ class EvolutionLoop:
         save_log(iter_dir, "hypothesis_generation_prompt.txt", prompt, quiet=True)
         save_log(iter_dir, "hypothesis_generation_response.txt", response or "", quiet=True)
 
-        data = _extract_json(response or "")
+        data = extract_json(response or "")
         if not data or not isinstance(data.get("hypotheses"), list):
             log_event("evolution", "hypothesis_generation_failed", iteration=self.iteration)
             return []
@@ -292,14 +273,13 @@ class EvolutionLoop:
         return registered
 
     @staticmethod
-    def _render_hypothesis(hyp: Optional[Hypothesis]) -> str:
+    def render_hypothesis(hyp: Optional[Hypothesis]) -> str:
         if hyp is None:
             return COLD_HYPOTHESIS_FALLBACK
         return f"[{hyp.id} | confidence={hyp.confidence:.2f} | status={hyp.status}] {hyp.statement}"
 
-    # ---------- crossover ----------
 
-    def _crossover(self, selected: List[Dict], iter_dir: str) -> List[Tuple[Dict, Dict, Dict]]:
+    def crossover(self, selected: List[Dict], iter_dir: str) -> List[Tuple[Dict, Dict, Dict]]:
         """Returns list of (worse, better, child) — child carries hypothesis_id."""
         pairs: List[Tuple[Dict, Dict]] = []
         for i in range(0, len(selected), 2):
@@ -319,7 +299,7 @@ class EvolutionLoop:
                 variables=self.prompts.variables,
                 worse_code=worse["code"],
                 better_code=better["code"],
-                hypothesis=self._render_hypothesis(hyp),
+                hypothesis=self.render_hypothesis(hyp),
             )
             prompts.append(f"{self.prompts.system_generator}\n\n{user}")
 
@@ -347,7 +327,7 @@ class EvolutionLoop:
                 }, quiet=True)
 
             code = IdeaParser.extract_code(response or "", self._target)
-            slug, desc = self._parse_strategy_meta(response or "")
+            slug, desc = self.parse_strategy_meta(response or "")
             suffix = f"c{self.iteration}_{idx}"
             name = f"{slug}_{suffix}" if slug else f"crossover_iter{self.iteration}_{idx}"
             description = desc or f"Crossover child (iter {self.iteration}, idx {idx})"
@@ -384,16 +364,15 @@ class EvolutionLoop:
             triples.append((worse, better, child))
         return triples
 
-    # ---------- mutation ----------
 
-    def _mutate(self, n_mutants: int, iter_dir: str) -> List[Tuple[Dict, Dict]]:
+    def mutate(self, n_mutants: int, iter_dir: str) -> List[Tuple[Dict, Dict]]:
         """Returns list of (parent_elite, mutant) — mutant carries hypothesis_id."""
         if self.elitist is None or not self.elitist.get("code"):
             return []
         hyp = self.kg.sample_for_mutation()
         prompt = f"{self.prompts.system_generator}\n\n" + self.prompts.refinement_prompt.format(
             variables=self.prompts.variables,
-            hypothesis=self._render_hypothesis(hyp),
+            hypothesis=self.render_hypothesis(hyp),
             elitist_code=self.elitist["code"],
         )
         prompts = [prompt] * n_mutants
@@ -419,7 +398,7 @@ class EvolutionLoop:
                 }, quiet=True)
 
             code = IdeaParser.extract_code(response or "", self._target)
-            slug, desc = self._parse_strategy_meta(response or "")
+            slug, desc = self.parse_strategy_meta(response or "")
             suffix = f"m{self.iteration}_{idx}"
             name = f"{slug}_{suffix}" if slug else f"mutation_iter{self.iteration}_{idx}"
             description = desc or f"Mutation of {self.elitist['name']} (iter {self.iteration}, idx {idx})"
@@ -456,7 +435,6 @@ class EvolutionLoop:
             pairs.append((self.elitist, mutant))
         return pairs
 
-    # ---------- evaluation ----------
 
     def _evaluate(self, individuals: List[Dict], phase: str) -> List[Dict]:
         for ind in individuals:
@@ -499,10 +477,7 @@ class EvolutionLoop:
     def _record(self, phase: str, ind: Dict) -> None:
         if self._on_eval is None:
             return
-        # ``_call_snapshot`` was stashed when the LLM call completed (see
-        # _crossover/_mutate); forwarding it lets the eval_trace stamp this
-        # individual with its own cumulative-token count instead of the
-        # near-final batch value.
+
         snapshot = ind.get("_call_snapshot")
         self._on_eval(phase, ind["name"], {
             "mean_swaps": ind["mean_swaps"] if ind["mean_swaps"] != float("inf") else None,
@@ -510,16 +485,13 @@ class EvolutionLoop:
             "error": ind["error"],
         }, snapshot)
 
-    # ---------- KG updates ----------
 
     def _apply_kg_updates(
         self,
         triples: List[Tuple[Dict, Dict, Dict]],
         best_at_iter_start: float,
     ) -> None:
-        """``triples`` is a list of (worse_parent, better_parent, child). The
-        BETTER parent's score is the comparison baseline — were we able to
-        improve on the leader?"""
+        
         for _worse, better, child in triples:
             hyp_id = child.get("hypothesis_id")
             if hyp_id is None:
@@ -532,34 +504,8 @@ class EvolutionLoop:
                 success=child["exec_success"],
             )
 
-    # ---------- stagnation ----------
 
-    def _update_stagnation(self) -> None:
-        if self.last_best_for_stagnation == float("inf"):
-            self.last_best_for_stagnation = self.best_obj_overall
-            self.iters_without_improvement = 0
-            return
-        prev = self.last_best_for_stagnation
-        if prev == float("inf") or prev <= 0:
-            improvement = 1.0 if self.best_obj_overall < prev else 0.0
-        else:
-            improvement = (prev - self.best_obj_overall) / prev
-        if improvement > self.config.stagnation_eps:
-            self.iters_without_improvement = 0
-            self.last_best_for_stagnation = self.best_obj_overall
-        else:
-            self.iters_without_improvement += 1
-            if self.iters_without_improvement >= self.config.stagnation_patience:
-                self.stagnated = True
-                log_event(
-                    "evolution",
-                    "stagnation_detected",
-                    iteration=self.iteration,
-                    iters_without_improvement=self.iters_without_improvement,
-                    best_obj_overall=self.best_obj_overall if self.best_obj_overall != float("inf") else None,
-                )
-
-    # ---------- parallel LLM helper ----------
+    # parallel LLM helper
 
     def _parallel_llm(self, prompts: List[str], stage: str, label: str = "LLM calls") -> List[Tuple[Optional[str], Optional[Dict]]]:
         """Returns (response, call_snapshot) per prompt. The snapshot lets
@@ -593,15 +539,18 @@ class EvolutionLoop:
                     results[idx] = (resp, snap)
         return results
 
-    # ---------- main loop ----------
+    # main loop 
 
-    def evolve(self) -> List[Dict]:
+    def evolve(self, max_iterations: Optional[int] = None) -> List[Dict]:
         console.print(Rule("Evolution (HD-KG hypothesis-driven)", style="bold blue"))
         if not getattr(self.config, "run_evolution", True):
             console.print("[yellow]run_evolution=False; skipping.[/yellow]")
             return self.population
 
+        iters_done = 0
         while not self.budget.exhausted():
+            if max_iterations is not None and iters_done >= max_iterations:
+                break
             successful = [p for p in self.population if p["exec_success"]]
             if len(successful) < 2:
                 console.print(
@@ -621,37 +570,36 @@ class EvolutionLoop:
             )
             best_at_iter_start = self.best_obj_overall
 
-            # 1. select pairs
+            # select pairs
             pool = self.population if (self.elitist is None or self.elitist in self.population) \
                 else [self.elitist] + self.population
-            selected = self._random_select(pool)
+            selected = self.random_select(pool)
             if selected is None:
                 console.print("[yellow]Selection could not find distinct-obj pairs; stopping.[/yellow]")
                 break
 
-            # 2. trait extraction (top + bottom of population)
-            top, bottom = self._split_top_bottom()
-            self._extract_traits(top, bottom, iter_dir)
+            # trait extraction (top + bottom of population)
+            top, bottom = self.split_top_bottom()
+            self.extract_traits(top, bottom, iter_dir)
 
-            # 3. hypothesis generation
-            self._generate_hypotheses(top, bottom, iter_dir)
+            # hypothesis generation
+            self.generate_hypotheses(top, bottom, iter_dir)
 
-            # 4. crossover (hypothesis-conditioned)
-            triples = self._crossover(selected, iter_dir)
+            # crossover (hypothesis-conditioned)
+            triples = self.crossover(selected, iter_dir)
             children = [t[2] for t in triples]
             children = self._evaluate(children, phase=f"evolution/iter_{self.iteration}/crossover")
             self._apply_kg_updates(triples, best_at_iter_start)
             self.population.extend(children)
-            self._update_elite()
+            self.update_elite()
 
             if self.budget.exhausted():
                 save_json(iter_dir, "knowledge_graph.json", self.kg.to_dict(), quiet=True)
                 self.iteration += 1
                 break
 
-            # 5. mutation (highest-confidence hypothesis)
-            n_mutants = max(1, int(self.config.pop_size * self.config.mutation_rate))
-            mutant_pairs = self._mutate(n_mutants, iter_dir)
+            # mutation (single mutation of the elite, highest-confidence hypothesis)
+            mutant_pairs = self.mutate(1, iter_dir)
             mutants = [m for _e, m in mutant_pairs]
             mutants = self._evaluate(mutants, phase=f"evolution/iter_{self.iteration}/mutation")
             self._apply_kg_updates(
@@ -659,21 +607,16 @@ class EvolutionLoop:
                 best_at_iter_start,
             )
             self.population.extend(mutants)
-            self._update_elite()
+            self.update_elite()
 
-            # 6. persist KG snapshot for this iteration
+            # persist KG snapshot for this iteration
             save_json(iter_dir, "knowledge_graph.json", self.kg.to_dict(), quiet=True)
 
-            # 7. stagnation check — may set self.stagnated
-            self._update_stagnation()
-            if self.stagnated:
-                self.iteration += 1
-                break
-
             self.iteration += 1
+            iters_done += 1
 
         console.print(
             f"[bold green]Evolution finished: FE={self.budget.current}, "
-            f"best={self.best_obj_overall:.2f}, stagnated={self.stagnated}[/bold green]"
+            f"best={self.best_obj_overall:.2f}[/bold green]"
         )
         return self.population

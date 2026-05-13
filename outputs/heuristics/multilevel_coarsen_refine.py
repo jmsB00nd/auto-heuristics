@@ -1,214 +1,264 @@
 def init_mapping(self):
-    from itertools import permutations
-    import random, math
+    from collections import defaultdict
 
-    n = self.num_qubits
+    N = self.num_qubits
 
-    interaction = {}
-    log_q_set = set()
-    for gid, qs in self.access.items():
-        if len(qs) == 2:
-            a, b = qs[0], qs[1]
-            log_q_set.add(a)
-            log_q_set.add(b)
-            key = (min(a, b), max(a, b))
-            interaction[key] = interaction.get(key, 0) + 1
-
-    if not log_q_set:
-        self.mapping_dict = list(range(n))
-        self.reverse_mapping_dict = list(range(n))
-        assert len(set(self.mapping_dict)) == len(self.mapping_dict)
-        return
-
-    nbrs = {q: [] for q in log_q_set}
-    for (a, b), w in interaction.items():
-        nbrs[a].append((b, w))
-        nbrs[b].append((a, w))
-    dist = self.distance_matrix
-
-    def hem(nodes, adj, mem):
-        edges, seen = [], set()
-        for u in nodes:
-            for v, w in adj.get(u, {}).items():
-                e = (min(u, v), max(u, v))
-                if e not in seen:
-                    seen.add(e)
-                    edges.append((w, u, v))
-        edges.sort(reverse=True)
-        matched, pairs = set(), []
-        for w, u, v in edges:
-            if u not in matched and v not in matched:
-                pairs.append((u, v))
-                matched.add(u)
-                matched.add(v)
-        if not pairs:
-            return None
-        nm, nmem, nn = {}, {}, []
-        for u, v in pairs:
-            nm[u] = u
-            nm[v] = u
-            nmem[u] = mem[u] + mem[v]
-            nn.append(u)
-        for nd in nodes:
-            if nd not in matched:
-                nm[nd] = nd
-                nmem[nd] = mem[nd]
-                nn.append(nd)
-        ea, proc = {}, set()
-        for u in nodes:
-            for v, w in adj[u].items():
-                p = (min(u, v), max(u, v))
-                if p not in proc:
-                    proc.add(p)
-                    nu, nv = nm[u], nm[v]
-                    if nu != nv:
-                        ek = (min(nu, nv), max(nu, nv))
-                        ea[ek] = ea.get(ek, 0) + w
-        na = {nd: {} for nd in nn}
-        for (u, v), w in ea.items():
-            na[u][v] = w
-            na[v][u] = w
-        return nn, na, nmem
-
-    ln = sorted(log_q_set)
-    la = {q: {} for q in ln}
-    for (a, b), w in interaction.items():
-        la[a][b] = w
-        la[b][a] = w
-    lm = {q: [q] for q in ln}
-    num_coarsen_levels = 0
-
-    while len(ln) > 8:
-        r = hem(ln, la, lm)
-        if r is None or len(r[0]) >= len(ln):
-            break
-        ln, la, lm = r
-        num_coarsen_levels += 1
-
-    hw_keys = sorted(self.backend.keys())
-    hn = list(hw_keys)
-    ha = {q: {} for q in hn}
-    for u, v in self.backend_connections:
-        if u in ha and v in ha:
-            ha[u][v] = 1
-            ha[v][u] = 1
-    hm = {q: [q] for q in hn}
-    tgt = max(len(ln), 8)
-    while len(hn) > tgt:
-        r = hem(hn, ha, hm)
-        if r is None or len(r[0]) >= len(hn):
-            break
-        hn, ha, hm = r
-
-    hd = {}
-    for a in hn:
-        hd[(a, a)] = 0
-        for b in hn:
-            if a != b and (a, b) not in hd:
-                t = sum(dist[x][y] for x in hm[a] for y in hm[b])
-                c = len(hm[a]) * len(hm[b])
-                hd[(a, b)] = t / c if c else 0
-                hd[(b, a)] = hd[(a, b)]
-
-    ce = [(u, v, w) for u in ln for v, w in la[u].items() if u < v]
-    nlc, nhc = len(ln), len(hn)
-
-    def cfn(pm):
-        asgn = {ln[i]: pm[i] for i in range(nlc)}
-        return sum(w * hd.get((asgn[u], asgn[v]), 0) for u, v, w in ce)
-
-    bc, bp = float('inf'), None
+    # ---------- build QIG ----------
+    qig = defaultdict(lambda: defaultdict(float))
+    logical_qubits = set()
     try:
-        tp = math.perm(nhc, nlc) if nlc <= nhc else float('inf')
-    except (ValueError, OverflowError):
-        tp = float('inf')
+        for u, nbrs in self.qubit_interaction_graph.items():
+            for v, w in nbrs.items():
+                if u != v and w > 0:
+                    qig[u][v] = float(w)
+                    logical_qubits.add(u); logical_qubits.add(v)
+    except Exception:
+        pass
+    if not logical_qubits:
+        for _gid, qubits in self.access.items():
+            if len(qubits) == 2:
+                a, b = qubits[0], qubits[1]
+                if a != b:
+                    qig[a][b] += 1.0
+                    qig[b][a] += 1.0
+                    logical_qubits.add(a); logical_qubits.add(b)
 
-    if nlc <= nhc and tp <= 200000:
-        for p in permutations(hn, nlc):
-            c = cfn(p)
-            if c < bc:
-                bc, bp = c, p
-    elif nlc <= nhc:
-        random.seed(42)
-        for _ in range(min(100000, max(10000, nhc * 100))):
-            p = tuple(random.sample(hn, nlc))
-            c = cfn(p)
-            if c < bc:
-                bc, bp = c, p
-
-    if bp is None:
-        self.mapping_dict = list(range(n))
-        self.reverse_mapping_dict = list(range(n))
+    if not logical_qubits:
+        self.mapping_dict = list(range(N))
+        self.reverse_mapping_dict = list(range(N))
         assert len(set(self.mapping_dict)) == len(self.mapping_dict)
         return
 
-    mapping = [None] * n
-    used = set()
-    for i in range(nlc):
-        pqs = hm[bp[i]]
-        for j, lq in enumerate(lm[ln[i]]):
-            if j < len(pqs):
-                mapping[lq] = pqs[j]
-                used.add(pqs[j])
-
-    backend_set = set(hw_keys)
-    ba = sorted(backend_set - used)
-    bi = 0
-    for q in sorted(log_q_set):
-        if mapping[q] is None:
-            if bi < len(ba):
-                mapping[q] = ba[bi]
-                used.add(ba[bi])
-                bi += 1
+    # ---------- helpers ----------
+    def heavy_edge_match(nodes, adj):
+        weight_sum = {n: sum(adj[n].values()) for n in nodes}
+        order = sorted(nodes, key=lambda n: -weight_sum[n])
+        matched = set()
+        clusters = []
+        for u in order:
+            if u in matched:
+                continue
+            best_v, best_w = None, -1.0
+            for v, w in adj[u].items():
+                if v in matched or v == u or v not in weight_sum:
+                    continue
+                if w > best_w:
+                    best_w, best_v = w, v
+            if best_v is not None:
+                clusters.append((u, best_v))
+                matched.add(u); matched.add(best_v)
             else:
-                for p in sorted(set(range(n)) - used):
-                    mapping[q] = p
-                    used.add(p)
+                clusters.append((u,))
+                matched.add(u)
+        return clusters
+
+    def contract(adj, clusters):
+        node2cluster = {}
+        for ci, cl in enumerate(clusters):
+            for n in cl:
+                node2cluster[n] = ci
+        new_adj = defaultdict(lambda: defaultdict(float))
+        for u in list(adj.keys()):
+            cu = node2cluster.get(u)
+            if cu is None:
+                continue
+            for v, w in adj[u].items():
+                cv = node2cluster.get(v)
+                if cv is None or cu == cv:
+                    continue
+                new_adj[cu][cv] += w
+        for ci in range(len(clusters)):
+            _ = new_adj[ci]
+        return new_adj
+
+    # ---------- coarsen QIG ----------
+    qig_node_lists = [list(logical_qubits)]
+    qig_adjs = [qig]
+    qig_clusters_hist = []
+    for _ in range(10):
+        nodes = qig_node_lists[-1]
+        adj = qig_adjs[-1]
+        if len(nodes) <= 2:
+            break
+        clusters = heavy_edge_match(nodes, adj)
+        if len(clusters) == len(nodes):
+            break
+        qig_clusters_hist.append(clusters)
+        qig_adjs.append(contract(adj, clusters))
+        qig_node_lists.append(list(range(len(clusters))))
+
+    # ---------- coarsen hardware ----------
+    hw_adj = defaultdict(lambda: defaultdict(float))
+    for p in range(N):
+        try:
+            nbrs = self.backend.get(p, ())
+        except Exception:
+            nbrs = ()
+        for q in nbrs:
+            if p != q:
+                hw_adj[p][q] = 1.0
+    hw_node_lists = [list(range(N))]
+    hw_adjs = [hw_adj]
+    hw_clusters_hist = []
+    hw_cluster_to_phys = [{i: [i] for i in range(N)}]
+    for _ in range(len(qig_node_lists) - 1):
+        nodes = hw_node_lists[-1]
+        adj = hw_adjs[-1]
+        if len(nodes) <= 2:
+            break
+        clusters = heavy_edge_match(nodes, adj)
+        if len(clusters) == len(nodes):
+            break
+        hw_clusters_hist.append(clusters)
+        hw_adjs.append(contract(adj, clusters))
+        hw_node_lists.append(list(range(len(clusters))))
+        prev = hw_cluster_to_phys[-1]
+        new_c2p = {}
+        for ci, cl in enumerate(clusters):
+            members = []
+            for old_id in cl:
+                members.extend(prev[old_id])
+            new_c2p[ci] = members
+        hw_cluster_to_phys.append(new_c2p)
+
+    qig_depth = len(qig_node_lists) - 1
+    hw_depth = len(hw_node_lists) - 1
+
+    # ---------- coarsest embedding ----------
+    def supernode_logical_weight(lvl, node):
+        return sum(qig_adjs[lvl][node].values())
+
+    def supernode_hw_score(lvl, node):
+        return sum(self.physical_centrality.get(p, 0.0)
+                   for p in hw_cluster_to_phys[lvl][node])
+
+    sorted_l = sorted(qig_node_lists[qig_depth],
+                      key=lambda n: -supernode_logical_weight(qig_depth, n))
+    sorted_p = sorted(hw_node_lists[hw_depth],
+                      key=lambda n: -supernode_hw_score(hw_depth, n))
+    assign = {}
+    used = set()
+    pi = 0
+    for l in sorted_l:
+        while pi < len(sorted_p) and sorted_p[pi] in used:
+            pi += 1
+        if pi >= len(sorted_p):
+            break
+        assign[l] = sorted_p[pi]
+        used.add(sorted_p[pi])
+        pi += 1
+
+    # ---------- uncoarsen with local refinement ----------
+    cur_q = qig_depth
+    cur_h = hw_depth
+    while cur_q > 0 or cur_h > 0:
+        unq = cur_q > 0
+        unh = cur_h > 0
+        below_q = cur_q - 1 if unq else cur_q
+        below_h = cur_h - 1 if unh else cur_h
+        new_assign = {}
+        used_below = set()
+        for coarse_l, coarse_p in assign.items():
+            child_l = list(qig_clusters_hist[cur_q - 1][coarse_l]) if unq else [coarse_l]
+            child_p = list(hw_clusters_hist[cur_h - 1][coarse_p]) if unh else [coarse_p]
+            child_l_sorted = sorted(child_l,
+                                    key=lambda x: -sum(qig_adjs[below_q][x].values()))
+            child_p_sorted = sorted(child_p,
+                                    key=lambda c: -sum(self.physical_centrality.get(p, 0.0)
+                                                       for p in hw_cluster_to_phys[below_h][c]))
+            pp = 0
+            for cl in child_l_sorted:
+                while pp < len(child_p_sorted) and child_p_sorted[pp] in used_below:
+                    pp += 1
+                if pp >= len(child_p_sorted):
                     break
-    avail = sorted(set(range(n)) - used)
-    ai = 0
-    for q in range(n):
-        if mapping[q] is None:
-            mapping[q] = avail[ai]
-            ai += 1
+                new_assign[cl] = child_p_sorted[pp]
+                used_below.add(child_p_sorted[pp])
+                pp += 1
+        assign = new_assign
+        cur_q = below_q
+        cur_h = below_h
 
-    log_qs = sorted(log_q_set)
-    valid = [q for q in range(n) if mapping[q] in backend_set]
-    nlq, nv = len(log_qs), len(valid)
+        # refinement: boundary swaps with strongest QIG neighbors
+        adj_here = qig_adjs[cur_q]
+        edges_here = []
+        for u in adj_here:
+            for v, w in adj_here[u].items():
+                if u < v:
+                    edges_here.append((u, v, w))
+        rep = {}
+        for sp in set(assign.values()):
+            mem = hw_cluster_to_phys[cur_h].get(sp, [])
+            if mem:
+                rep[sp] = max(mem, key=lambda p: self.physical_centrality.get(p, 0.0))
+            else:
+                rep[sp] = sp
 
-    def sgain(qi, qj):
-        pi, pj = mapping[qi], mapping[qj]
-        g = 0
-        for o, w in nbrs.get(qi, []):
-            if o == qj:
-                continue
-            g += w * (dist[pi][mapping[o]] - dist[pj][mapping[o]])
-        for o, w in nbrs.get(qj, []):
-            if o == qi:
-                continue
-            g += w * (dist[pj][mapping[o]] - dist[pi][mapping[o]])
-        return g
+        def ecost(a, b, w):
+            pa = assign.get(a); pb = assign.get(b)
+            if pa is None or pb is None:
+                return 0.0
+            ra = rep.get(pa, pa); rb = rep.get(pb, pb)
+            if not (0 <= ra < N and 0 <= rb < N):
+                return 0.0
+            return w * self.distance_matrix[ra][rb]
 
-    total_passes = min(50, max(5, 2000000 // (nlq * nv + 1)))
-    passes_per_lvl = max(1, total_passes // max(num_coarsen_levels + 1, 1))
-
-    for _lvl in range(num_coarsen_levels, -1, -1):
-        for _ in range(passes_per_lvl):
-            bg, bs = 0, None
-            for qi in log_qs:
-                for qj in valid:
-                    if qj == qi:
+        for _it in range(2):
+            improved = False
+            for u in list(assign.keys()):
+                pu = assign[u]
+                neigh = sorted(adj_here[u].items(), key=lambda kv: -kv[1])[:5]
+                for v, _w in neigh:
+                    if v not in assign:
                         continue
-                    g = sgain(qi, qj)
-                    if g > bg:
-                        bg, bs = g, (qi, qj)
-            if bs is None:
+                    pv = assign[v]
+                    if pu == pv:
+                        continue
+                    old = sum(ecost(a, b, w) for (a, b, w) in edges_here
+                              if a == u or b == u or a == v or b == v)
+                    assign[u], assign[v] = pv, pu
+                    new = sum(ecost(a, b, w) for (a, b, w) in edges_here
+                              if a == u or b == u or a == v or b == v)
+                    if new + 1e-9 < old:
+                        improved = True
+                        pu = pv
+                    else:
+                        assign[u], assign[v] = pu, pv
+            if not improved:
                 break
-            mapping[bs[0]], mapping[bs[1]] = mapping[bs[1]], mapping[bs[0]]
+
+    # ---------- project to lists ----------
+    mapping = [None] * N
+    reverse = [None] * N
+    used_p = set()
+    for l, p in assign.items():
+        if 0 <= l < N and 0 <= p < N and p not in used_p and mapping[l] is None:
+            mapping[l] = p
+            reverse[p] = l
+            used_p.add(p)
+
+    unmapped_l = [l for l in range(N) if mapping[l] is None]
+    unused_p = [p for p in range(N) if p not in used_p]
+    try:
+        unmapped_l.sort(key=lambda l: -self.logical_activity.get(l, 0))
+    except Exception:
+        pass
+    unused_p.sort(key=lambda p: -self.physical_centrality.get(p, 0.0))
+    for l, p in zip(unmapped_l, unused_p):
+        mapping[l] = p
+        reverse[p] = l
+        used_p.add(p)
+
+    # absolute fallback (identity-style fill for any leftovers)
+    remaining = [p for p in range(N) if p not in used_p]
+    ri = 0
+    for l in range(N):
+        if mapping[l] is None and ri < len(remaining):
+            mapping[l] = remaining[ri]
+            reverse[remaining[ri]] = l
+            ri += 1
 
     self.mapping_dict = mapping
-    self.reverse_mapping_dict = [0] * n
-    for lq in range(n):
-        self.reverse_mapping_dict[mapping[lq]] = lq
+    self.reverse_mapping_dict = reverse
 
     assert len(set(self.mapping_dict)) == len(self.mapping_dict)

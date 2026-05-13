@@ -1,4 +1,4 @@
-"""Regenerate ``docs/schemas/*.json`` from the pydantic models in :mod:`agent.schemas`.
+"""Regenerate ``docs/schemas/*.json`` from the pydantic models in :mod:`qpilot.config.schemas`.
 
 Usage::
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent.schemas import (
+from qpilot.config.schemas import (
     EvaluationResult,
     HistoryEntry,
     RunMetadata,

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 import numpy as np
 from tqdm import tqdm
 
-from .config import OrchestratorConfig
+from ..config.settings import OrchestratorConfig
 from src.mapping.routing import Qlosure
 from src.utils.isl_data_loader import json_file_to_isl
 from qpu.src.load_backend import load_backend_edges

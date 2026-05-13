@@ -21,7 +21,7 @@ class PromptManager:
         self.system_reflector = self._load(f"{self.problem}/system_reflector.txt")
         self.trait_extraction_prompt = self._load(f"{self.problem}/trait_extraction.txt")
         self.hypothesis_generation_prompt = self._load(f"{self.problem}/hypothesis_generation.txt")
-        self.exploration_ideas_prompt = self._load(f"{self.problem}/exploration_ideas.txt")
+        self.ideas_regeneration_prompt = self._load(f"{self.problem}/ideas_regeneration.txt")
 
     def _load(self, relative_path: str) -> str:
         path = self.prompts_dir / relative_path

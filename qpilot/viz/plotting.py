@@ -76,7 +76,7 @@ def plot_tokens_vs_metrics(trace: Iterable[Dict], out_path: str, run_id: str = "
 
     ax_swaps.set_ylabel("Mean swaps")
     ax_depth.set_ylabel("Mean depth")
-    ax_depth.set_xlabel("Cumulative tokens consumed (input + output)")
+    ax_depth.set_xlabel("Cumulative tokens consumed (words)")
     ax_swaps.grid(True, alpha=0.3)
     ax_depth.grid(True, alpha=0.3)
     ax_swaps.legend(handles=legend_handles, loc="best", fontsize=9)

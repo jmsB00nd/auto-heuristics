@@ -1,14 +1,32 @@
-MINIMAL API REFERENCE for the Qlosure router (context for `init_mapping(self)`).
+FULL API REFERENCE for the Qlosure router (context for `init_mapping(self)`).
 
 WRITE-TARGETS (your function MUST populate these, indexed by logical qubit id)
 - self.mapping_dict:          list-like, mapping_dict[logical_q] = physical_q
 - self.reverse_mapping_dict:  list-like, reverse_mapping_dict[physical_q] = logical_q
 
-HARDWARE / TOPOLOGY (read-only)
+HARDWARE / TOPOLOGY (read-only; populated in __init__ before init_mapping)
 - self.num_qubits:            int, total physical qubits on the backend
 - self.backend:               adjacency list of the hardware coupling graph
+                              (defaultdict[int, set[int]] from build_backend_graph)
 - self.backend_connections:   set of (phys_qA, phys_qB) tuples — directed edges (both orientations present)
 - self.distance_matrix:       2D matrix, distance_matrix[p_i][p_j] = shortest-path distance (≥1 for connected, 0 for self)
+- self.physical_centrality:   dict[int, float] — centrality score per physical qubit
+                              (1 / sum_of_distances; higher = more central). Built by
+                              build_physical_centrality_scores in src/mapping/routing.py.
+
+LOGICAL INTERACTION GRAPHS (read-only; populated in __init__ before init_mapping)
+- self.qubit_interaction_graph:    defaultdict[int, defaultdict[int, int]] — undirected
+                                   weighted adjacency over LOGICAL qubits; weight = count of
+                                   2-qubit gates between the pair. Use as
+                                   `self.qubit_interaction_graph[q1][q2]` (returns 0 if absent).
+                                   Built by build_qubit_interaction_graph.
+- self.temporal_interaction_graph: defaultdict[int, defaultdict[int, float]] — same shape as
+                                   the QIG but each gate contributes `decay_factor**index`
+                                   (default 0.95), so EARLIER gates dominate the weight.
+                                   Built by build_temporal_interaction_graph.
+- self.logical_activity:           defaultdict[int, int] — per-logical-qubit total interaction
+                                   weight (sum of QIG row). Use as a gate-frequency proxy.
+                                   Built by build_logical_activity_scores.
 
 CIRCUIT / DAG (read-only; NOTE: some fields are only available AFTER `init_mapping` returns, set by the outer `run()` — do NOT depend on them inside `init_mapping` unless guarded by `getattr(self, "...", None)`)
 - self.access:                dict, gate_id -> list of logical qubits (1- or 2-qubit gates)
@@ -19,16 +37,35 @@ CIRCUIT / DAG (read-only; NOTE: some fields are only available AFTER `init_mappi
 PRECOMPUTED (usually None at init_mapping time — guard with getattr if you reference them)
 - self.front_layer, self.extended_layer, self.extended_layer_index, self.dag_dependencies_count
 
+HELPERS (importable from src/; safe to call inside init_mapping)
+- src/graph/graph.py
+    - build_backend_graph(edges)                       -> defaultdict[int, set[int]]
+    - compute_distance_matrix(graph)                   -> 2D shortest-path matrix
+    - generate_swap_candidates(active_qubits, backend) -> list of (q, neighbor) candidate swaps
+    - compute_dependencies_length(graph, predecessors) -> defaultdict[int, int]
+    - compute_longest_chain_lengths(graph, predecessors) -> list (per-node critical-path length)
+    - compute_transitive_closure_bitset(graph, predecessors) -> list (per-node descendant count)
+- src/mapping/initial_mapping.py
+    - generate_structure_aware_initial_mapping(access, backend, distance_matrix, num_qubits)
+                                                       -> (mapping_dict, reverse_mapping_dict)
+      Reference embedding: detects tree-like / near-complete / star / hub-dense QIGs,
+      runs RCM along a longest hardware path or greedy weighted placement, then back-fills
+      idle logicals onto the most central unused physicals. Useful as a fallback or
+      warm-start; safe to call from inside init_mapping.
+
 SAFE PATTERN for init_mapping
-At the moment init_mapping is called, the DAG has not yet been built. Therefore, to extract logical-qubit interactions you should iterate over `self.access` directly:
+At the moment init_mapping is called, the DAG has not yet been built. To extract logical-qubit interactions, prefer the prebuilt graphs above OR iterate `self.access` directly:
     interactions = []        # list of (logical_q1, logical_q2)
     for gate_id, qubits in self.access.items():
         if len(qubits) == 2:
             interactions.append(tuple(qubits))
 
-This gives the full interaction graph over logical qubits used by the circuit, independent of DAG layering.
-
 INVARIANTS TO PRESERVE
 - `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS (not dicts) of length `self.num_qubits`, indexed by qubit id.
 - For every logical qubit L appearing in `self.access`, `self.reverse_mapping_dict[self.mapping_dict[L]] == L`.
 - `len(set(self.mapping_dict)) == len(self.mapping_dict)` (injection).
+
+CONVENTIONS
+- All graphs are 0-indexed.
+- Logical-qubit ids are stable across the call.
+- Treat all graphs/scores above as read-only inputs; do NOT mutate them in place.

@@ -1,7 +1,6 @@
 import argparse
 
-from agent.config import OrchestratorConfig
-from agent.qpilot import Qpilot
+from qpilot import OrchestratorConfig, Qpilot
 
 
 def _parse_args() -> argparse.Namespace:

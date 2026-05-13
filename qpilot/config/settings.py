@@ -20,37 +20,28 @@ class OrchestratorConfig:
     use_conversation_mode: bool = True
     send_context_api: bool = False
     show_token_counter: bool = True
-    target_top_ideas: int = 5
+    target_top_ideas: int = 10
     run_stage1_literature_review: bool = False
     timeout_seconds: int = 200
-    top_ideas_to_implement: int = 5
-    implementation_workers: int = 4
+    top_ideas_to_implement: int = 10
+    implementation_workers: int = 2
 
-    # Evolution loop (HD-KG hypothesis-driven reflection + crossover + mutation)
     run_evolution: bool = True
-    pop_size: int = 5
-    mutation_rate: float = 0.5
-    max_fe: int = 5
-    evolution_workers: int = 4
+    pop_size: int = 10
+    crossover_count: int = 5
+    max_fe: int = 50
+    evolution_workers: int = 2
     active_memory_limit: int = 20
 
-    # Stagnation-driven exploration restart
-    stagnation_patience: int = 3
-    stagnation_eps: float = 0.005
-
-    # HD-KG hyperparameters
     kg_alpha: float = 0.2
     kg_confidence_threshold: float = 0.75
     kg_open_sample_prob: float = 0.3
 
-    # Per-run plotting of cumulative tokens vs. heuristic quality metrics.
     generate_plots: bool = True
 
-    # Reproducibility / run identity
     experiment_name: str = "run"
     seed: Optional[int] = None
 
-    # Generated at runtime
     current_time: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
 
     @property

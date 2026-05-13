@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import OrchestratorConfig
+from .settings import OrchestratorConfig
 from .schemas import BackendInfo, BenchmarksInfo, LLMInfo, RunMetadata
 
 FRAMEWORK_VERSION = "0.1.0"

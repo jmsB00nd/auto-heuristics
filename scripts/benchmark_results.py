@@ -12,7 +12,7 @@ import time
 from tqdm import tqdm 
 
 BACKEND = "ibm_sherbrooke"
-BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/queko-bss-16qbt"
+BENCHMARK_DIR = "/home/jmsb00nd/Documents/auto-heuristics/benchmarks/qasmbench-large"
 
 edges = load_backend_edges(BACKEND)
 circuit_files = list(Path(BENCHMARK_DIR).glob("*.json"))

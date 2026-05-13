@@ -51,16 +51,8 @@ def file_to_string(filename):
         return file.read()
 
 
-_USAGE_KEYS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
-
-
 def _empty_usage() -> dict:
-    return {k: 0 for k in _USAGE_KEYS} | {"total_cost_usd": 0.0}
+    return {"total_tokens": 0}
 
 
 def _busy_display(elapsed: float) -> Text:
@@ -75,25 +67,19 @@ def _final_display(usage: dict) -> Text:
     text = Text()
     text.append("✓ ", style="bold green")
     text.append("LLM call complete — ", style="cyan")
-    text.append("in: ", style="white")
-    text.append(f"{usage['input_tokens']:,}", style="bold yellow")
-    text.append("  out: ", style="white")
-    text.append(f"{usage['output_tokens']:,}", style="bold yellow")
-    text.append("  total: ", style="white")
-    text.append(f"{usage['input_tokens'] + usage['output_tokens']:,}", style="bold magenta")
-    text.append(f"  (${usage['total_cost_usd']:.4f})", style="dim")
+    text.append("total: ", style="white")
+    text.append(f"{usage['total_tokens']:,}", style="bold magenta")
+    text.append(" words", style="dim")
     return text
 
 
 def run_cli_json(command: str, input_text: str, show_counter: bool = True):
     """Run the Claude CLI with ``--output-format json`` and return (text, usage).
 
-    The CLI's JSON envelope has shape::
-
-        {"type": "result", "result": "...", "usage": {...}, "total_cost_usd": 0.012}
-
-    ``usage`` dict is normalized to always contain the four token fields
-    plus ``total_cost_usd``. Missing keys default to 0.
+    Tokens are word-counted (whitespace split) over prompt + response.
+    The CLI's billed-token envelope is parsed only enough to recover the
+    response text; its ``usage`` numbers are not used.
+    ``usage`` is a single-key dict: ``{"total_tokens": int}``.
     """
     start = time.time()
     process = subprocess.Popen(
@@ -128,16 +114,12 @@ def run_cli_json(command: str, input_text: str, show_counter: bool = True):
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
-        # Fallback: the CLI printed something that isn't JSON — surface raw stdout
-        # and zeroed usage rather than crashing the whole run.
-        usage = _empty_usage()
+        # Fallback: the CLI printed something that isn't JSON — count what we
+        # sent in so the call isn't invisible to the running totals.
+        usage = {"total_tokens": len(input_text.split())}
         if show_counter:
-            console.print("[yellow]Warning: CLI did not return JSON; usage unknown.[/yellow]")
+            console.print("[yellow]Warning: CLI did not return JSON; counting prompt words only.[/yellow]")
         return stdout.strip(), usage
-
-    raw_usage = payload.get("usage", {}) or {}
-    usage = {k: int(raw_usage.get(k, 0) or 0) for k in _USAGE_KEYS}
-    usage["total_cost_usd"] = float(payload.get("total_cost_usd", 0.0) or 0.0)
 
     result_text = payload.get("result")
     if result_text is None:
@@ -145,14 +127,14 @@ def run_cli_json(command: str, input_text: str, show_counter: bool = True):
         result_text = payload.get("content") or ""
     result_text = result_text.strip() if isinstance(result_text, str) else json.dumps(result_text)
 
+    usage = {"total_tokens": len(input_text.split()) + len(result_text.split())}
+
     if show_counter:
         console.print(_final_display(usage))
 
     return result_text, usage
 
 
-# Back-compat shim: old call sites expected (text, token_count). Token count here
-# is (input + output) from the authoritative CLI usage report.
 def run_with_token_counter(command, input_text):
     text, usage = run_cli_json(command, input_text, show_counter=True)
-    return text, usage["input_tokens"] + usage["output_tokens"]
+    return text, usage["total_tokens"]

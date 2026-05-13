@@ -4,132 +4,163 @@ def init_mapping(self):
 
     N = self.num_qubits
 
-    self.mapping_dict = [-1] * N
-    self.reverse_mapping_dict = [-1] * N
-
-    interactions = []
-    logical_set = set()
-    for gate_id, qubits in self.access.items():
+    # ---- gather logical interactions from self.access (access2q may be None)
+    log_adj = defaultdict(lambda: defaultdict(float))
+    active = set()
+    for _, qubits in self.access.items():
         if len(qubits) == 2:
-            a, b = int(qubits[0]), int(qubits[1])
+            a, b = qubits[0], qubits[1]
             if a == b:
                 continue
-            interactions.append((a, b))
-            logical_set.add(a)
-            logical_set.add(b)
-        elif len(qubits) == 1:
-            logical_set.add(int(qubits[0]))
+            log_adj[a][b] += 1.0
+            log_adj[b][a] += 1.0
+            active.add(a); active.add(b)
 
-    max_logical = max(logical_set) if logical_set else -1
-    L_size = max(N, max_logical + 1)
+    # If QIG already provides richer info, prefer it
+    try:
+        for u, nbrs in self.qubit_interaction_graph.items():
+            for v, w in nbrs.items():
+                if u == v or w <= 0:
+                    continue
+                if log_adj[u][v] < w:
+                    log_adj[u][v] = float(w)
+                    log_adj[v][u] = float(w)
+                active.add(u); active.add(v)
+    except Exception:
+        pass
 
-    log_weight = defaultdict(float)
-    for (a, b) in interactions:
-        if a >= L_size or b >= L_size:
-            continue
-        log_weight[(a, b)] += 1.0
-        log_weight[(b, a)] += 1.0
-
-    def build_transition(size, edge_weights):
-        P = np.zeros((size, size), dtype=np.float64)
-        for (u, v), w in edge_weights.items():
-            P[u, v] += w
-        row_sums = P.sum(axis=1)
-        for i in range(size):
-            if row_sums[i] > 0.0:
-                P[i] /= row_sums[i]
+    # ---- build dense logical/physical transition matrices over N nodes
+    def build_transition(adj_neighbors_fn, n):
+        P = np.zeros((n, n), dtype=np.float64)
+        for i in range(n):
+            nbrs = adj_neighbors_fn(i)
+            tot = 0.0
+            for j, w in nbrs:
+                if 0 <= j < n and j != i and w > 0:
+                    P[i, j] = w
+                    tot += w
+            if tot > 0:
+                P[i, :] /= tot
             else:
-                P[i, i] = 1.0
+                # dangling: uniform teleport
+                P[i, :] = 1.0 / n
         return P
 
-    log_size = L_size
-    P_log = build_transition(log_size, log_weight)
+    def log_neighbors(i):
+        return [(j, w) for j, w in log_adj.get(i, {}).items()]
 
-    phys_weight = defaultdict(float)
-    try:
-        for (u, v) in self.backend_connections:
-            if 0 <= u < N and 0 <= v < N and u != v:
-                phys_weight[(int(u), int(v))] += 1.0
-    except Exception:
-        for u in range(N):
-            try:
-                for v in self.backend[u]:
-                    if 0 <= v < N and u != v:
-                        phys_weight[(u, int(v))] += 1.0
-            except Exception:
-                pass
-    P_phys = build_transition(N, phys_weight)
+    def phys_neighbors(i):
+        out = []
+        try:
+            for j in self.backend.get(i, set()):
+                if 0 <= j < N and j != i:
+                    out.append((j, 1.0))
+        except Exception:
+            pass
+        return out
 
-    def ppr_signatures(P, size, alpha=0.15, iters=50, tol=1e-9):
-        sigs = np.zeros((size, size), dtype=np.float64)
-        I = np.eye(size, dtype=np.float64)
+    P_log = build_transition(log_neighbors, N)
+    P_phys = build_transition(phys_neighbors, N)
+
+    # ---- personalized PageRank by power iteration; rows of (1-a)(I - a P^T)^{-1}
+    # We compute PPR via iteration: r_{k+1} = a * P^T r_k + (1-a) e_s, batched over all s.
+    def ppr_matrix(P, alpha=0.15, iters=40, tol=1e-6):
+        n = P.shape[0]
         Pt = P.T
-        for v in range(size):
-            r = np.zeros(size, dtype=np.float64)
-            r[v] = 1.0
-            x = r.copy()
-            for _ in range(iters):
-                x_new = (1.0 - alpha) * (Pt @ x) + alpha * r
-                if np.linalg.norm(x_new - x, ord=1) < tol:
-                    x = x_new
-                    break
-                x = x_new
-            sigs[v] = np.sort(x)[::-1]
-        return sigs
+        # R[:, s] = PPR vector for source s
+        R = np.full((n, n), 1.0 / n, dtype=np.float64)
+        E = np.eye(n, dtype=np.float64) * alpha
+        one_minus_a = 1.0 - alpha
+        for _ in range(iters):
+            R_new = one_minus_a * (Pt @ R) + E
+            if np.max(np.abs(R_new - R)) < tol:
+                R = R_new
+                break
+            R = R_new
+        return R  # column s = PPR(s)
 
-    log_sigs = ppr_signatures(P_log, log_size)
-    phys_sigs = ppr_signatures(P_phys, N)
+    try:
+        PPR_log = ppr_matrix(P_log)
+        PPR_phys = ppr_matrix(P_phys)
 
-    def sig_key(sig):
-        return tuple(round(float(x), 10) for x in sig)
+        # ---- fingerprint = sorted (descending) PPR vector, fixed length L
+        L = min(N, 32)
+        def fingerprints(PPR):
+            F = np.zeros((N, L), dtype=np.float64)
+            for s in range(N):
+                v = np.sort(PPR[:, s])[::-1]
+                F[s, :] = v[:L]
+            # normalize each fingerprint to unit L1 to make comparable
+            sums = F.sum(axis=1, keepdims=True)
+            sums[sums == 0] = 1.0
+            return F / sums
+        F_log = fingerprints(PPR_log)
+        F_phys = fingerprints(PPR_phys)
 
-    logical_qubits_to_place = sorted(logical_set)
-    log_keys = [(sig_key(log_sigs[q]), q) for q in logical_qubits_to_place]
-    log_keys.sort(reverse=True)
+        # ---- weights: logical activity (idle logicals get small weight)
+        weights = np.ones(N, dtype=np.float64)
+        try:
+            for q, w in self.logical_activity.items():
+                if 0 <= q < N:
+                    weights[q] = 1.0 + float(w)
+        except Exception:
+            pass
+        for q in active:
+            if 0 <= q < N and weights[q] < 1.0:
+                weights[q] = 1.0
 
-    phys_keys = [(sig_key(phys_sigs[p]), p) for p in range(N)]
-    phys_keys.sort(reverse=True)
+        # ---- cost matrix: weighted L1 distance between fingerprints
+        # C[i, j] = w_i * sum_k |F_log[i,k] - F_phys[j,k]|
+        diff = np.abs(F_log[:, None, :] - F_phys[None, :, :]).sum(axis=2)
+        C = diff * weights[:, None]
 
-    used_phys = set()
-    assigned_log = set()
+        from scipy.optimize import linear_sum_assignment
+        row_ind, col_ind = linear_sum_assignment(C)
 
-    for (lk, lq), (pk, pq) in zip(log_keys, phys_keys):
-        if lq >= N:
-            continue
-        if pq in used_phys or lq in assigned_log:
-            continue
-        self.mapping_dict[lq] = pq
-        used_phys.add(pq)
-        assigned_log.add(lq)
+        mapping = [-1] * N
+        for r, c in zip(row_ind, col_ind):
+            mapping[int(r)] = int(c)
 
-    free_phys = [p for p in range(N) if p not in used_phys]
-    fp_idx = 0
-    for lq in range(N):
-        if self.mapping_dict[lq] != -1:
-            continue
-        if lq < N and lq not in used_phys:
-            self.mapping_dict[lq] = lq
-            used_phys.add(lq)
-        else:
-            while fp_idx < len(free_phys) and free_phys[fp_idx] in used_phys:
-                fp_idx += 1
-            if fp_idx < len(free_phys):
-                self.mapping_dict[lq] = free_phys[fp_idx]
-                used_phys.add(free_phys[fp_idx])
-                fp_idx += 1
+        # safety: ensure no -1 and injection
+        used = set(p for p in mapping if p >= 0)
+        free = [p for p in range(N) if p not in used]
+        for i in range(N):
+            if mapping[i] == -1:
+                mapping[i] = free.pop()
 
-    free_phys = [p for p in range(N) if p not in used_phys]
-    fp_idx = 0
-    for lq in range(N):
-        if self.mapping_dict[lq] == -1:
-            if fp_idx < len(free_phys):
-                self.mapping_dict[lq] = free_phys[fp_idx]
-                used_phys.add(free_phys[fp_idx])
-                fp_idx += 1
+        if len(set(mapping)) != N:
+            raise RuntimeError("non-injective ppr mapping")
 
-    for lq in range(N):
-        pq = self.mapping_dict[lq]
-        if 0 <= pq < N:
-            self.reverse_mapping_dict[pq] = lq
+        self.mapping_dict = mapping
+        self.reverse_mapping_dict = [0] * N
+        for l, p in enumerate(mapping):
+            self.reverse_mapping_dict[p] = l
+
+    except Exception:
+        # Fallback: structure-aware initial mapping then identity completion
+        try:
+            from src.mapping.initial_mapping import generate_structure_aware_initial_mapping
+            md, rmd = generate_structure_aware_initial_mapping(
+                self.access, self.backend, self.distance_matrix, N
+            )
+            self.mapping_dict = list(md)
+            self.reverse_mapping_dict = list(rmd)
+        except Exception:
+            self.mapping_dict = list(range(N))
+            self.reverse_mapping_dict = list(range(N))
+
+        used = set()
+        for i, p in enumerate(self.mapping_dict):
+            if not isinstance(p, int) or p < 0 or p >= N or p in used:
+                self.mapping_dict[i] = -1
+            else:
+                used.add(p)
+        free = [p for p in range(N) if p not in used]
+        for i in range(N):
+            if self.mapping_dict[i] == -1:
+                self.mapping_dict[i] = free.pop()
+        self.reverse_mapping_dict = [0] * N
+        for l, p in enumerate(self.mapping_dict):
+            self.reverse_mapping_dict[p] = l
 
     assert len(set(self.mapping_dict)) == len(self.mapping_dict)

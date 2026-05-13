@@ -215,6 +215,12 @@ class KnowledgeGraph:
             if h.status in ("open", "confident")
         ]
 
+    def all_explored_statements(self) -> List[str]:
+        """Every direction the agent has already considered, regardless of
+        outcome (open / confident / falsified / exhausted). Used by the
+        re-ideation phase to push the LLM toward genuinely novel directions."""
+        return [h.statement for h in self.hypotheses.values()]
+
     # ---------- persistence ----------
 
     def to_dict(self) -> Dict:

@@ -1,125 +1,134 @@
 def init_mapping(self):
-    import heapq
-    from collections import deque
+    num_qubits = self.num_qubits
 
-    N = self.num_qubits
-    mapping = [-1] * N
-    reverse = [-1] * N
-    used = set()
-    placed = set()
+    self.mapping_dict = [-1] * num_qubits
+    self.reverse_mapping_dict = [-1] * num_qubits
 
-    qig = self.qubit_interaction_graph
-    backend = self.backend
-    centrality = self.physical_centrality
-    phys_range = len(self.distance_matrix)
-
-    def place(lq, pq):
-        mapping[lq] = pq
-        reverse[pq] = lq
-        used.add(pq)
-        placed.add(lq)
-
-    def pick_central_unused():
-        best, best_score = None, -1.0
-        for p in range(phys_range):
-            if p in used:
+    edge_weight = {}
+    for gate_id, qubits in self.access.items():
+        if len(qubits) == 2:
+            a, b = qubits[0], qubits[1]
+            if a == b:
                 continue
-            sc = centrality.get(p, 0.0)
-            if sc > best_score:
-                best_score = sc
-                best = p
-        if best is not None:
-            return best
-        for p in range(N):
-            if p not in used:
-                return p
-        return None
+            key = (a, b) if a < b else (b, a)
+            try:
+                w = self.qubit_interaction_graph[key[0]][key[1]]
+            except Exception:
+                w = 0
+            if not w:
+                edge_weight[key] = edge_weight.get(key, 0) + 1
+            else:
+                if key not in edge_weight:
+                    edge_weight[key] = w
 
-    def pick_adjacent_unused(anchor):
-        best, best_score = None, -1.0
-        for nb in backend.get(anchor, []):
-            if nb in used:
+    logical_edges = sorted(edge_weight.items(), key=lambda kv: -kv[1])
+
+    centrality = getattr(self, "physical_centrality", {}) or {}
+
+    def cscore(p):
+        return centrality.get(p, 0.0)
+
+    seen_hw = set()
+    hw_edges = []
+    for (u, v) in self.backend_connections:
+        if u == v:
+            continue
+        key = (u, v) if u < v else (v, u)
+        if key in seen_hw:
+            continue
+        seen_hw.add(key)
+        hw_edges.append(key)
+    hw_edges.sort(key=lambda e: -(cscore(e[0]) + cscore(e[1])))
+
+    used_phys = set()
+    placed_log = {}
+
+    def free_neighbor_edges(phys):
+        candidates = []
+        for nb in self.backend.get(phys, ()):
+            if nb in used_phys:
                 continue
-            sc = centrality.get(nb, 0.0)
-            if sc > best_score:
-                best_score = sc
-                best = nb
-        if best is not None:
-            return best
-        visited = {anchor}
-        bq = deque([anchor])
-        while bq:
-            cur = bq.popleft()
-            for nb in backend.get(cur, []):
-                if nb in visited:
+            candidates.append((nb, cscore(nb)))
+        candidates.sort(key=lambda x: -x[1])
+        return [c[0] for c in candidates]
+
+    for (lu, lv), _w in logical_edges:
+        u_placed = lu in placed_log
+        v_placed = lv in placed_log
+
+        if u_placed and v_placed:
+            continue
+
+        if not u_placed and not v_placed:
+            chosen = None
+            for (pa, pb) in hw_edges:
+                if pa in used_phys or pb in used_phys:
                     continue
-                visited.add(nb)
-                if nb not in used:
-                    return nb
-                bq.append(nb)
-        return None
-
-    edges = []
-    for q1 in qig:
-        for q2, w in qig[q1].items():
-            if q1 < q2:
-                edges.append((w, q1, q2))
-    edges.sort(key=lambda x: -x[0])
-
-    heap = []
-
-    def add_frontier(lq):
-        for nb, w in qig.get(lq, {}).items():
-            if nb not in placed:
-                heapq.heappush(heap, (-w, lq, nb))
-
-    def grow():
-        while heap:
-            _, pq, uq = heapq.heappop(heap)
-            if uq in placed:
+                chosen = (pa, pb)
+                break
+            if chosen is None:
                 continue
-            new_phys = pick_adjacent_unused(mapping[pq])
-            if new_phys is None:
-                return
-            place(uq, new_phys)
-            add_frontier(uq)
+            pa, pb = chosen
+            if cscore(pa) >= cscore(pb):
+                placed_log[lu] = pa
+                placed_log[lv] = pb
+            else:
+                placed_log[lu] = pb
+                placed_log[lv] = pa
+            used_phys.add(pa)
+            used_phys.add(pb)
+        else:
+            if u_placed:
+                anchor_log, anchor_phys, free_log = lu, placed_log[lu], lv
+            else:
+                anchor_log, anchor_phys, free_log = lv, placed_log[lv], lu
+            neighbors = free_neighbor_edges(anchor_phys)
+            if not neighbors:
+                continue
+            target = neighbors[0]
+            placed_log[free_log] = target
+            used_phys.add(target)
 
-    for (w, q1, q2) in edges:
-        if q1 in placed or q2 in placed:
-            continue
-        p1 = pick_central_unused()
-        if p1 is None:
+    logical_in_circuit = set()
+    for gate_id, qubits in self.access.items():
+        for q in qubits:
+            logical_in_circuit.add(q)
+
+    remaining_logical = [q for q in logical_in_circuit if q not in placed_log]
+    activity = getattr(self, "logical_activity", {}) or {}
+    remaining_logical.sort(key=lambda q: -activity.get(q, 0))
+
+    free_phys_sorted = sorted(
+        (p for p in range(num_qubits) if p not in used_phys),
+        key=lambda p: -cscore(p),
+    )
+
+    for lq in remaining_logical:
+        if not free_phys_sorted:
             break
-        used.add(p1)
-        p2 = pick_adjacent_unused(p1)
-        used.discard(p1)
-        place(q1, p1)
-        add_frontier(q1)
-        if p2 is not None:
-            place(q2, p2)
-            add_frontier(q2)
-        grow()
+        target = free_phys_sorted.pop(0)
+        placed_log[lq] = target
+        used_phys.add(target)
 
-    for q in qig:
-        if 0 <= q < N and q not in placed:
-            p = pick_central_unused()
-            if p is None:
-                break
-            place(q, p)
-            add_frontier(q)
-            grow()
+    for lq, pq in placed_log.items():
+        if 0 <= lq < num_qubits and 0 <= pq < num_qubits:
+            self.mapping_dict[lq] = pq
+            self.reverse_mapping_dict[pq] = lq
 
-    for q in range(N):
-        if mapping[q] == -1 and q not in used:
-            place(q, q)
-    for q in range(N):
-        if mapping[q] != -1:
-            continue
-        for p in range(N):
-            if p not in used:
-                place(q, p)
-                break
+    unused_logical = [q for q in range(num_qubits) if self.mapping_dict[q] == -1]
+    unused_physical = [p for p in range(num_qubits) if self.reverse_mapping_dict[p] == -1]
 
-    self.mapping_dict = mapping
-    self.reverse_mapping_dict = reverse
+    identity_first = [q for q in unused_logical if q in unused_physical and self.reverse_mapping_dict[q] == -1 and self.mapping_dict[q] == -1]
+    identity_set = set(identity_first)
+    for q in identity_first:
+        self.mapping_dict[q] = q
+        self.reverse_mapping_dict[q] = q
+
+    unused_logical = [q for q in range(num_qubits) if self.mapping_dict[q] == -1]
+    unused_physical = [p for p in range(num_qubits) if self.reverse_mapping_dict[p] == -1]
+
+    for lq, pq in zip(unused_logical, unused_physical):
+        self.mapping_dict[lq] = pq
+        self.reverse_mapping_dict[pq] = lq
+
     assert len(set(self.mapping_dict)) == len(self.mapping_dict)

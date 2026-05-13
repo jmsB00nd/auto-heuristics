@@ -1,0 +1,24 @@
+TASK: Propose new `init_mapping(self)` heuristic ideas that explore directions NOT YET REPRESENTED in the agent's knowledge graph.
+
+The list below enumerates every algorithmic direction the agent has already considered or tested in this run — open hypotheses still being trialed, confident hypotheses already exploited, and falsified/exhausted ones. Continuing along ANY of these axes — even with slight variations — duplicates work the knowledge graph already covers.
+
+[ALREADY-EXPLORED STRATEGIES — do NOT propose ideas that overlap these]
+{explored_strategies}
+
+{variables}
+
+Your task: propose {target_top_ideas} fundamentally different heuristic ideas, each grounded in an algorithmic primitive ABSENT from the list above.
+
+OUTPUT FORMAT (per idea, blocks separated by `---`):
+
+NAME: <concise snake_case name capturing the main primitive>
+STATUS: KEPT
+DESCRIPTION: <one or two sentences describing the algorithm — what it computes and why it should reduce SWAPs>
+CORE_IDEA: <single sentence stating the new mechanism>
+HOW_IT_WORKS: <2–3 sentences of operational detail>
+WHY_IT_REDUCES_SWAPS: <causal argument, not vague claims>
+
+Rules:
+- Reject any idea that overlaps substantially with an already-explored strategy. If your first instinct overlaps, discard it.
+- Diversity matters more than safety: prefer bold orthogonal directions over incremental tweaks.
+- Do NOT include code in this response.
