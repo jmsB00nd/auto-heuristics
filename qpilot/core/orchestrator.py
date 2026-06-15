@@ -64,12 +64,18 @@ class Qpilot:
         self.evaluator = CodeEvaluator(config)
         self.memory = MemoryManager(config.history_file, active_limit=getattr(config, 'active_memory_limit', 20))
 
-        # Shared FE counter — debited by EvolutionLoop._evaluate AND by
-        # re-ideation-phase re-implementations.
-        self.budget = BudgetTracker(max_fe=config.max_fe)
+        # Shared budget — debited by EvolutionLoop._evaluate AND by
+        # re-ideation-phase re-implementations. Stops on whichever comes first:
+        # the FE count (max_fe) or the wall-clock limit (max_time_seconds).
+        self.budget = BudgetTracker(
+            max_fe=config.max_fe,
+            max_seconds=getattr(config, "max_time_seconds", None),
+        )
 
-        # Cross-run KG: load if memory has one, else fresh.
-        kg_dict = self.memory.get_knowledge_graph()
+        # Cross-run KG: load if memory has one, else fresh. Ablation (use_kg=False):
+        # start from an empty graph and never load prior state — it stays inert
+        # (no traits/hypotheses are ever registered, sampled, or updated).
+        kg_dict = self.memory.get_knowledge_graph() if getattr(config, "use_kg", True) else None
         if kg_dict:
             self.kg = KnowledgeGraph.from_dict(kg_dict, pop_size=config.pop_size)
         else:
@@ -170,11 +176,14 @@ class Qpilot:
         start_time = time.time()
         console.print(Rule("Idea Generation", style="bold magenta"))
 
-        memory_dump = self.memory.get_all_summarized()
+        use_memory = getattr(self.config, "use_ideation_memory", True)
+        memory_dump = self.memory.get_all_summarized() if use_memory else "No past ideas in memory."
         memory_resume = ""
+        if not use_memory:
+            console.print("[yellow]Ablation: ideation memory disabled — generating ideas with no past-experiment context.[/yellow]")
 
         with self.llm.stage("ideas_generation"):
-            if memory_dump != "No past ideas in memory.":
+            if use_memory and memory_dump != "No past ideas in memory.":
                 console.print("[cyan]Synthesizing all past memory into a global resume...[/cyan]")
 
                 summary_prompt = (
@@ -377,8 +386,12 @@ class Qpilot:
 
         pop_size = getattr(self.config, "pop_size", 10)
         crossover_count = getattr(self.config, "crossover_count", 5)
-        # One evolve iteration costs `crossover_count` (children) + 1 (mutation).
-        iter_cost = crossover_count + 1
+        use_crossover = getattr(self.config, "use_crossover", True)
+        use_mutation = getattr(self.config, "use_mutation", True)
+        use_reideation = getattr(self.config, "use_reideation", True)
+        # One evolve iteration costs the FE of whichever operators are enabled:
+        # `crossover_count` children (if crossover on) + 1 mutant (if mutation on).
+        iter_cost = max(1, (crossover_count if use_crossover else 0) + (1 if use_mutation else 0))
 
         initial_population = self._build_initial_population(initial_results, pop_size)
         console.print(
@@ -388,6 +401,10 @@ class Qpilot:
 
         all_results = dict(initial_results or {})
         last_loop: EvolutionLoop = None
+        # Running iteration index shared across outer cycles. Each fresh loop
+        # resumes numbering here, so iter_* dirs stop overwriting one another
+        # and last_loop.iteration reports the true total below.
+        next_iteration = 0
 
         while self.budget.remaining() >= iter_cost:
             loop = EvolutionLoop(
@@ -401,9 +418,13 @@ class Qpilot:
                 kg=self.kg,
                 budget=self.budget,
                 on_eval=self._record_eval,
+                start_iteration=next_iteration,
             )
             loop.seed(initial_population)
-            final_population = loop.evolve(max_iterations=1)
+            # Re-ideation OFF: let a single loop run crossover+mutation until the
+            # FE budget is exhausted (no novelty injection between iterations).
+            final_population = loop.evolve(max_iterations=1 if use_reideation else None)
+            next_iteration = loop.iteration
             last_loop = loop
 
             for ind in final_population:
@@ -417,12 +438,23 @@ class Qpilot:
             # Mirror final KG state to memory for cross-run continuity.
             self.memory.set_knowledge_graph(self.kg.to_dict())
 
+            if not use_reideation:
+                log_event("evolution", "reideation_disabled_loop_to_budget", remaining=self.budget.remaining())
+                break
+
             # Budget gate: need room for one more evolve iteration after re-ideation.
             if self.budget.remaining() < iter_cost:
                 log_event("evolution", "cycle_skipped_low_budget", remaining=self.budget.remaining())
                 break
 
-            new_seeds, n_success = self._reideation_phase(self.kg.all_explored_statements())
+            new_seeds, n_success, reideation_results = self._reideation_phase(self.kg.all_explored_statements())
+
+            # Re-ideation evals debit the budget and live in memory/per-idea logs,
+            # but they only enter `all_results` via the *next* loop's final_population.
+            # If the budget exhausts before that loop runs, the evaluations are paid
+            # for but invisible to the final report. Merge them in directly.
+            for name, stats in reideation_results.items():
+                all_results[name] = stats
 
             if n_success == 0:
                 self._consecutive_failed_restarts += 1
@@ -444,9 +476,22 @@ class Qpilot:
             self.stage_times["evolution"] = time.time() - start_time
             return all_results
 
-        if last_loop.best_individual_overall is not None:
-            safe = re.sub(r"[^\w\-]", "_", last_loop.best_individual_overall["name"])
-            _save_heuristic(self.config.log_dir, f"best_evolution_{safe}", last_loop.best_individual_overall["code"])
+        # Save the true overall-best heuristic from all_results — this includes
+        # re-ideation evaluations, which last_loop.best_individual_overall misses.
+        best_name = None
+        best_obj = float("inf")
+        for name, stats in all_results.items():
+            if stats.get("error") is not None or not stats.get("code"):
+                continue
+            ms = stats.get("mean_swaps")
+            if ms is None or ms == float("inf"):
+                continue
+            if ms < best_obj:
+                best_obj = ms
+                best_name = name
+        if best_name is not None:
+            safe = re.sub(r"[^\w\-]", "_", best_name)
+            _save_heuristic(self.config.log_dir, f"best_evolution_{safe}", all_results[best_name]["code"])
 
         # Final artifacts — final_population from the last loop, plus KG path.
         final_population = last_loop.population
@@ -455,12 +500,31 @@ class Qpilot:
         ])
         kg_path = os.path.join(self.evolution_dir, "knowledge_graph_final.json")
         save_json(self.evolution_dir, "knowledge_graph_final.json", self.kg.to_dict())
+
+        # Recompute the true best across BOTH loop-evolved individuals and any
+        # re-ideation evaluations now merged into all_results. `last_loop`'s
+        # internal best only ever sees crossover/mutation children.
+        best_name = None
+        best_obj = float("inf")
+        for name, stats in all_results.items():
+            if stats.get("error") is not None:
+                continue
+            ms = stats.get("mean_swaps")
+            if ms is None or ms == float("inf"):
+                continue
+            if ms < best_obj:
+                best_obj = ms
+                best_name = name
+
         save_json(self.evolution_dir, "summary.json", {
             "function_evals": self.budget.current,
             "max_fe": self.config.max_fe,
+            "elapsed_seconds": round(self.budget.elapsed(), 1),
+            "max_seconds": self.budget.max_seconds,
+            "stop_reason": self.budget.stop_reason(),
             "iterations": last_loop.iteration,
-            "best_obj_overall": last_loop.best_obj_overall if last_loop.best_obj_overall != float("inf") else None,
-            "best_name": last_loop.best_individual_overall["name"] if last_loop.best_individual_overall else None,
+            "best_obj_overall": best_obj if best_obj != float("inf") else None,
+            "best_name": best_name,
             "knowledge_graph_path": kg_path,
             "reideation_cycles": self._reideation_count,
             "consecutive_failed_restarts": self._consecutive_failed_restarts,
@@ -499,8 +563,10 @@ class Qpilot:
     def _reideation_phase(self, explored_statements: list) -> tuple:
         """Generate fresh ideas that avoid every direction the KG already
         tracks (open / confident / falsified / exhausted), implement +
-        evaluate them (debits ``self.budget``), and return surviving seeds
-        plus the count of successful implementations."""
+        evaluate them (debits ``self.budget``), and return surviving seeds,
+        the count of successful implementations, and the full impl_results
+        dict (so the caller can merge it into ``all_results`` — needed when
+        the budget exhausts before the next evolve loop runs)."""
         self._reideation_count += 1
         console.print(Rule(
             f"Re-ideation cycle #{self._reideation_count}",
@@ -539,7 +605,7 @@ class Qpilot:
         kept, _eliminated = IdeaParser.parse_ideas(response or "")
         if not kept:
             log_event("evolution", "reideation_phase_no_ideas", cycle=self._reideation_count)
-            return [], 0
+            return [], 0, {}
 
         # Cap by budget — never queue more than budget can afford.
         max_by_budget = self.budget.remaining()
@@ -569,7 +635,7 @@ class Qpilot:
                 # Post-hoc hypothesis: first sentence of description, open + 0.5.
                 desc = stats.get("description") or name
                 first_sentence = re.split(r"(?<=[.!?])\s+", desc.strip(), maxsplit=1)[0].strip()
-                if first_sentence:
+                if first_sentence and getattr(self.config, "use_kg", True):
                     self.kg.register_hypothesis(first_sentence, related_trait_labels=[], iter_idx=-1)
 
         log_event(
@@ -580,7 +646,7 @@ class Qpilot:
             n_success=n_success,
             budget_remaining=self.budget.remaining(),
         )
-        return seeds, n_success
+        return seeds, n_success, impl_results
 
     def _build_summary(self, all_results, idea_bests, best_idea, successful_ideas) -> RunSummary:
         ranking = []

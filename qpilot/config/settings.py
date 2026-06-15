@@ -28,14 +28,22 @@ class OrchestratorConfig:
 
     run_evolution: bool = True
     pop_size: int = 10
-    crossover_count: int = 5
+    crossover_count: int = 4
     max_fe: int = 50
+
+    max_time_seconds: Optional[float] = None
     evolution_workers: int = 2
     active_memory_limit: int = 20
+ 
+    use_kg: bool = True
+    use_crossover: bool = True
+    use_mutation: bool = True
+    use_reideation: bool = True
+    use_ideation_memory: bool = True
 
     kg_alpha: float = 0.2
-    kg_confidence_threshold: float = 0.75
-    kg_open_sample_prob: float = 0.3
+    kg_confidence_threshold: float = 0.6
+    kg_open_sample_prob: float = 0.5
 
     generate_plots: bool = True
 

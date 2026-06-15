@@ -142,13 +142,15 @@ def plot_grouped_scatter_with_noise(data_grouped, ylabel, title,
         "qmap": "#ff7f0e",     # green
         "pytket": "#d62728",   # red
         "eoh": "#9467bd",  # purple
-        "Qpilot": "#000000",
-        "hill_climb" : "#1f77b4",
+        "Qpilot": "#1f77b4",
+        "Randsample" : "#1f77b4",
         "funsearch" : "#2ca02c",
         "eoh" : "#ff7f0e",
-        "Reevo" : "#d62728",
+        "reevo" : "#ff0000",
         "mcts-ahd" : "#bcbd22",
-        "partevo" : "#545454"
+        "partevo" : "#545454",
+        "Qpilot (without refinement)" : "#bcbd22",
+        "Qpilot (without HD-KG)" : "#d62728"
     }
 
     method_markers = {
@@ -159,11 +161,13 @@ def plot_grouped_scatter_with_noise(data_grouped, ylabel, title,
         "qlosure": "D",
         "Qpilot": "P",
         "eoh": "o",
-        "Reevo": "s",
-        "hill_climb": "^",
+        "reevo": "s",
+        "Randsample": "^",
         "funsearch": "*",
         "mcts-ahd": "D",
-        "partevo" : "^"
+        "partevo" : "^",
+        "Qpilot (without HD-KG)": "s",
+        "Qpilot (without refinement)": "*",
     }
 
     for i, (method, depth_dict) in enumerate(data_grouped.items()):

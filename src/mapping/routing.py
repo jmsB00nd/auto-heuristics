@@ -1,5 +1,6 @@
 import random
 import copy
+from collections import defaultdict
 from time import time
 
 from tqdm import tqdm
@@ -14,6 +15,59 @@ from src.utils.isl_to_python import *
 from src.utils.python_to_isl import *
 
 from src.graph.graph import *
+
+
+def build_physical_centrality_scores(distance_matrix):
+    """Centrality per physical qubit: ``1 / sum_of_distances`` to every
+    reachable qubit (higher = more central). ``distance_matrix`` is the
+    hardware shortest-path matrix, so this is keyed by physical-qubit id
+    over ``range(len(distance_matrix))``. Returns dict[int, float]."""
+    centrality = {}
+    for p, row in enumerate(distance_matrix):
+        total = 0.0
+        for d in row:
+            if d != float('inf'):
+                total += d
+        centrality[p] = (1.0 / total) if total > 0 else 0.0
+    return centrality
+
+
+def build_qubit_interaction_graph(access):
+    """Undirected weighted adjacency over LOGICAL qubits; the weight is the
+    number of 2-qubit gates between the pair. Access as ``qig[q1][q2]``
+    (returns 0 if the pair never interacts)."""
+    qig = defaultdict(lambda: defaultdict(int))
+    for qubits in access.values():
+        if len(qubits) == 2 and qubits[0] != qubits[1]:
+            a, b = qubits[0], qubits[1]
+            qig[a][b] += 1
+            qig[b][a] += 1
+    return qig
+
+
+def build_temporal_interaction_graph(access, decay_factor=0.95):
+    """Same shape as the QIG, but each 2-qubit gate contributes
+    ``decay_factor ** index`` where ``index`` is the gate's rank in schedule
+    order (earliest = 0). EARLIER gates therefore dominate the weight.
+    ``access`` keys are schedule times, so we rank by sorted key."""
+    tig = defaultdict(lambda: defaultdict(float))
+    for index, time_key in enumerate(sorted(access.keys())):
+        qubits = access[time_key]
+        if len(qubits) == 2 and qubits[0] != qubits[1]:
+            a, b = qubits[0], qubits[1]
+            w = decay_factor ** index
+            tig[a][b] += w
+            tig[b][a] += w
+    return tig
+
+
+def build_logical_activity_scores(qubit_interaction_graph):
+    """Per-logical-qubit total interaction weight (sum of its QIG row), a
+    gate-frequency proxy. Returns defaultdict[int, int]."""
+    activity = defaultdict(int)
+    for q, neighbors in qubit_interaction_graph.items():
+        activity[q] = sum(neighbors.values())
+    return activity
 
 
 class Qlosure():
@@ -33,16 +87,23 @@ class Qlosure():
         # Precompute distances over the hardware graph
         self.distance_matrix = compute_distance_matrix(self.backend)
 
-        self.num_qubits = len(self.distance_matrix)
+        self.num_qubits = len(self.distance_matrix) + 1
 
         self.access, self.write_dict = self.data["read"], self.data["write"]
         self.macro_gates = self.data.get("macro_gates", {})
         self.access2q = None
 
-        self.qubit_interaction_graph = self.build_qubit_interaction_graph()
-        self.temporal_interaction_graph = self.build_temporal_interaction_graph(decay_factor=0.95)
-        self.logical_activity = self.build_logical_activity_scores()
-        self.physical_centrality = self.build_physical_centrality_scores()
+        # Read-only structural signals consumed by init_mapping heuristics.
+        # physical_centrality is keyed by physical qubit over the distance
+        # matrix; the interaction graphs / activity are over logical qubits.
+        self.physical_centrality = build_physical_centrality_scores(
+            self.distance_matrix)
+        self.qubit_interaction_graph = build_qubit_interaction_graph(
+            self.access)
+        self.temporal_interaction_graph = build_temporal_interaction_graph(
+            self.access)
+        self.logical_activity = build_logical_activity_scores(
+            self.qubit_interaction_graph)
 
         self.decay_parameter = [1 for _ in range(self.num_qubits)]
         self.qubit_depth = {q: 0 for q in range(self.num_qubits)}
@@ -55,62 +116,18 @@ class Qlosure():
         self.extended_layer = None
 
         if with_circuit:
-            self.circuit = QuantumCircuit(self.num_qubits)
+            self.circuit = QuantumCircuit(self.num_qubits - 1)
             self.original_circuit = QuantumCircuit.from_qasm_str(
                 data.get("qasm_code", ""))
 
         self.results = {}
         self.instruction_times = defaultdict(int)
+        self.init_time = 0.0
 
-    def build_qubit_interaction_graph(self):
-        qig = defaultdict(lambda: defaultdict(int))
-        for gate_id, qubits in self.access.items():
-            if len(qubits) == 2:
-                q1, q2 = qubits
-                qig[q1][q2] += 1
-                qig[q2][q1] += 1
-        return qig
+    def run(self, heuristic_method="qlosure", enforce_read_after_read=True, transitive_reduction=True, initial_mapping_method="cblc", dag_mode="default", num_iter=6, look_ahead_param=5, verbose=0):
 
-    def build_temporal_interaction_graph(self, decay_factor=0.95):
-        tqig = defaultdict(lambda: defaultdict(float))
-        sorted_gates = sorted(self.access.keys())
-        for index, gate_id in enumerate(sorted_gates):
-            qubits = self.access[gate_id]
-            if len(qubits) == 2:
-                q1, q2 = qubits
-                weight = decay_factor ** index
-                tqig[q1][q2] += weight
-                tqig[q2][q1] += weight
-        return tqig
-
-    def build_logical_activity_scores(self):
-        activity = defaultdict(int)
-        for q1, neighbors in self.qubit_interaction_graph.items():
-            activity[q1] = sum(neighbors.values())
-        return activity
-
-    def build_physical_centrality_scores(self):
-        centrality = {}
-        num_physical_nodes = len(self.distance_matrix)
-        for i in range(num_physical_nodes):
-            total_distance = sum(self.distance_matrix[i])
-            centrality[i] = 1.0 / total_distance if total_distance > 0 else 0
-        return centrality
-
-    def run(self, heuristic_method="qlosure", enforce_read_after_read=True, transitive_reduction=True, initial_mapping_method="sabre", dag_mode="default", num_iter=1, look_ahead_param=5, verbose=0):
-        """
-        Execute the mapping/scheduling loop and return (min_swaps, min_depth, exec_time).
-
-        The method alternates between forward and backward DAG passes when
-        num_iter > 1, keeping the best result across passes.
-        """
-
-        # Initialize the logical->physical mapping
-        self.init_mapping()
 
         self.results = {}
-        min_swaps = float('inf')
-        min_depth = float('inf')
 
         # Build DAGs and a 2-qubit-only view of access for heuristics
         successors2q, dag_predecessors2q, successors_full, dag_predecessors_full, self.access2q = generate_dag(
@@ -134,8 +151,17 @@ class Qlosure():
         else:
             dag_backward_dependencies_count = dag_forward_dependencies_count
 
-        # Alternate forward/backward when num_iter>1. Keep best
-        for i in range(2*(num_iter-1)+1):
+        init_start = time()
+        self.init_mapping(method=initial_mapping_method)
+        self.init_time = time() - init_start
+
+        min_swaps = float('inf')
+        min_depth = float('inf')
+        exec_time = 0.0
+        self.decay_parameter = [1 for _ in range(self.num_qubits)]
+
+        start = time()
+        for i in range(2 * (num_iter - 1) + 1):
             if i % 2 == 0:
                 self.dag_dependencies_count = dag_forward_dependencies_count
                 self.dag2q = successors2q
@@ -144,7 +170,7 @@ class Qlosure():
                 self.dag_predecessors2q_restricted = dag_predecessors2q_rar_included
                 self.dag_full = successors_full
                 self.dag_predecessors_full = copy.deepcopy(
-                    dag_predecessors_full) if num_iter > 1 else dag_predecessors_full
+                    dag_predecessors_full)
             else:
                 self.dag_dependencies_count = dag_backward_dependencies_count
                 self.dag2q = dag_predecessors2q
@@ -153,43 +179,175 @@ class Qlosure():
                 self.dag_predecessors2q_restricted = successors2q_rar_included
                 self.dag_full = dag_predecessors_full
                 self.dag_predecessors_full = copy.deepcopy(
-                    successors_full) if num_iter > 1 else successors_full
+                    successors_full)
 
             self.init_front_layer()
             self.qubit_depth = {q: 0 for q in range(self.num_qubits)}
-            start = time()
             swap_count = self.execute_algorithm(
                 heuristic_method, look_ahead_param, verbose)
-            exec_time = time()-start
             if i % 2 == 0:
                 if swap_count < min_swaps:
-                    min_swaps = min(min_swaps, swap_count)
-                    min_depth = min(min_depth, self.get_circuit_depth())
+                    min_swaps = swap_count
+                    min_depth = self.get_circuit_depth()
                 elif swap_count == min_swaps:
                     min_depth = min(min_depth, self.get_circuit_depth())
+        exec_time = time() - start
 
         return min_swaps, min_depth, exec_time
 
-    def init_mapping(self, method="trivial"):
+    def init_mapping(self, method="cblc"):
         if method == "random":
             self.mapping_dict, self.reverse_mapping_dict = generate_random_initial_mapping(
                 self.num_qubits)
-
         elif method == "trivial":
             self.mapping_dict, self.reverse_mapping_dict = generate_trivial_initial_mapping(
                 self.num_qubits)
         elif method == "sabre":
             self.mapping_dict, self.reverse_mapping_dict = generate_sabre_initial_mapping(
                 self.data["qasm_code"], self.backend_connections, self.num_qubits)
-        elif method == "tig":
-            self.mapping_dict, self.reverse_mapping_dict = generate_tig_initial_mapping(
-                self.access, self.backend_connections, self.num_qubits)
+        elif method == "qmap":
+            self.mapping_dict, self.reverse_mapping_dict = generate_qmap_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits)
+        elif method == "cirq":
+            self.mapping_dict, self.reverse_mapping_dict = generate_cirq_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits)
+        elif method == "pytket":
+            self.mapping_dict, self.reverse_mapping_dict = generate_pytket_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits)
+        elif method == "gem":
+            self.mapping_dict, self.reverse_mapping_dict = generate_gem_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits,
+                self.access, self.distance_matrix, self.backend)
+            self._gem_portfolio_refine()
+        elif method == "vex":
+            self.mapping_dict, self.reverse_mapping_dict = generate_vex_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits,
+                self.access, self.distance_matrix, self.backend)
+        elif method == "cblc":
+            self.mapping_dict, self.reverse_mapping_dict = generate_cblc_initial_mapping(
+                self.data["qasm_code"], self.backend_connections, self.num_qubits,
+                self.access, self.distance_matrix, self.backend)
         else:
             raise ValueError(
-                f"Unknown mapping initialization method: {method}")
+                f"Unknown mapping initialization method: {method!r}. "
+                f"Supported: 'cblc', 'sabre', 'trivial', 'random'."
+            )
 
         if self.use_isl:
             self.isl_mapping = dict_to_isl_map(self.mapping_dict)
+
+    def _gem_portfolio_refine(self):
+        """Ring-structured persistent circuits (QUEKO-class) on devices
+        where their rings cannot embed flat: evaluate a small fixed
+        portfolio of structurally-motivated mappings — the GEM result
+        (influence-decay cluster), two lane-carousel placements, a
+        raw-count cluster and a breathing cluster — by routing the
+        first 60% of the gate list once per candidate, and keep the
+        best. The portfolio is only built when the two-ring signature
+        is present and the GEM mapping is not already an exact
+        embedding, so all other circuit classes are untouched.
+        """
+        # already a zero-SWAP embedding? keep it.
+        all_adj = True
+        for qs in self.access.values():
+            if len(qs) == 2 and qs[0] != qs[1]:
+                p1, p2 = self.mapping_dict[qs[0]], self.mapping_dict[qs[1]]
+                if (p1, p2) not in self.backend_connections and \
+                        (p2, p1) not in self.backend_connections:
+                    all_adj = False
+                    break
+        if all_adj:
+            return
+
+        carousels = generate_carousel_candidates(
+            self.access, self.distance_matrix, self.backend,
+            self.num_qubits)
+        mesh = (not carousels and is_mesh_regime(
+            self.access, self.backend, len(self.distance_matrix)))
+        if not carousels and not mesh:
+            return
+
+        candidates = [list(self.mapping_dict)] + carousels
+        if mesh:
+            # lean duel for large meshes: the spectral co-embedding
+            # against the GEM cluster; anything more blows the
+            # per-circuit time budget at this register size.
+            m = generate_spectral_descent_mapping(
+                self.access, self.distance_matrix, self.backend,
+                self.num_qubits)
+            if m is not None:
+                candidates.append(m)
+        if not mesh:
+            raws = generate_cluster_variant_mapping(
+                self.access, self.distance_matrix, self.backend,
+                self.num_qubits, mode='raw', top2=True)
+            if raws:
+                candidates.extend(raws)
+            m = generate_cluster_variant_mapping(
+                self.access, self.distance_matrix, self.backend,
+                self.num_qubits, mode='decay', breathe=True)
+            if m is not None:
+                candidates.append(m)
+            m = generate_tree_embed_mapping(
+                self.access, self.distance_matrix, self.backend,
+                self.num_qubits)
+            if m is not None:
+                candidates.append(m)
+            try:
+                m, _ = generate_vex_initial_mapping(
+                    self.data.get("qasm_code", ""),
+                    self.backend_connections,
+                    self.num_qubits, self.access, self.distance_matrix,
+                    self.backend)
+                candidates.append(m)
+            except Exception:
+                pass
+
+
+        # each candidate is evaluated on a fixed routing budget of
+        # ~1900 2q gates: exact selection for short circuits, a long
+        # prefix for deep ones. The budget is a runtime guard (keeps
+        # the whole portfolio within the per-circuit time limit), not
+        # a quality parameter.
+        keys = sorted(self.access.keys())
+        n2q = sum(1 for k in keys
+                  if len(self.access[k]) == 2
+                  and self.access[k][0] != self.access[k][1])
+        budget = 800.0 if mesh else 1900.0
+        frac = min(1.0, budget / max(n2q, 1))
+        cut = keys[:max(1, int(len(keys) * frac))]
+        sub = {'read': {k: self.access[k] for k in cut},
+               'write': {k: self.write_dict[k] for k in cut
+                         if k in self.write_dict},
+               'qasm_code': ''}
+        edges = list(self.backend_connections)
+        best = None
+        for m in candidates:
+            try:
+                clone = Qlosure(edges, sub, with_circuit=False)
+                rev = [-1] * clone.num_qubits
+                for l, p in enumerate(m):
+                    if 0 <= p < len(rev):
+                        rev[p] = l
+
+                def im(zelf, method="fixed", _m=m, _r=rev):
+                    zelf.mapping_dict = list(_m)
+                    zelf.reverse_mapping_dict = list(_r)
+                clone.init_mapping = im.__get__(clone)
+                if best is not None:
+                    clone.swap_abort_threshold = best[1]
+                sw, _, _ = clone.run(num_iter=1)
+            except Exception:
+                continue
+            if best is None or sw < best[1]:
+                best = (m, sw)
+        if best is not None:
+            self.mapping_dict = list(best[0])
+            rev = [-1] * self.num_qubits
+            for l, p in enumerate(self.mapping_dict):
+                if 0 <= p < len(rev):
+                    rev[p] = l
+            self.reverse_mapping_dict = rev
 
     def init_front_layer(self):
         self.front_layer = set()
@@ -200,10 +358,13 @@ class Qlosure():
     def execute_algorithm(self, huristic_method, param, verbose):
         swap_count = 0
         total_gates = len(self.access)
+        abort_at = getattr(self, 'swap_abort_threshold', None)
         self.decay_parameter = [1 for _ in range(self.num_qubits)]
 
         with tqdm(total=total_gates, desc="Running Qlosure", mininterval=0.1, disable=(verbose == 0), leave=True) as pbar:
             while len(self.front_layer) > 0:
+                if abort_at is not None and swap_count > abort_at:
+                    return swap_count
 
                 ready_to_execute_gates = self.extract_ready_to_execute_gate_list()
                 if len(ready_to_execute_gates) > 0:

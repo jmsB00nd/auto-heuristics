@@ -5,11 +5,20 @@ WRITE-TARGETS (your function MUST populate these, indexed by logical qubit id)
 - self.reverse_mapping_dict:  list-like, reverse_mapping_dict[physical_q] = logical_q
 
 HARDWARE / TOPOLOGY (read-only; populated in __init__ before init_mapping)
-- self.num_qubits:            int, total physical qubits on the backend
+- self.num_qubits:            int, the LENGTH of the mapping_dict / reverse_mapping_dict
+                              lists you must produce. It equals len(self.distance_matrix) + 1
+                              (one padding slot beyond the hardware). It is NOT a valid
+                              physical-qubit id range — see distance_matrix below.
 - self.backend:               adjacency list of the hardware coupling graph
                               (defaultdict[int, set[int]] from build_backend_graph)
 - self.backend_connections:   set of (phys_qA, phys_qB) tuples — directed edges (both orientations present)
-- self.distance_matrix:       2D matrix, distance_matrix[p_i][p_j] = shortest-path distance (≥1 for connected, 0 for self)
+- self.distance_matrix:       2D matrix, distance_matrix[p_i][p_j] = shortest-path distance (≥1 for connected, 0 for self).
+                              IT IS THE SOURCE OF TRUTH FOR THE PHYSICAL-QUBIT COUNT: valid
+                              physical qubit ids are exactly range(len(self.distance_matrix))
+                              == range(self.num_qubits - 1). NEVER index distance_matrix,
+                              physical_centrality, or self.backend with self.num_qubits-1
+                              (it is one past the last real qubit) — iterate physical qubits
+                              with `for p in range(len(self.distance_matrix))`, not range(self.num_qubits).
 - self.physical_centrality:   dict[int, float] — centrality score per physical qubit
                               (1 / sum_of_distances; higher = more central). Built by
                               build_physical_centrality_scores in src/mapping/routing.py.
@@ -62,6 +71,7 @@ At the moment init_mapping is called, the DAG has not yet been built. To extract
 
 INVARIANTS TO PRESERVE
 - `self.mapping_dict` and `self.reverse_mapping_dict` are LISTS (not dicts) of length `self.num_qubits`, indexed by qubit id.
+- Every PHYSICAL qubit you assign must be a valid id, i.e. in `range(len(self.distance_matrix))` (== `range(self.num_qubits - 1)`). There is one more list slot than there are physical qubits, so exactly one logical slot will end up as -1 after you back-fill — that is expected and satisfies the injection check (a single -1 is a unique value). When back-filling idle/unplaced logicals onto unused physicals, STOP when no unused physical remains (e.g. `if not free: break`); do not index past the end of your free-physical list.
 - For every logical qubit L appearing in `self.access`, `self.reverse_mapping_dict[self.mapping_dict[L]] == L`.
 - `len(set(self.mapping_dict)) == len(self.mapping_dict)` (injection).
 

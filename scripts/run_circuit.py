@@ -23,12 +23,12 @@ parser.add_argument("--circuit", type=str,
                     default="/home/jmsb00nd/Documents/auto-heuristics/benchmarks/qasmbench-large/adder_n64__78CYC.json", help="Path to circuit JSON file")
 parser.add_argument("--backend", type=str,
                     default="ibm_sherbrooke", help="Name of the backend")
-parser.add_argument("--initial", type=str, default="trivial",
+parser.add_argument("--initial", type=str, default="sabre",
                     help="Initial mapping method")
 parser.add_argument("--verbose", type=int, default=1, help="Verbosity level")
 parser.add_argument("--heuristic", type=str, default="qlosure",
                     help="Heuristic to use for mapping")
-parser.add_argument("--num_iterations", type=int, default=2,
+parser.add_argument("--num_iterations", type=int, default=1,
                     help="number of bidirectional passes")
 parser.add_argument("--competitors", action="store_true",
                     help="Run and compare with competitor mappers")

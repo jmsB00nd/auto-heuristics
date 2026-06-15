@@ -68,6 +68,7 @@ class EvolutionLoop:
         kg: KnowledgeGraph,
         budget: BudgetTracker,
         on_eval: Optional[EvalCallback] = None,
+        start_iteration: int = 0,
     ):
         self.config = config
         self.prompts = prompts
@@ -80,11 +81,18 @@ class EvolutionLoop:
         self.budget = budget
         self._on_eval = on_eval
 
+        # Ablation switches (default True = full qpilot).
+        self.use_kg = getattr(config, "use_kg", True)
+        self.use_crossover = getattr(config, "use_crossover", True)
+        self.use_mutation = getattr(config, "use_mutation", True)
+
         self.population: List[Dict] = []
         self.elitist: Optional[Dict] = None
         self.best_obj_overall: float = float("inf")
         self.best_individual_overall: Optional[Dict] = None
-        self.iteration: int = 0
+        # Continues numbering across outer evolution cycles so iter_* dirs and
+        # crossover/mutation child names (…_c{iter}_{idx}) never collide.
+        self.iteration: int = start_iteration
 
         seed = getattr(config, "seed", None)
         self._rng = random.Random(seed)
@@ -293,7 +301,7 @@ class EvolutionLoop:
         prompts = []
         sampled_hyps: List[Optional[Hypothesis]] = []
         for worse, better in pairs:
-            hyp = self.kg.sample_for_crossover(self._rng)
+            hyp = self.kg.sample_for_crossover(self._rng) if self.use_kg else None
             sampled_hyps.append(hyp)
             user = self.prompts.crossover_prompt.format(
                 variables=self.prompts.variables,
@@ -369,7 +377,7 @@ class EvolutionLoop:
         """Returns list of (parent_elite, mutant) — mutant carries hypothesis_id."""
         if self.elitist is None or not self.elitist.get("code"):
             return []
-        hyp = self.kg.sample_for_mutation()
+        hyp = self.kg.sample_for_mutation() if self.use_kg else None
         prompt = f"{self.prompts.system_generator}\n\n" + self.prompts.refinement_prompt.format(
             variables=self.prompts.variables,
             hypothesis=self.render_hypothesis(hyp),
@@ -542,9 +550,13 @@ class EvolutionLoop:
     # main loop 
 
     def evolve(self, max_iterations: Optional[int] = None) -> List[Dict]:
-        console.print(Rule("Evolution (HD-KG hypothesis-driven)", style="bold blue"))
+        mode = "HD-KG hypothesis-driven" if self.use_kg else "ablation: KG off"
+        console.print(Rule(f"Evolution ({mode})", style="bold blue"))
         if not getattr(self.config, "run_evolution", True):
             console.print("[yellow]run_evolution=False; skipping.[/yellow]")
+            return self.population
+        if not self.use_crossover and not self.use_mutation:
+            console.print("[yellow]Both crossover and mutation disabled; nothing to evolve.[/yellow]")
             return self.population
 
         iters_done = 0
@@ -552,9 +564,11 @@ class EvolutionLoop:
             if max_iterations is not None and iters_done >= max_iterations:
                 break
             successful = [p for p in self.population if p["exec_success"]]
-            if len(successful) < 2:
+            # Crossover needs ≥2 distinct parents; mutation-only needs just the elite.
+            min_needed = 2 if self.use_crossover else 1
+            if len(successful) < min_needed:
                 console.print(
-                    f"[yellow]Fewer than 2 successful individuals ({len(successful)}); "
+                    f"[yellow]Fewer than {min_needed} successful individuals ({len(successful)}); "
                     "cannot continue evolutionary loop.[/yellow]"
                 )
                 break
@@ -570,44 +584,47 @@ class EvolutionLoop:
             )
             best_at_iter_start = self.best_obj_overall
 
-            # select pairs
-            pool = self.population if (self.elitist is None or self.elitist in self.population) \
-                else [self.elitist] + self.population
-            selected = self.random_select(pool)
-            if selected is None:
-                console.print("[yellow]Selection could not find distinct-obj pairs; stopping.[/yellow]")
-                break
+            # select pairs (crossover only)
+            selected = None
+            if self.use_crossover:
+                pool = self.population if (self.elitist is None or self.elitist in self.population) \
+                    else [self.elitist] + self.population
+                selected = self.random_select(pool)
+                if selected is None:
+                    console.print("[yellow]Selection could not find distinct-obj pairs; stopping.[/yellow]")
+                    break
 
-            # trait extraction (top + bottom of population)
-            top, bottom = self.split_top_bottom()
-            self.extract_traits(top, bottom, iter_dir)
-
-            # hypothesis generation
-            self.generate_hypotheses(top, bottom, iter_dir)
+            # trait extraction + hypothesis generation (HD-KG only)
+            if self.use_kg:
+                top, bottom = self.split_top_bottom()
+                self.extract_traits(top, bottom, iter_dir)
+                self.generate_hypotheses(top, bottom, iter_dir)
 
             # crossover (hypothesis-conditioned)
-            triples = self.crossover(selected, iter_dir)
-            children = [t[2] for t in triples]
-            children = self._evaluate(children, phase=f"evolution/iter_{self.iteration}/crossover")
-            self._apply_kg_updates(triples, best_at_iter_start)
-            self.population.extend(children)
-            self.update_elite()
+            if self.use_crossover:
+                triples = self.crossover(selected, iter_dir)
+                children = [t[2] for t in triples]
+                children = self._evaluate(children, phase=f"evolution/iter_{self.iteration}/crossover")
+                self._apply_kg_updates(triples, best_at_iter_start)
+                self.population.extend(children)
+                self.update_elite()
 
-            if self.budget.exhausted():
-                save_json(iter_dir, "knowledge_graph.json", self.kg.to_dict(), quiet=True)
-                self.iteration += 1
-                break
+                if self.budget.exhausted():
+                    save_json(iter_dir, "knowledge_graph.json", self.kg.to_dict(), quiet=True)
+                    self.iteration += 1
+                    break
 
             # mutation (single mutation of the elite, highest-confidence hypothesis)
-            mutant_pairs = self.mutate(1, iter_dir)
-            mutants = [m for _e, m in mutant_pairs]
-            mutants = self._evaluate(mutants, phase=f"evolution/iter_{self.iteration}/mutation")
-            self._apply_kg_updates(
-                [(self.elitist, self.elitist, m) for _e, m in mutant_pairs],
-                best_at_iter_start,
-            )
-            self.population.extend(mutants)
-            self.update_elite()
+            if self.use_mutation:
+                mutant_pairs = self.mutate(1, iter_dir)
+                mutants = [m for _e, m in mutant_pairs]
+                mutants = self._evaluate(mutants, phase=f"evolution/iter_{self.iteration}/mutation")
+                self._apply_kg_updates(
+                    [(self.elitist, self.elitist, m) for _e, m in mutant_pairs],
+                    best_at_iter_start,
+                )
+                self.population.extend(mutants)
+                self.update_elite()
 
             # persist KG snapshot for this iteration
             save_json(iter_dir, "knowledge_graph.json", self.kg.to_dict(), quiet=True)
@@ -615,8 +632,11 @@ class EvolutionLoop:
             self.iteration += 1
             iters_done += 1
 
+        stop = self.budget.stop_reason()
+        stop_note = f", stop={stop}" if stop else ""
         console.print(
             f"[bold green]Evolution finished: FE={self.budget.current}, "
+            f"elapsed={self.budget.elapsed():.0f}s{stop_note}, "
             f"best={self.best_obj_overall:.2f}[/bold green]"
         )
         return self.population
