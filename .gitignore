@@ -12,3 +12,5 @@ outputs/results/
 outputs/experiment_results/
 
 manuscript/
+
+AHD_baselines/GUI/logs/

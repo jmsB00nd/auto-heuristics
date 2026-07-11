@@ -1,0 +1,8 @@
+name: PartEvo
+max_generations: 10
+max_sample_nums: 100
+pop_size: 16
+num_evaluators: 4
+initial_sample_nums_max: 50
+partition_method: kmeans
+partition_number: 4
